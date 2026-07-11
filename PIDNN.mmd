@@ -1,0 +1,296 @@
+---
+config:
+  layout: elk
+  elk:
+    mergeEdges: false
+    nodePlacementStrategy: NETWORK_SIMPLEX
+---
+flowchart LR
+
+    classDef nn fill:#744210,stroke:#d69e2e,stroke-width:2px,color:#fff;
+    classDef rl fill:#4a154b,stroke:#9f7aea,stroke-width:2px,color:#fff;
+    classDef pid fill:#276749,stroke:#48bb78,stroke-width:2px,color:#fff;
+    classDef sim fill:#1a365d,stroke:#2b6cb0,stroke-width:2px,color:#fff;
+    classDef pinn fill:#22543d,stroke:#68d391,stroke-width:2px,color:#fff;
+    classDef shield fill:#742a2a,stroke:#fc8181,stroke-width:2px,color:#fff;
+    classDef deploy fill:#2c5282,stroke:#63b3ed,stroke-width:2px,color:#fff;
+    classDef scenario fill:#553c9a,stroke:#b794f4,stroke-width:2px,color:#fff;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% СЦЕНАРИИ ОБУЧЕНИЯ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph ScenarioGen["0. Генератор сценариев обучения"]
+        direction TB
+
+        Sc1["Сухая ВПП"]:::scenario
+        Sc2["Мокрая ВПП"]:::scenario
+        Sc3["Лёд / низкий μ"]:::scenario
+        Sc4["Боковой ветер"]:::scenario
+        Sc5["Порывы ветра"]:::scenario
+        Sc6["Отказ NWS"]:::scenario
+        Sc7["Асимметрия тяги"]:::scenario
+        Sc8["Нарушение реверса"]:::scenario
+        Sc9["Шум датчиков"]:::scenario
+        Sc10["Domain Randomization"]:::scenario
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% СРЕДА
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph Environment["1. Среда симуляции (X-Plane 12 / Стенд Заказчика)"]
+        direction TB
+
+        Dynamics["Динамика ЛА\nКолёса, аэродинамика,\nреверс, тормоза, ветер"]:::sim
+
+        Sensors["Телеметрия\nV, a, ψ, r,\nCross Track Error,\nHeading Error"]:::sim
+
+        Actuators["Исполнительные механизмы\nРеверс\nТормоза\nРуление\nЗакрылки"]:::sim
+
+        Actuators --> Dynamics
+        Dynamics --> Sensors
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PINN
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph PINNBlock["2. PINN / PD-PINN Observer"]
+        direction TB
+
+        P0["История состояний\n(X_t ... X_t-n)"]:::pinn
+
+        P1["Temporal Encoder\nGRU / LSTM"]:::pinn
+
+        P2["Dense Layers"]:::pinn
+
+        P3["Physics Head"]:::pinn
+
+        Mu["μ (Сцепление ВПП)"]:::pinn
+        Wind["Боковой ветер"]:::pinn
+        BrakeEff["Эффективность тормозов"]:::pinn
+        NWSEff["Эффективность NWS"]:::pinn
+
+        P0 --> P1 --> P2 --> P3
+
+        P3 --> Mu
+        P3 --> Wind
+        P3 --> BrakeEff
+        P3 --> NWSEff
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PIDNN
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph PIDNN["3. PPO Actor : PIDNN Multi-Head"]
+        direction TB
+
+        A0["Состояние среды\n+\nОценки PINN"]:::nn
+
+        A1["Shared Encoder\nGRU / LSTM"]:::nn
+
+        A2["Shared Dense Features"]:::nn
+
+        A0 --> A1 --> A2
+
+        subgraph HeadingHead["Heading Head"]
+            direction TB
+
+            H1["Dense"]:::nn
+
+            H2["αp αi αd\nРуление"]:::nn
+        end
+
+        subgraph BrakeHead["Brake Head"]
+            direction TB
+
+            B1["Dense"]:::nn
+
+            B2["αp αi αd\nЛевый тормоз"]:::nn
+
+            B3["αp αi αd\nПравый тормоз"]:::nn
+        end
+
+        subgraph ReverseHead["Reverse Head"]
+            direction TB
+
+            R1["Dense"]:::nn
+
+            R2["αp αi αd\nЛевый реверс"]:::nn
+
+            R3["αp αi αd\nПравый реверс"]:::nn
+        end
+
+        subgraph FlapHead["Flap Head"]
+            direction TB
+
+            F1["Dense"]:::nn
+
+            F2["αp αi αd\nЗакрылки"]:::nn
+        end
+
+        A2 --> HeadingHead
+        A2 --> BrakeHead
+        A2 --> ReverseHead
+        A2 --> FlapHead
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% SHIELD
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph Shield["4. Runtime Assurance / Shield"]
+        direction TB
+
+        Bounds["Hard Bounds"]:::shield
+
+        Rate["Rate Limiter"]:::shield
+
+        OOD["OOD Detector"]:::shield
+
+        SafeSet["Projection To Safe Set"]:::shield
+
+        Fallback["Fallback\nКлассические PID\nили Автопилот"]:::shield
+
+        Bounds --> Rate
+        Rate --> OOD
+        OOD --> SafeSet
+        OOD --> Fallback
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PID КОНТУР
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph ClassicalControl["5. Классическое управление"]
+        direction TB
+
+        RefSpeed["Генератор V_ref(x)"]:::pid
+
+        Runway["Геометрия ВПП\nОсь ВПП"]:::pid
+
+        PIDSteer["PID Руления"]:::pid
+
+        PIDBrakeL["PID Тормоз Л"]:::pid
+        PIDBrakeR["PID Тормоз П"]:::pid
+
+        PIDRevL["PID Реверс Л"]:::pid
+        PIDRevR["PID Реверс П"]:::pid
+
+        PIDFlaps["PID Закрылков"]:::pid
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PPO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph PPOTraining["6. PPO Training Loop"]
+        direction TB
+
+        Critic["Critic Network\nV(s)"]:::rl
+
+        Adv["Advantage Estimation"]:::rl
+
+        PPOObj["L_PPO"]:::rl
+
+        Smooth["L_Smooth\nПлавность Gain"]:::rl
+
+        Phys["L_Phys\nФизический Residual"]:::rl
+
+        ShieldLoss["L_Shield\nШтраф за вмешательство Shield"]:::rl
+
+        Total["L = L_PPO\n+ λs L_Smooth\n+ λp L_Phys\n+ λsh L_Shield"]:::rl
+
+        Adam["AdamW"]:::rl
+
+        Critic --> Adv
+        Adv --> PPOObj
+
+        PPOObj --> Total
+        Smooth --> Total
+        Phys --> Total
+        ShieldLoss --> Total
+
+        Total --> Adam
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% DEPLOY
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    subgraph Deploy["7. Deployment"]
+        direction TB
+
+        Frozen["Замороженные веса\nPIDNN + PINN"]:::deploy
+
+        Runtime["Детерминированная система\nбез обучения"]:::deploy
+
+        Frozen --> Runtime
+    end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% ПОТОКИ ДАННЫХ
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    ScenarioGen --> Dynamics
+
+    Sensors --> P0
+
+    Sensors --> A0
+
+    Mu --> A0
+    Wind --> A0
+    BrakeEff --> A0
+    NWSEff --> A0
+
+    HeadingHead --> Bounds
+    BrakeHead --> Bounds
+    ReverseHead --> Bounds
+    FlapHead --> Bounds
+
+    SafeSet --> PIDSteer
+
+    SafeSet --> PIDBrakeL
+    SafeSet --> PIDBrakeR
+
+    SafeSet --> PIDRevL
+    SafeSet --> PIDRevR
+
+    SafeSet --> PIDFlaps
+
+    Sensors --> RefSpeed
+    Sensors --> Runway
+
+    RefSpeed --> PIDBrakeL
+    RefSpeed --> PIDBrakeR
+
+    RefSpeed --> PIDRevL
+    RefSpeed --> PIDRevR
+
+    Runway --> PIDSteer
+
+    PIDSteer --> Actuators
+
+    PIDBrakeL --> Actuators
+    PIDBrakeR --> Actuators
+
+    PIDRevL --> Actuators
+    PIDRevR --> Actuators
+
+    PIDFlaps --> Actuators
+
+    Sensors --> Critic
+
+    OOD --> ShieldLoss
+
+    Mu --> Phys
+    Wind --> Phys
+    BrakeEff --> Phys
+    NWSEff --> Phys
+
+    Adam --> PIDNN
+
+    Frozen -. экспорт .-> PIDNN
+    Frozen -. экспорт .-> PINNBlock
