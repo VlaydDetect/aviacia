@@ -12,9 +12,13 @@ Code comments and console output are in Russian.
 
 This is the R&D project **ИСМПУ** (shifr `Интеграл-КБО-МС-ГосНИИАС-ИСМПУ-2026`, due 2026-07-28). The
 work is moving from the current classical-PID prototype toward a **hybrid neural controller**: the
-classical PID loop stays as the plant, and a neural PIDNN actor (trained with PPO) generates
-*multiplicative corrections* to the PID gains plus channel-influence weights, guarded by a
+classical PID loop stays as the plant, and a **Neural PID Gain Scheduler (NPGS)** actor (trained with PPO)
+generates *multiplicative corrections* to the PID gains plus channel-influence weights, guarded by a
 deterministic **Shield** and, later, an optional physics-informed **PINN observer**.
+
+The NPGS is **not** a classic "PIDNN": the ТЗ forbids embedding the PID transfer function into the network,
+so the net only *predicts gain corrections* — it never becomes the controller. Full architecture in
+`implementation_plan.md` §10; targets **A330-300** (X-Plane training) and **МС-21** (bench deployment).
 
 ## Planning & reference documents
 
@@ -66,9 +70,10 @@ except: `PIDController` debug output went from `cprint` to `logging.debug`, sile
   (the ТЗ acceptance thresholds), `aircraft.py`.
 - `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`) and `loop.py` (the 20 Hz loop + `main()`).
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
-- `ismpu/envs/` — environment layer (Phase 1): `weather.py`, `sim_interface.py`, `scenario.py`,
-  `scenario_generator.py`. `observation.py`/`action.py`/`reward.py`/`rollout_env.py` come in Phase 2.
-- `ismpu/agent/`, `ismpu/gui/` — **not yet created**; later phases in the plan.
+- `ismpu/envs/` — environment + RL layer: `weather.py`, `sim_interface.py`, `scenario.py`,
+  `scenario_generator.py` (Phase 1) and `observation.py` / `action.py` / `reward.py` / `rollout_env.py` (Phase 2).
+- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` (done); `gain_scheduler.py` (NPGS
+  actor+critic) + `ppo.py` + `observer.py` come in Phases 4/7. `ismpu/gui/` — not yet created.
 
 ## X-Plane communication (`ismpu/io/xplane_connector.py`)
 
@@ -231,6 +236,33 @@ standalone, ahead of the actor.
 - Integration (Phase 4): `guard_coefficients(corrections, base_gains)` runs *before* `control_step`;
   `guard_command(command, runtime_state)` runs *after*, on the final `ControlsState`. Bridge helpers
   `base_gains_from_pids` / `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
+
+## Neural PID Gain Scheduler (NPGS) — actor/critic architecture (plan §10, not yet coded)
+
+The neural actor. **Renamed from "PIDNN"** because the ТЗ forbids embedding the PID transfer function in the
+net — NPGS keeps the classical PID as plant and only predicts multiplicative gain corrections + channel
+weights. Module will be `ismpu/agent/gain_scheduler.py` (Phase 4). Design is frozen; see `implementation_plan.md`
+§10 for the full spec. Shape and terminology when implementing:
+
+- **Input:** a window of `T` observation frames → `(B, T, 56)` (`T≈16` ≈ 0.8 s at 20 Hz). Windowed-recurrent
+  (RNN reprocesses the window each tick) rather than a stateful RNN — avoids PPO+hidden-state pitfalls and is
+  deterministic for deploy. The `rollout_env` history buffer must present the window as a **sequence** `(T,56)`
+  (it currently flattens; fix in Phase 4).
+- **Shared encoder** (actor + critic share it): input `LayerNorm` → time-distributed `Dense(256)→GELU→Dense(256)→
+  GELU` (+residual) → `GRU(256)×2` → `MultiheadAttention(256,4 heads)` + attention pooling → shared trunk
+  `Dense(256)→Dense(128)` (+skip) → `z_shared (128)`.
+- **Context Fusion (hierarchy):** a small branch off `z_shared` produces a **movement-phase** context `c (128)`
+  (touchdown / high-speed rollout / mid / taxi / stop; optional auxiliary phase-prediction loss from
+  groundspeed). Every head receives `[z_shared ⊕ c]` — this is what makes reverse heads go quiet below 60 kts
+  while brake heads take over, without hand-coding it.
+- **Heads** (`Dense(64)→Dense(32)→Linear`): Heading→α(runway_center, 3), Brake→α(3, duplicated to L/R —
+  symmetric braking, asymmetry via `w_lat`), Reverse→α(3, duplicated to L/R), Weights→`(w_lon,w_lat)`. That's
+  **11 policy outputs** expanded to the **17-dim `Corrections`** (order matches `shield.REGULATOR_ORDER` +
+  weights). Output bounded smoothly: `α = 1 + 0.5·tanh(z)` → `[0.5,1.5]` (= Shield level 1); `w = 1 + tanh(z)`.
+- **Policy:** tanh-squashed Gaussian (state-independent learnable `log_std`); mean heads init to ~0 gain so
+  `α≈1` at start ⇒ training begins ≈ classical (the identity invariant again). Greedy (deploy) = mean.
+- **Critic:** a **head** off `z_shared` (not a separate net) → `V(s)`.
+- **Downstream:** every output passes through the Shield before reaching the PID loop — the net can't bypass it.
 
 ## External bench interface (`ismpu/io/ics_connector.py`)
 
