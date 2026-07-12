@@ -188,6 +188,27 @@ The transport-agnostic seam between the controller and whatever it runs against 
   `difficulty ∈ [0,1]` (harder → more/heavier failures, stronger crosswind, lower μ, more noise). Deterministic
   per seed. `battery()` is the fixed acceptance set (nominal + failures + weather + combos).
 
+## Shield — safety contour (`ismpu/agent/shield.py`)
+
+Deterministic guard between the (future) neural actor and the classical PID loop (plan §9). It is **not**
+trained, is always active, and the network can't issue a command that bypasses it. Built and unit-tested
+standalone, ahead of the actor.
+
+- The actor's output is `Corrections`: multiplicative `α` per PID gain (5 regulators × `kp/ki/kd` = 15) plus
+  channel weights `w_lon/w_lat` (`ACTION_DIM = 17`; `from_vector`/`to_vector` ready for the net).
+- **Three levels + fallback:** (1) clip `α`/weights to bands; (2) apply corrections to base gains, then hard
+  bounds + non-negativity + per-tick rate-limit + OOD detector; (3) runtime checks on the resulting
+  `ControlsState` — reverse below 60 kts, brake jerk, heading divergence. OOD or a gross heading blow-out
+  latches a **fallback** to identity corrections (pure classical PID).
+- `ShieldReport` carries per-level activation flags, the `l_shield`/`l_smooth` penalty accumulators (fed to
+  the multi-component loss, plan §11), and the list of triggered rules (for the ТЗ 5.1.5 contribution
+  analysis).
+- **Identity invariant** (plan §1): `α = 1`, weights = 1 → effective gains == base and the Shield stays
+  silent — the same invariant the whole hybrid design rests on.
+- Integration (Phase 4): `guard_coefficients(corrections, base_gains)` runs *before* `control_step`;
+  `guard_command(command, runtime_state)` runs *after*, on the final `ControlsState`. Bridge helpers
+  `base_gains_from_pids` / `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
+
 ## External bench interface (`ismpu/io/ics_connector.py`)
 
 A separate UDP JSON bridge (`ICSInputs`/`ICSOutputs`/`ICSBenchConnector`) for a hardware/simulation test
