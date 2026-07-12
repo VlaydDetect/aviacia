@@ -11,8 +11,8 @@ from ismpu.io.xplane_connector import XPlaneConnectX
 from ismpu.io.datarefs import LATITUDE, LONGITUDE, GROUNDSPEED, TRUE_PSI
 from ismpu.control.system import ControllingSystem
 from ismpu.config.constants import DT, FREQ
-from ismpu.config.aircraft import A330_SETUP
-from ismpu.config.scenarios import ScenarioConfig, NWS_FAIL
+from ismpu.envs.weather import WeatherManager
+from ismpu.envs.scenario import Scenario, SCENARIO_PRESETS
 from ismpu.runtime.setup import setup_touchdown_uuee
 
 
@@ -26,10 +26,11 @@ def build_subscribed_drefs(freq: int = FREQ):
     ]
 
 
-def run(controller: ControllingSystem, xpc: XPlaneConnectX, *, aircraft_setup: dict = A330_SETUP):
-    """Прогоняет один эпизод пробега на уже настроенном контуре."""
+def run(controller: ControllingSystem, xpc: XPlaneConnectX, scenario: Scenario):
+    """Прогоняет один эпизод пробега на уже настроенном контуре по сценарию."""
     time.sleep(2)
-    setup_touchdown_uuee(xpc, **aircraft_setup)
+    setup_touchdown_uuee(xpc, **scenario.touchdown_kwargs())
+    WeatherManager(xpc).apply(scenario.weather)  # погода сценария (по умолчанию: ясно/штиль/сухо)
 
     print("Запуск системы удержания оси ВПП...")
     xpc.pauseSIM(False)
@@ -55,12 +56,17 @@ def run(controller: ControllingSystem, xpc: XPlaneConnectX, *, aircraft_setup: d
         controller.control_exception()
 
 
-def main(scenario: ScenarioConfig = NWS_FAIL, ip: str = "127.0.0.1", port: int = 49000):
-    """Точка входа: создать соединение, настроить контур под сценарий, запустить."""
+def main(preset: "str | Scenario" = "nws_fail", ip: str = "127.0.0.1", port: int = 49000):
+    """Точка входа: выбрать пресет по имени (или Scenario), настроить контур и запустить.
+
+    Готовые пресеты: `SCENARIO_PRESETS` ("default", "nws_fail", "left_reverse_fail",
+    "right_reverse_fail") — те же коэффициенты, что и раньше, плюс стандартная погода.
+    """
+    scenario = preset if isinstance(preset, Scenario) else SCENARIO_PRESETS[preset]
     xpc = XPlaneConnectX(ip=ip, port=port)
     controller = ControllingSystem(xpc=xpc)
-    scenario.apply(controller)
-    run(controller, xpc)
+    scenario.apply_control(controller)   # PID + активация связанного отказа (поведение прежнее)
+    run(controller, xpc, scenario)
 
 
 if __name__ == "__main__":

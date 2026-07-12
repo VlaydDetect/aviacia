@@ -13,6 +13,7 @@
 import numpy as np
 
 from ismpu.control.failures import FailureMode
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.envs.weather import WeatherState, RunwayCondition, FrictionProfile, WEATHER_PRESETS
 from ismpu.envs.scenario import Scenario, TouchdownSetup, SensorNoise
 
@@ -66,7 +67,7 @@ class ScenarioGenerator:
         scenario_id = f"gen-{self.seed}-{self._counter:04d}"
         scenario_seed = int(self.rng.integers(0, 2 ** 31 - 1))
         self._counter += 1
-        return Scenario(scenario_id=scenario_id, seed=scenario_seed, control_preset=preset,
+        return Scenario(scenario_id=scenario_id, seed=scenario_seed, control=SCENARIOS[preset],
                         weather=weather, failures=failures, touchdown=touchdown, sensor_noise=noise)
 
     def battery(self) -> list[Scenario]:
@@ -74,7 +75,7 @@ class ScenarioGenerator:
         items: list[Scenario] = []
 
         def add(sid, preset, weather, failures=()):
-            items.append(Scenario(scenario_id=sid, seed=0, control_preset=preset,
+            items.append(Scenario(scenario_id=sid, seed=0, control=SCENARIOS[preset],
                                   weather=weather, failures=tuple(failures)))
 
         # Штат + погода

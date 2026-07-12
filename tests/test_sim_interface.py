@@ -6,9 +6,11 @@ import pytest
 
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
+from ismpu.control.system import ControllingSystem
 from ismpu.envs.sim_interface import XPlaneBackend, ICSBackend, Telemetry
-from ismpu.envs.scenario import Scenario, TouchdownSetup, SensorNoise
+from ismpu.envs.scenario import Scenario, TouchdownSetup, SensorNoise, SCENARIO_PRESETS
 from ismpu.envs.scenario_generator import ScenarioGenerator
+from ismpu.config.scenarios import SCENARIOS, DEFAULT, NWS_FAIL
 from ismpu.envs.weather import WeatherState, RunwayCondition, FrictionProfile, WEATHER_PRESETS
 from ismpu.io.datarefs import (
     LATITUDE, LONGITUDE, GROUNDSPEED, TRUE_PSI, G_AXIL,
@@ -64,7 +66,7 @@ def test_xplane_reset_sequence_and_failure_injection():
     fake = FakeXPC()
     be = XPlaneBackend(xpc=fake, settle_s=0.0)
     scenario = Scenario(
-        scenario_id="t", seed=1, control_preset="default",
+        scenario_id="t", seed=1, control=SCENARIOS["default"],
         weather=WeatherState(runway_friction=RunwayCondition.WET.value),
         failures=(FailureMode.ENGINE_OUT_LEFT,),
         touchdown=TouchdownSetup(lateral_offset_m=3.0, heading_offset_deg=2.0),
@@ -218,7 +220,7 @@ def test_ics_environment_methods_are_noop():
 
 def test_scenario_roundtrip_with_profile_and_failures():
     scenario = Scenario(
-        scenario_id="s1", seed=7, control_preset="nws_fail",
+        scenario_id="s1", seed=7, control=SCENARIOS["nws_fail"],
         weather=WeatherState.from_crosswind(
             15.0, 5.0, gust_kts=8.0,
             friction_profile=FrictionProfile([(0.0, 0.0), (600.0, 11.0)]),
@@ -270,3 +272,51 @@ def test_battery_covers_key_cases_and_roundtrips():
     assert {"nominal", "nws_fail", "icy", "crosswind"} <= ids
     for s in battery:
         assert Scenario.from_dict(s.to_dict()).to_dict() == s.to_dict()
+
+
+def test_generator_embeds_control_config():
+    s = ScenarioGenerator(seed=1).sample(difficulty=0.0)
+    # control — это ScenarioConfig из общего реестра (не строка-ключ)
+    assert s.control is SCENARIOS[s.control.name]
+    assert s.control is DEFAULT  # без отказов → базовый пресет
+
+
+# --------------------------------------------------------------------------- #
+# Единые пресеты сценариев (управление + стандартная погода)
+# --------------------------------------------------------------------------- #
+
+def test_presets_mirror_control_registry_with_same_pids():
+    assert set(SCENARIO_PRESETS) == set(SCENARIOS)
+    # инвариант: PID-настройки не менялись — control это тот же самый объект
+    assert SCENARIO_PRESETS["default"].control is DEFAULT
+    assert SCENARIO_PRESETS["nws_fail"].control is NWS_FAIL
+
+
+def test_presets_carry_standard_weather():
+    for name, scenario in SCENARIO_PRESETS.items():
+        w = scenario.weather
+        assert w.wind_speed_kts == 0.0          # штиль
+        assert w.gust_kts == 0.0
+        assert w.runway_friction == 0.0         # сухо (Dry)
+        assert w.rain_pct == 0.0                # ясно
+
+
+def test_preset_failures_match_control_preset():
+    assert SCENARIO_PRESETS["default"].failures == ()
+    assert SCENARIO_PRESETS["nws_fail"].failures == (FailureMode.NWS_FAIL,)
+    assert SCENARIO_PRESETS["left_reverse_fail"].failures == (FailureMode.REVERSE_LEFT_FAIL,)
+
+
+def test_preset_apply_control_matches_direct_config_apply():
+    # apply_control делегирует в ScenarioConfig.apply → поведение прежнее (NWS активируется)
+    controller = ControllingSystem(xpc=FakeXPC())
+    SCENARIO_PRESETS["nws_fail"].apply_control(controller)
+    assert controller.failures.state.steering_eff == 0.0
+
+
+def test_preset_roundtrips_through_dict():
+    for name in SCENARIO_PRESETS:
+        s = SCENARIO_PRESETS[name]
+        restored = Scenario.from_dict(s.to_dict())
+        assert restored.control is s.control      # разрешается по имени в общий реестр
+        assert restored.to_dict() == s.to_dict()

@@ -39,10 +39,11 @@ Read these before making architectural changes — they define the target design
   Python 3.14): `numpy`, `pandas`, `termcolor`, `pytest`, plus Jupyter (`ipykernel`). `torch`/`gymnasium`
   are declared as the optional `rl` extra for the upcoming neural work but not yet used.
 - Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell).
-- **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`, which just imports
-  from `ismpu` and calls `run(...)`). Requires a running X-Plane 12 on `127.0.0.1:49000`. The 20 Hz loop
-  runs until `KeyboardInterrupt`, which resets all controls. Pick a scenario via
-  `ismpu.config.scenarios.SCENARIOS["nws_fail" | "default" | ...]`.
+- **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`, which imports from
+  `ismpu` and calls `run(...)`). Requires a running X-Plane 12 on `127.0.0.1:49000`. The 20 Hz loop runs
+  until `KeyboardInterrupt`, which resets all controls. Pick a prepared preset by name —
+  `main("nws_fail" | "default" | "left_reverse_fail" | "right_reverse_fail")` from
+  `ismpu.envs.scenario.SCENARIO_PRESETS` (control tuning + standard weather bundled).
 - **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). These are
   simulator-free — they check PID numerics, tracker geodesy, reference-speed curves, and one full
   `control_step` through a mock connector. Full-trajectory parity with the old notebook still needs X-Plane
@@ -174,10 +175,15 @@ The transport-agnostic seam between the controller and whatever it runs against 
     tracked in `active_failures`; their effect comes from the controller's command degradation (`FailureManager`).
   - **`ICSBackend`** (deployment) — wraps `ICSBenchConnector`: `ICSInputs → Telemetry`, `ControlsState →
     ICSOutputs` (mapping provisional pending the ПИВ spec). Weather/failures/teleport are the bench's job → no-ops.
-- **`scenario.py`** — `Scenario` (serializable via `to_dict`/`from_dict` for reproducible eval batteries):
-  `control_preset` (key into `config.scenarios.SCENARIOS`), `weather` (`WeatherState`), `failures`, `touchdown`
-  (`TouchdownSetup` with lateral/heading offset), `sensor_noise`. `SimInterface.reset` applies the environment
-  parts; the RL env (Phase 2) additionally configures the controller from `control_preset`.
+- **`scenario.py`** — `Scenario` is the **single unified episode descriptor** (fixes the earlier split where
+  the generator made `Scenario` but the loop used bare `ScenarioConfig`). It **embeds** the control tuning
+  object `control: ScenarioConfig` (from `config.scenarios`, PID unchanged) plus `weather` (`WeatherState`),
+  `failures`, `touchdown` (`TouchdownSetup` with lateral/heading offset), `sensor_noise`. Serializable
+  (`to_dict`/`from_dict`; `control` stored by its preset name). `SCENARIO_PRESETS` = ready-to-run scenarios,
+  same keys as `config.scenarios.SCENARIOS`, each bundling a control preset with **standard weather (clear /
+  calm / dry)**. `scenario.apply_control(controller)` sets up the PIDs; `SimInterface.reset` applies the
+  environment parts. **The 20 Hz loop selects a preset by name** — `python -m ismpu.runtime.loop` runs
+  `main("nws_fail")`; `run()` applies the scenario's weather via `WeatherManager` before the episode.
 - **`scenario_generator.py`** — `ScenarioGenerator(seed)`: domain randomization across all axes, curriculum via
   `difficulty ∈ [0,1]` (harder → more/heavier failures, stronger crosswind, lower μ, more noise). Deterministic
   per seed. `battery()` is the fixed acceptance set (nominal + failures + weather + combos).
