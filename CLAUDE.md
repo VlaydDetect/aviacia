@@ -188,6 +188,29 @@ The transport-agnostic seam between the controller and whatever it runs against 
   `difficulty ∈ [0,1]` (harder → more/heavier failures, stronger crosswind, lower μ, more noise). Deterministic
   per seed. `battery()` is the fixed acceptance set (nominal + failures + weather + combos).
 
+## RL environment (`ismpu/envs/`, Phase 2)
+
+The Gymnasium-compatible training env wrapping `SimInterface` + the classical controller (plan §5/§6).
+
+- **`observation.py`** — `ObservationBuilder.build(...)` → a **56-dim** normalized frame (geometry 4 / speed 4 /
+  last controls 5 / PID×5 dynamic state 30 / failure flags 3 / weather 5 / **observer slots 5**, zeroed via
+  `ObserverEstimate` until Phase 7). `FEATURE_NAMES` fixes the order; invalid telemetry → zero frame.
+- **`agent/normalization.py`** — the normalization contract: **fixed physical scales** (constants, not batch
+  statistics — determinism at deploy), `snapshot()` serialized with the weights.
+- **`action.py`** — action is `(17,) = [α×15, w_lon, w_lat]` (same layout as `Corrections`). `apply_corrections`
+  writes effective gains into `controller.pids` and channel weights into the channels (optionally via Shield).
+  `IDENTITY_ACTION` (all α=1, weights=1) must reproduce classical behaviour.
+- **`reward.py`** — per-component reward (lateral / speed / jerk / shield / heading / instability), thresholds
+  from `config/requirements.py`. Pure function.
+- **`rollout_env.py`** — `RolloutEnv(reset/step)`, obs-history ring buffer, optional Shield in the inference
+  path. Gymnasium is imported **optionally** (spaces are `Box` if installed, else a tiny `_SimpleBox`).
+  **Identity invariant:** `env.step(IDENTITY_ACTION)` (shield off) is bit-for-bit equal to the classical
+  `control_step` — the invariant the whole hybrid design rests on (test `test_env_identity_parity...`).
+- Small additive control-loop hooks (classical behaviour unchanged at defaults): `PIDController.last_output`,
+  channel `w_lon`/`w_lat` (× PID outputs before `clamp_all`), `ControllingSystem.control_step(send=False)` and
+  `set_channel_weights`. The env sends commands via `SimInterface.step`, but the controller reads telemetry from
+  `xpc.current_dref_values`, so for training `sim` and `controller` must share one X-Plane connector.
+
 ## Shield — safety contour (`ismpu/agent/shield.py`)
 
 Deterministic guard between the (future) neural actor and the classical PID loop (plan §9). It is **not**

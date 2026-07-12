@@ -133,7 +133,7 @@ tests/
 
 ---
 
-## 5. Observation Space (полный вектор состояния)
+## 5. Observation Space (полный вектор состояния) — реализовано (`envs/observation.py`)
 
 Собирается в `envs/observation.py` из телеметрии (`SimInterface`), состояния классического контура и
 (в будущем) оценок обсервера. **Все компоненты нормируются** фиксированными константами из
@@ -183,7 +183,7 @@ Shield/актор начнут адаптировать и границы). По
 
 ---
 
-## 6. Action Space (действие актора)
+## 6. Action Space (действие актора) — реализовано (`envs/action.py`)
 
 Актор выдаёт **мультипликативные поправки**, а не абсолютные величины (философия §1).
 
@@ -407,29 +407,37 @@ loop через `SimInterface` на живом X-Plane — ручная пров
 (телеметрия + failure-DataRef'ы); `tests/test_sim_interface.py` (17 тестов: бэкенды через mock, инъекция
 отказов, сериализация `Scenario`, детерминизм и валидность генератора). Всего в наборе — 44 теста.
 
-### Этап 2 — Observation/Action Space + RL-среда
+### Этап 2 — Observation/Action Space + RL-среда — ✅ ВЫПОЛНЕНО (в коде)
 
 **Цель:** Gymnasium-среда поверх `SimInterface` + классического контура; выполнить инвариант «identity ==
 классика». См. §5, §6.
 
-**Состав работ:**
-- `envs/observation.py`: сборка вектора состояния (геометрия / скорость / последнее управление / PID×5 /
-  отказы / погода) + **зарезервированные слоты обсервера** (нулями); возвращает один кадр.
-- `agent/normalization.py`: фиксированные `mean/scale` (физические пределы), сериализуемые вместе с весами;
-  единый контракт train↔deploy.
-- `envs/action.py`: пространство действий — поправки `(α_p, α_i, α_d)` на каждый регулятор + веса каналов
-  `w_lon/w_lat`; применение поправок к копии базовых `Kp/Ki/Kd`; веса как множители к выходам каналов перед
-  `clamp_all`.
-- `envs/rollout_env.py`: Gymnasium `Env` (`reset/step`); кольцевой буфер истории `obs` (глубина `n`);
-  `envs/reward.py` — покомпонентный reward, пороги из `config/requirements.py` (§11).
-- Заложить швы обсервера: тип `ObserverEstimate` (заглушка нулями/ground-truth), слоты в obs (§12).
+**Итог:**
+- ✅ `envs/observation.py`: `ObservationBuilder` — вектор **56** признаков (геометрия 4 / скорость 4 /
+  последнее управление 5 / PID×5 по 6 = 30 / отказы 3 / погода 5 / **слоты обсервера 5**, нулями через
+  `ObserverEstimate`). `FEATURE_NAMES` фиксирует порядок; невалидная телеметрия → нулевой кадр.
+- ✅ `agent/normalization.py`: фиксированные физические масштабы (константы, не «плавающая» статистика),
+  `snapshot()` для сериализации вместе с весами — единый контракт train↔deploy.
+- ✅ `envs/action.py`: действие `(17,) = [α×15, w_lon, w_lat]` (layout `Corrections`); `IDENTITY_ACTION`;
+  `apply_corrections` пишет эффективные gain'ы в `controller.pids` и веса в каналы (опц. через Shield).
+  Веса каналов реализованы в `channels.py` (`w_lon`/`w_lat`, множители к выходам PID перед `clamp_all`;
+  =1 → классика) + `ControllingSystem.set_channel_weights`.
+- ✅ `envs/reward.py`: покомпонентный reward (боковое, скорость, рывки, Shield, курс, нестабильность),
+  пороги из `config/requirements.py`; чистая функция.
+- ✅ `envs/rollout_env.py`: `RolloutEnv` (Gymnasium-совместимый API `reset/step`), кольцевой буфер истории
+  `obs`, опц. Shield в inference-пути. Gymnasium импортируется опционально (spaces=`Box` или `_SimpleBox`).
+- ✅ Швы обсервера заложены: `ObserverEstimate` + 5 слотов в obs (§12).
+- ✅ Мелкие добавки в контур (аддитивные, поведение классики не меняют): `PIDController.last_output`
+  (для obs), `w_lon/w_lat` в каналах, `ControllingSystem.control_step(send=False)` (вставка Shield до
+  отправки), `set_channel_weights`.
 
-**Критерий готовности:** `env.step` с тождественными поправками (α=1, веса базовые) бит-в-бит совпадает с
-текущим классическим `control_step` (тест `test_env_identity_parity`); все компоненты obs в заявленных
-диапазонах нормализации.
+**Критерий готовности:** ✅ `env.step(IDENTITY_ACTION)` при `shield=None` **бит-в-бит** совпадает с
+классическим `control_step` (тест `test_env_identity_parity...`), и то же при вставленном Shield (identity →
+no-op); все признаки obs в `[-1, 1]`.
 
 **Артефакты:** `envs/{observation,action,reward,rollout_env}.py`, `agent/normalization.py`;
-тесты: identity-паритет, диапазоны нормализации, границы `action`.
+`tests/test_rollout_env.py` (12 тестов: identity-паритет ±Shield, диапазоны obs, границы action, reward,
+API среды, сериализация нормировки). Всего в наборе — 77 тестов.
 
 ### Этап 3 — Shield (защитный контур) — ✅ ВЫПОЛНЕНО (в коде)
 
@@ -561,6 +569,6 @@ GUI демонстрирует отличительные особенности
 
 ---
 
-*Выполнено: Этап 0 (§4), Этап 1 (§15), Shield/Этап 3 (§9). Следующий шаг — Этап 2: Observation/Action
-Space + `rollout_env` (Gymnasium), с инвариантом «identity-поправки == классика» (§5, §6). Shield к этому
-моменту готов и встраивается в inference-путь актора на Этапе 4.*
+*Выполнено: Этапы 0 (§4), 1 (§15), 2 (§15) и Shield/Этап 3 (§9). Следующий шаг — Этап 4: PIDNN-актор +
+критик + PPO с многокомпонентным loss (§10, §11), обучение с domain randomization; Shield и RL-среда уже
+готовы. Опционально параллельно — Этап 7 (PINN-обсервер) на заложенных швах.*

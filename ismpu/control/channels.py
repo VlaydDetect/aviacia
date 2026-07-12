@@ -88,6 +88,7 @@ class LongitudinalChannel:
         self.pid_rev_r = pid_rev_r
 
         self.traveled_distance_m = 0.0
+        self.w_lon = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
 
         print("[LongitudinalChannel] Запуск продольного канала.")
 
@@ -106,15 +107,15 @@ class LongitudinalChannel:
         # Глобальная ошибка по скорости. >0 означает, что мы едем слишком быстро
         error = current_speed_ms - ref_speed_ms
 
-        # 1. Расчет тормозов (Hydraulic Brakes)
-        state.cmd_brake_l = self.pid_brake_l.compute(error, dt)
-        state.cmd_brake_r = self.pid_brake_r.compute(error, dt)
+        # 1. Расчет тормозов (Hydraulic Brakes). w_lon — вес влияния канала (=1 у классики).
+        state.cmd_brake_l = self.w_lon * self.pid_brake_l.compute(error, dt)
+        state.cmd_brake_r = self.w_lon * self.pid_brake_r.compute(error, dt)
 
         # 2. Расчет реверса (Thrust Reversers) с учетом эксплуатационного лимита
         if current_speed_kts > 60.0:
             # Скорость безопасна для реверса
-            state.cmd_rev_l = self.pid_rev_l.compute(error, dt)  # Инверсия знака для X-Plane
-            state.cmd_rev_r = self.pid_rev_r.compute(error, dt)
+            state.cmd_rev_l = self.w_lon * self.pid_rev_l.compute(error, dt)  # Инверсия знака для X-Plane
+            state.cmd_rev_r = self.w_lon * self.pid_rev_r.compute(error, dt)
         else:
             # Скорость ниже 60 узлов - принудительное отключение реверса.
             state.cmd_rev_l = 0.0
@@ -145,6 +146,7 @@ class LateralChannel:
         self.tracker = tracker
         self.steering_brake_gain = steering_brake_gain
         self.steering_rev_gain = steering_rev_gain
+        self.w_lat = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
 
         print("[LateralChannel] Запуск латерального канала.")
 
@@ -161,7 +163,8 @@ class LateralChannel:
         guidance = self.tracker.guidance(lat, lon, heading, groundspeed_ms)
 
         error = guidance["heading_error_deg"]
-        state.rudder_cmd = self.pid.compute(error, dt)
+        # w_lat — вес влияния латерального канала (=1 у классики); масштабирует руль и дифф. микс.
+        state.rudder_cmd = self.w_lat * self.pid.compute(error, dt)
 
         diff_brake = state.rudder_cmd * self.steering_brake_gain  # Коэффициент микширования
         state.cmd_brake_l -= diff_brake

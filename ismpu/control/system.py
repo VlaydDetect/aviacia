@@ -51,13 +51,21 @@ class ControllingSystem:
         self.lateral_channel.steering_brake_gain = steering_brake_gain
         self.lateral_channel.steering_rev_gain = steering_rev_gain
 
+    def set_channel_weights(self, w_lon: float, w_lat: float):
+        """Веса влияния каналов (актор, §6): множители к выходам каналов. 1.0 = классика."""
+        self.longitudinal_channel.w_lon = w_lon
+        self.lateral_channel.w_lat = w_lat
+
     def set_velocity_law(self, law: VelocityLaw):
         self.longitudinal_channel.trajectory.law = law
 
     def apply_failure(self, mode: FailureMode):
         self.failures.activate(mode)
 
-    def control_step(self, dt: float) -> bool:
+    def control_step(self, dt: float, send: bool = True) -> bool:
+        """Такт управления. `send=False` — вычислить команды в `self.state`, но НЕ отправлять
+        (для RL-среды: вставить Shield.guard_command и роутинг через SimInterface перед отправкой).
+        `send=True` (по умолчанию) — прежнее поведение классического цикла."""
         self.longitudinal_channel.calc_commands(dt, self.state)
         self.lateral_channel.calc_commands(dt, self.state)
         self.state.clamp_all(self.pids)
@@ -66,7 +74,8 @@ class ControllingSystem:
             return True
 
         self.state.apply_failures(self.failures.state)
-        self.state.send_commands(self.xpc)
+        if send:
+            self.state.send_commands(self.xpc)
 
         return False
 

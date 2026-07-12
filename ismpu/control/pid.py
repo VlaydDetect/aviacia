@@ -34,6 +34,7 @@ class PIDController:
         self.integral_decay = integral_decay  # Коэффициент экспоненциального затухания интеграла
         self.der_filter_tf = der_filter_tf  # Постоянная времени фильтра низких частот D-составляющей (T_f в секундах)
         self.filtered_derivative = 0.0  # Накопленное отфильтрованное значение производной
+        self.last_output = 0.0  # Последний зажатый выход (для Observation Space)
 
     def compute(self, error: float, dt: float):
         if dt <= 0.0:
@@ -68,7 +69,8 @@ class PIDController:
         self.prev_error = error
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
 
-        return self.clamp(output)
+        self.last_output = self.clamp(output)
+        return self.last_output
 
     def clamp(self, value: float) -> float:
         return max(self.min_out, min(self.max_out, value))
