@@ -65,7 +65,9 @@ except: `PIDController` debug output went from `cprint` to `logging.debug`, sile
   (the ТЗ acceptance thresholds), `aircraft.py`.
 - `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`) and `loop.py` (the 20 Hz loop + `main()`).
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
-- `ismpu/envs/`, `ismpu/agent/`, `ismpu/gui/` — **not yet created**; they belong to later phases in the plan.
+- `ismpu/envs/` — environment layer (Phase 1): `weather.py`, `sim_interface.py`, `scenario.py`,
+  `scenario_generator.py`. `observation.py`/`action.py`/`reward.py`/`rollout_env.py` come in Phase 2.
+- `ismpu/agent/`, `ismpu/gui/` — **not yet created**; later phases in the plan.
 
 ## X-Plane communication (`ismpu/io/xplane_connector.py`)
 
@@ -132,6 +134,53 @@ from draft notebook cells and still need calibration.
   use `cprint`.
 - Gains are **empirically tuned per aircraft and per failure case** and are fragile. When changing plant
   behavior, expect to re-tune rather than derive.
+
+## Weather control (`ismpu/envs/weather.py`)
+
+Standalone environment subsystem, modelled on `FailureManager` — groundwork for the scenario generator
+(plan §8, `SimInterface.apply_weather`). `WeatherManager(xpc)` writes X-Plane 12's **writable** weather
+via the `sim/weather/region/*` DataRefs (the old top-level `sim/weather/wind_*` are all `DEPRECATED`/
+`REPLACED` — named constants live in `io/datarefs.py` under the `WX_*` prefix).
+
+- `WeatherState` is the config dataclass (wind in **knots**, direction "from" in ° true, gusts via shear,
+  turbulence 0–10, `variability_pct`, `runway_friction`, rain, visibility in **metres**, temperature).
+  `WeatherManager.apply(state)` pushes it all at once (`change_mode = Static`, `update_immediately = 1` so
+  it takes effect now, not on the 60 s cycle); wind/shear/turbulence are written across all 13 atmospheric
+  layers.
+- **Wind is set by speed + direction**, so `compose_wind`/`decompose_wind` (and `WeatherState.from_crosswind`)
+  convert to/from crosswind+headwind components relative to `RWY_HEADING_TRUE`.
+- **`runway_friction` is a single global enum 0–15** (Dry=0 … snowy/icy=15) — X-Plane's only μ lever;
+  there is **no per-position runway friction**. `RunwayCondition` names the levels. "Variable friction along
+  the runway" is therefore a `FrictionProfile` (distance→level step function): `WeatherManager.update(distance_m)`
+  re-sends `runway_friction` only when the level changes, so the control loop must call it each tick when a
+  profile is active.
+- `WEATHER_PRESETS` (clear_dry / wet / puddly / icy / crosswind / gusty_crosswind / low_visibility /
+  variable_friction) are the seed states the scenario generator will sample. `read_effective_wind` /
+  `read_crosswind` read the aircraft-side effective wind for diagnostics/observer.
+
+## Sim interface & scenarios (`ismpu/envs/`)
+
+The transport-agnostic seam between the controller and whatever it runs against (plan §7/§8, Phase 1).
+
+- **`sim_interface.py`** — `SimInterface` (ABC): `reset(scenario)` / `step(command)` / `read_telemetry` /
+  `apply_weather` / `inject_failure` / `clear_failures` / `teleport_touchdown` / `pause` / `update` / `close`.
+  `reset`/`step`/`read_telemetry` return a raw `Telemetry` dataclass (SI units; `None` for fields a backend
+  can't supply, `valid=False` when telemetry is missing). Lives in `envs/`, **not** `io/`, because it depends
+  on `WeatherState`/`FailureMode`/`Scenario` — keeping it in `io/` would break "io = transport only".
+  - **`XPlaneBackend`** (training) — wraps `XPlaneConnectX`: extended telemetry subscription, a *lean* fast
+    teleport (with lateral/heading offset, no `reload_scenery`/30 s wait — unlike `runtime/setup.py`), weather
+    via `WeatherManager`, and failure injection via the real engine/reverser DataRefs (`rel_engfai{N}` /
+    `rel_revers{N}`, enum `6`=fail). **NWS and thrust-degrade have no X-Plane failure DataRef** → they're only
+    tracked in `active_failures`; their effect comes from the controller's command degradation (`FailureManager`).
+  - **`ICSBackend`** (deployment) — wraps `ICSBenchConnector`: `ICSInputs → Telemetry`, `ControlsState →
+    ICSOutputs` (mapping provisional pending the ПИВ spec). Weather/failures/teleport are the bench's job → no-ops.
+- **`scenario.py`** — `Scenario` (serializable via `to_dict`/`from_dict` for reproducible eval batteries):
+  `control_preset` (key into `config.scenarios.SCENARIOS`), `weather` (`WeatherState`), `failures`, `touchdown`
+  (`TouchdownSetup` with lateral/heading offset), `sensor_noise`. `SimInterface.reset` applies the environment
+  parts; the RL env (Phase 2) additionally configures the controller from `control_preset`.
+- **`scenario_generator.py`** — `ScenarioGenerator(seed)`: domain randomization across all axes, curriculum via
+  `difficulty ∈ [0,1]` (harder → more/heavier failures, stronger crosswind, lower μ, more noise). Deterministic
+  per seed. `battery()` is the fixed acceptance set (nominal + failures + weather + combos).
 
 ## External bench interface (`ismpu/io/ics_connector.py`)
 

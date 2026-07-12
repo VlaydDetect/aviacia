@@ -26,6 +26,9 @@ class XPlaneConnectX():
         self.reverse_index = {}
         self.current_dref_values = {}
 
+    def reload_scenery(self):
+        self.sendCMND("sim/operation/reload_scenery")
+
     def subscribeDREFs(self, subscribed_drefs: list[Tuple[str, int]], history: float = 0.0, timeout: float = 5.0,
                        retry_interval: float = 0.5) -> None:
         """Permanently subscribe to a list of DataRefs with a certain frequency. This is the prefered method for obtaining
