@@ -40,18 +40,30 @@ Read these before making architectural changes — they define the target design
 ## Environment & running
 
 - Dependencies are in `pyproject.toml` / `requirements.txt` (also live in the committed-out `.venv/`,
-  Python 3.14): `numpy`, `pandas`, `termcolor`, `pytest`, plus Jupyter (`ipykernel`). `torch`/`gymnasium`
-  are declared as the optional `rl` extra for the upcoming neural work but not yet used.
-- Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell).
+  Python 3.14): `numpy`, `pandas`, `termcolor`, `pytest`, plus Jupyter (`ipykernel`). `torch` (2.12,
+  **cu132** — installed in `.venv`) and `gymnasium` are the optional `rl` extra: `torch` is now used by the
+  NPGS/PPO layer (Phase 4); `gymnasium` stays optional (`rollout_env` works without it).
+- Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell). **The `.venv` is the real
+  environment** — bare `python` on PATH is a separate 3.14 without torch/pytest. Run tests and training via
+  `.venv\Scripts\python.exe` (or the activated venv).
 - **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`, which imports from
   `ismpu` and calls `run(...)`). Requires a running X-Plane 12 on `127.0.0.1:49000`. The 20 Hz loop runs
   until `KeyboardInterrupt`, which resets all controls. Pick a prepared preset by name —
   `main("nws_fail" | "default" | "left_reverse_fail" | "right_reverse_fail")` from
   `ismpu.envs.scenario.SCENARIO_PRESETS` (control tuning + standard weather bundled).
-- **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). These are
-  simulator-free — they check PID numerics, tracker geodesy, reference-speed curves, and one full
-  `control_step` through a mock connector. Full-trajectory parity with the old notebook still needs X-Plane
-  and is a manual check.
+- **Train the NPGS:** `python -m ismpu.runtime.train` (needs X-Plane). Builds env + controller on **one
+  shared connector**, PPO + curriculum, checkpoints to `checkpoints/`. Offline (no X-Plane) validation of the
+  PPO loop: `ismpu.runtime.train.smoke_train(env, provider, updates=...)` with a scripted backend (see
+  `tests/test_ppo.py`).
+- **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). Run under the
+  venv (has pytest + torch). Simulator-free — PID numerics, tracker geodesy, reference-speed curves, one full
+  `control_step` through a mock connector, plus the NPGS/PPO layer (network shapes/identity, GAE, loss terms,
+  end-to-end PPO on a scripted sim). torch-dependent tests are guarded by `pytest.importorskip("torch")`.
+  Full-trajectory parity with the old notebook still needs X-Plane and is a manual check.
+- **Known snag:** `PIDController.compute` (and channel status lines) call `cprint` unconditionally every tick.
+  Fine for one manual run, but at 20 Hz × 5 regulators it floods the console and throttles training —
+  `train.py` calls `silence_control_console()` to no-op those `cprint`s during training. Consider gating the
+  `cprint` in `pid.py`/`channels.py` behind the logger instead.
 - `main.py` and `env.py` at the repo root are **superseded, untracked experiments** — ignore them; the
   package is the source of truth. They can be deleted.
 
@@ -68,12 +80,13 @@ except: `PIDController` debug output went from `cprint` to `logging.debug`, sile
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — edit here to change runway), `constants.py`,
   `scenarios.py` (PID presets per scenario, extracted from the notebook cells), `requirements.py`
   (the ТЗ acceptance thresholds), `aircraft.py`.
-- `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`) and `loop.py` (the 20 Hz loop + `main()`).
+- `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`), `loop.py` (the 20 Hz loop + `main()`), and
+  `train.py` (Phase 4: PPO training loop + `smoke_train`). `evaluate.py`/`deploy.py` come in Phases 5/6.
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
 - `ismpu/envs/` — environment + RL layer: `weather.py`, `sim_interface.py`, `scenario.py`,
   `scenario_generator.py` (Phase 1) and `observation.py` / `action.py` / `reward.py` / `rollout_env.py` (Phase 2).
-- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` (done); `gain_scheduler.py` (NPGS
-  actor+critic) + `ppo.py` + `observer.py` come in Phases 4/7. `ismpu/gui/` — not yet created.
+- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_scheduler.py` (NPGS
+  actor+critic) + `ppo.py` (all done). `observer.py` comes in Phase 7. `ismpu/gui/` — not yet created.
 
 ## X-Plane communication (`ismpu/io/xplane_connector.py`)
 
@@ -207,10 +220,11 @@ The Gymnasium-compatible training env wrapping `SimInterface` + the classical co
   `IDENTITY_ACTION` (all α=1, weights=1) must reproduce classical behaviour.
 - **`reward.py`** — per-component reward (lateral / speed / jerk / shield / heading / instability), thresholds
   from `config/requirements.py`. Pure function.
-- **`rollout_env.py`** — `RolloutEnv(reset/step)`, obs-history ring buffer, optional Shield in the inference
-  path. Gymnasium is imported **optionally** (spaces are `Box` if installed, else a tiny `_SimpleBox`).
-  **Identity invariant:** `env.step(IDENTITY_ACTION)` (shield off) is bit-for-bit equal to the classical
-  `control_step` — the invariant the whole hybrid design rests on (test `test_env_identity_parity...`).
+- **`rollout_env.py`** — `RolloutEnv(reset/step)`, obs-history ring buffer emitting the window as a
+  **sequence `(history_len, 56)`** (the NPGS input; changed from the old flat vector in Phase 4), optional
+  Shield in the inference path. Gymnasium is imported **optionally** (spaces are `Box` if installed, else a
+  tiny `_SimpleBox`). **Identity invariant:** `env.step(IDENTITY_ACTION)` (shield off) is bit-for-bit equal to
+  the classical `control_step` — the invariant the whole hybrid design rests on (test `test_env_identity_parity...`).
 - Small additive control-loop hooks (classical behaviour unchanged at defaults): `PIDController.last_output`,
   channel `w_lon`/`w_lat` (× PID outputs before `clamp_all`), `ControllingSystem.control_step(send=False)` and
   `set_channel_weights`. The env sends commands via `SimInterface.step`, but the controller reads telemetry from
@@ -237,32 +251,54 @@ standalone, ahead of the actor.
   `guard_command(command, runtime_state)` runs *after*, on the final `ControlsState`. Bridge helpers
   `base_gains_from_pids` / `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
 
-## Neural PID Gain Scheduler (NPGS) — actor/critic architecture (plan §10, not yet coded)
+## Neural PID Gain Scheduler (NPGS) — actor/critic (`ismpu/agent/gain_scheduler.py`, plan §10)
 
-The neural actor. **Renamed from "PIDNN"** because the ТЗ forbids embedding the PID transfer function in the
-net — NPGS keeps the classical PID as plant and only predicts multiplicative gain corrections + channel
-weights. Module will be `ismpu/agent/gain_scheduler.py` (Phase 4). Design is frozen; see `implementation_plan.md`
-§10 for the full spec. Shape and terminology when implementing:
+The neural actor+critic (~1.4 M params). **Renamed from "PIDNN"** because the ТЗ forbids embedding the PID
+transfer function in the net — NPGS keeps the classical PID as plant and only predicts multiplicative gain
+corrections + channel weights. Design is frozen; `implementation_plan.md` §10 is the full spec.
 
-- **Input:** a window of `T` observation frames → `(B, T, 56)` (`T≈16` ≈ 0.8 s at 20 Hz). Windowed-recurrent
-  (RNN reprocesses the window each tick) rather than a stateful RNN — avoids PPO+hidden-state pitfalls and is
-  deterministic for deploy. The `rollout_env` history buffer must present the window as a **sequence** `(T,56)`
-  (it currently flattens; fix in Phase 4).
-- **Shared encoder** (actor + critic share it): input `LayerNorm` → time-distributed `Dense(256)→GELU→Dense(256)→
-  GELU` (+residual) → `GRU(256)×2` → `MultiheadAttention(256,4 heads)` + attention pooling → shared trunk
-  `Dense(256)→Dense(128)` (+skip) → `z_shared (128)`.
-- **Context Fusion (hierarchy):** a small branch off `z_shared` produces a **movement-phase** context `c (128)`
-  (touchdown / high-speed rollout / mid / taxi / stop; optional auxiliary phase-prediction loss from
-  groundspeed). Every head receives `[z_shared ⊕ c]` — this is what makes reverse heads go quiet below 60 kts
-  while brake heads take over, without hand-coding it.
-- **Heads** (`Dense(64)→Dense(32)→Linear`): Heading→α(runway_center, 3), Brake→α(3, duplicated to L/R —
-  symmetric braking, asymmetry via `w_lat`), Reverse→α(3, duplicated to L/R), Weights→`(w_lon,w_lat)`. That's
-  **11 policy outputs** expanded to the **17-dim `Corrections`** (order matches `shield.REGULATOR_ORDER` +
-  weights). Output bounded smoothly: `α = 1 + 0.5·tanh(z)` → `[0.5,1.5]` (= Shield level 1); `w = 1 + tanh(z)`.
-- **Policy:** tanh-squashed Gaussian (state-independent learnable `log_std`); mean heads init to ~0 gain so
-  `α≈1` at start ⇒ training begins ≈ classical (the identity invariant again). Greedy (deploy) = mean.
+- **Input:** a window of `T` observation frames → `(B, T, 56)` (`T≈16` ≈ 0.8 s at 20 Hz; `NPGSConfig.window`).
+  Windowed-recurrent (RNN reprocesses the window each tick) rather than stateful — avoids PPO+hidden-state
+  pitfalls and is deterministic for deploy. `rollout_env` now emits the window as a **sequence** `(T,56)`
+  (its `observation_space`/`_stacked` changed from the old flat vector in Phase 4).
+- **Shared encoder** (`encode()`, actor + critic share it): input `LayerNorm` → time-distributed
+  `Linear(56→256)→GELU→Linear(256→256)→GELU` (+residual) → `GRU(256)×2` → `MultiheadAttention(256,4)` (+residual,
+  LayerNorm) → learned-query attention pooling → shared trunk `Linear(256→256)→Linear(256→128)` (+skip) →
+  `z_shared (128)`.
+- **Context Fusion (hierarchy):** a branch off `z_shared` produces the **movement-phase** context `c (128)`
+  (touchdown / high-speed / mid / taxi / stop; `phase_head` + `phase_labels_from_groundspeed_kts` feed an
+  optional auxiliary loss, `lambda_phase=0` by default). Every head receives `[z_shared ⊕ c]` — this quiets the
+  reverse heads below 60 kts while brake heads take over, without hand-coding it.
+- **Heads** (`Linear(256→64)→GELU→Linear(64→32)→GELU→Linear(32→out)`): Heading→α(runway_center, 3),
+  Brake→α(3, duplicated to L/R — symmetric, asymmetry via `w_lat`), Reverse→α(3, duplicated to L/R),
+  Weights→`(w_lon,w_lat)`. **11 policy outputs** (`POLICY_DIM`) expanded by `expand_to_action` to the **17-dim
+  `Corrections`** (order matches `shield.REGULATOR_ORDER` + weights). `bound()`: `α = 1 + 0.5·tanh(z)` →
+  `[0.5,1.5]` (= Shield level 1); `w = 1 + tanh(z)` → `[0,2]`.
+- **Policy:** tanh-squashed Gaussian (state-independent learnable `log_std`, init ≈ −0.5); mean heads init
+  small orthogonal gain (0.01) so `α≈1` at start ⇒ training begins ≈ classical (identity invariant). PPO stores
+  the pre-squash sample `raw` (11-dim) and recomputes log-prob via `evaluate_actions`; the env gets the bounded
+  17-dim `action`. Greedy (deploy) = mean; `act_numpy` is the single-window inference entry.
 - **Critic:** a **head** off `z_shared` (not a separate net) → `V(s)`.
+- **Serialization:** `NPGS.save/load` bundle weights + `NPGSConfig` + normalization `snapshot()` in one file —
+  the deterministic deploy artifact (plan §14).
 - **Downstream:** every output passes through the Shield before reaching the PID loop — the net can't bypass it.
+
+## PPO training (`ismpu/agent/ppo.py`, `ismpu/runtime/train.py`, plan §11)
+
+Compact CleanRL-style PPO over a **single** env (X-Plane is one instance). `PPOTrainer.collect` fills a
+`RolloutBuffer`, `compute_gae` does GAE(λ) with a done-mask bootstrap, `update` runs minibatch epochs with a
+clipped surrogate + value-clipping, advantage normalization, entropy bonus, grad-clip 0.5, KL early-stop, and
+LR annealing. Multi-component loss `L = L_ppo + λs·L_smooth + λp·L_phys(=0) + λsh·L_shield(=0)`:
+- **L_smooth** is a *differentiable* anchor pulling the predicted corrections toward identity (`(bound(mean)−1)²`).
+- Non-differentiable penalties (jerk, Shield intervention, heading, instability) enter through the **reward**
+  (`envs/reward.py`), so they shape the advantage — the correct way to inject them into PPO.
+- **L_phys** (observer residual, §12) and **L_shield** (a `tanh(mean)⁴` band-barrier) are wired hooks with
+  default weight 0.
+`runtime/train.py` builds env + controller on **one shared connector** (the env sends commands via
+`SimInterface.step`, the controller reads telemetry from the same `xpc.current_dref_values` — they must share
+it), curriculum ramps `difficulty` via `ScenarioGenerator`, Shield sits in the actor's inference path, and it
+checkpoints weights+normalization + a per-term CSV. `smoke_train(env, provider)` runs the loop offline (no
+X-Plane) — see `tests/test_ppo.py`'s scripted backend.
 
 ## External bench interface (`ismpu/io/ics_connector.py`)
 

@@ -202,11 +202,11 @@ def test_env_reset_and_step_shapes_and_history():
     env = RolloutEnv(sim, ctrl, history_len=3, shield=None)
 
     obs, info = env.reset(scenario)
-    assert obs.shape == (3 * OBS_DIM,)      # окно истории склеено
+    assert obs.shape == (3, OBS_DIM)        # окно истории как последовательность (T, 56)
     assert info == {}
 
     obs, reward, terminated, truncated, info = env.step(IDENTITY_ACTION)
-    assert obs.shape == (3 * OBS_DIM,)
+    assert obs.shape == (3, OBS_DIM)
     assert isinstance(reward, float)
     assert not terminated and not truncated
     assert "reward_components" in info

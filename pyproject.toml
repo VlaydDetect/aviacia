@@ -14,9 +14,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Нейросетевой контур (Этап 4+): актор PIDNN, PPO, среда RL.
+# Нейросетевой контур (Этап 4+): актор NPGS + критик, PPO, среда RL.
+# gymnasium опционален (RolloutEnv работает и без него); torch — обязателен для NPGS/PPO.
 rl = [
-    "torch>=2.0",
+    "torch>=2.2",
     "gymnasium>=0.29",
 ]
 dev = [

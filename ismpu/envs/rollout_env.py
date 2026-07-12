@@ -91,8 +91,10 @@ class RolloutEnv:
         self._prev_command: ControlsState | None = None
         self._steps = 0
 
-        self.observation_space = _make_box(np.full(history_len * OBS_DIM, -1.0),
-                                           np.full(history_len * OBS_DIM, 1.0))
+        # Наблюдение — окно истории как ПОСЛЕДОВАТЕЛЬНОСТЬ (T, 56) (вход NPGS, §10/Этап 4),
+        # а не плоский вектор: сеть обрабатывает временную ось (GRU/attention).
+        self.observation_space = _make_box(np.full((history_len, OBS_DIM), -1.0),
+                                           np.full((history_len, OBS_DIM), 1.0))
         self.action_space = _make_box(ACTION_LOW, ACTION_HIGH)
 
     # --- Gymnasium API ---
@@ -160,7 +162,8 @@ class RolloutEnv:
                                       self._scenario.weather, ObserverEstimate())
 
     def _stacked(self) -> np.ndarray:
-        return np.concatenate(list(self._history)).astype(np.float32)
+        """Окно истории → тензор `(history_len, OBS_DIM)` (последовательность кадров для NPGS)."""
+        return np.stack(list(self._history)).astype(np.float32)
 
     def _runtime_state(self, telemetry) -> RuntimeState:
         gs_kts = (telemetry.groundspeed_ms or 0.0) * Converts.MS_TO_KTS
