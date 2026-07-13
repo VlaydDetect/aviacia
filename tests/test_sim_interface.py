@@ -64,7 +64,7 @@ class FakeXPC:
 
 def test_xplane_reset_sequence_and_failure_injection():
     fake = FakeXPC()
-    be = XPlaneBackend(xpc=fake, settle_s=0.0)
+    be = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)  # мок: без reload
     scenario = Scenario(
         scenario_id="t", seed=1, control=SCENARIOS["default"],
         weather=WeatherState(runway_friction=RunwayCondition.WET.value),
@@ -141,6 +141,73 @@ def test_xplane_update_forwards_variable_friction():
     be.update(700.0)  # перешли на лёд → одна дозапись сцепления
     n_after = sum(1 for d, _ in fake.sent if d == "sim/weather/region/runway_friction")
     assert n_after == n_before + 1
+
+
+# --------------------------------------------------------------------------- #
+# Перезагрузка планера между эпизодами + детектор готовности
+# --------------------------------------------------------------------------- #
+
+from ismpu.io.datarefs import TOTAL_FLIGHT_TIME
+
+RELOAD_CMD = "sim/operation/reload_aircraft_no_art"
+
+
+class _AdvancingFlightTime:
+    """Запись current_dref_values, где каждое чтение ['value'] растёт — физика идёт."""
+
+    def __init__(self, start=0.0, step=0.1):
+        self._t, self._step = start, step
+
+    def __getitem__(self, key):
+        if key == "value":
+            self._t += self._step
+            return self._t
+        raise KeyError(key)
+
+
+class ReloadFakeXPC(FakeXPC):
+    """Мок с reload_aircraft и телеметрией (flight_time растёт → готовность детектируется)."""
+
+    def __init__(self, flight_time_entry=None):
+        super().__init__()
+        self._flight_entry = flight_time_entry if flight_time_entry is not None else _AdvancingFlightTime()
+
+    def reload_aircraft(self):
+        self.sendCMND(RELOAD_CMD)
+
+    def subscribeDREFs(self, subs, timeout=5.0):
+        self.current_dref_values[TOTAL_FLIGHT_TIME] = self._flight_entry
+        self.current_dref_values[LATITUDE] = {"value": 55.97}
+        self.current_dref_values[LONGITUDE] = {"value": 37.39}
+        self.current_dref_values[GROUNDSPEED] = {"value": 70.0}
+        self.current_dref_values[TRUE_PSI] = {"value": 63.0}
+
+
+def test_reload_each_reset_reloads_and_waits_ready():
+    fake = ReloadFakeXPC()
+    be = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=True, ready_timeout=5.0)
+    scenario = SCENARIO_PRESETS["nws_fail"]
+
+    telem = be.reset(scenario)
+
+    assert (RELOAD_CMD, None) in fake.sent          # планер перезагружен перед эпизодом
+    assert fake.posi, "после готовности выполнен телепорт (sendPOSI)"
+    assert False in fake.paused and True in fake.paused
+    assert telem.valid
+
+
+def test_wait_until_ready_times_out_gracefully(caplog):
+    import logging
+    # flight_time не растёт (константа) → детектор упирается в таймаут, но НЕ виснет.
+    frozen = {"value": 5.0}
+    fake = ReloadFakeXPC(flight_time_entry=frozen)
+    be = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=True, ready_timeout=0.3)
+
+    with caplog.at_level(logging.WARNING):
+        telem = be.reset(SCENARIO_PRESETS["default"])
+
+    assert telem.valid                               # reset завершился, а не завис
+    assert any("readiness timeout" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- #

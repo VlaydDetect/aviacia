@@ -52,7 +52,7 @@ class ScriptedBackend(XPlaneBackend):
     """Мини-симулятор: замедление ~ команде тормоза/реверса, ход вдоль осевой ВПП."""
 
     def __init__(self):
-        super().__init__(xpc=FakeXPC(), settle_s=0.0)
+        super().__init__(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False)
         self.tracker = RunwayTracker()
         self._reset_state(0.0)
 

@@ -186,11 +186,18 @@ The transport-agnostic seam between the controller and whatever it runs against 
   `reset`/`step`/`read_telemetry` return a raw `Telemetry` dataclass (SI units; `None` for fields a backend
   can't supply, `valid=False` when telemetry is missing). Lives in `envs/`, **not** `io/`, because it depends
   on `WeatherState`/`FailureMode`/`Scenario` — keeping it in `io/` would break "io = transport only".
-  - **`XPlaneBackend`** (training) — wraps `XPlaneConnectX`: extended telemetry subscription, a *lean* fast
-    teleport (with lateral/heading offset, no `reload_scenery`/30 s wait — unlike `runtime/setup.py`), weather
+  - **`XPlaneBackend`** (training) — wraps `XPlaneConnectX`: extended telemetry subscription, weather
     via `WeatherManager`, and failure injection via the real engine/reverser DataRefs (`rel_engfai{N}` /
     `rel_revers{N}`, enum `6`=fail). **NWS and thrust-degrade have no X-Plane failure DataRef** → they're only
     tracked in `active_failures`; their effect comes from the controller's command degradation (`FailureManager`).
+    - **`reset()` reloads the airframe every episode** (`reload_each_reset=True`): `reload_aircraft_no_art`
+      (~12–14 s) wipes accumulated damage/wear/brake-heat that would otherwise carry over and poison training
+      (esp. failure scenarios — NWS steers/brakes at the cost of gear/tire/brake wear). Readiness is detected
+      **dynamically** (not a blind sleep): after reload it re-subscribes (RREF stream may drop on reload) and
+      polls `total_flight_time_sec` until it rises steadily (physics stepping), with a `ready_timeout` fallback
+      that warns and proceeds. Then the atomic teleport runs under pause. `reload_each_reset=False` (unit tests
+      on a mock connector) keeps the old lean teleport-only reset. `setup_view=True` re-adds the chase/zoom view
+      commands (eval/GUI only; training is headless). `teleport_touchdown` is now positioning-only.
   - **`ICSBackend`** (deployment) — wraps `ICSBenchConnector`: `ICSInputs → Telemetry`, `ControlsState →
     ICSOutputs` (mapping provisional pending the ПИВ spec). Weather/failures/teleport are the bench's job → no-ops.
 - **`scenario.py`** — `Scenario` is the **single unified episode descriptor** (fixes the earlier split where

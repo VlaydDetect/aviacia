@@ -84,7 +84,7 @@ def test_env_identity_parity_matches_classical_control_step():
 
     # (B) среда с тождественным действием и без Shield
     fake_b = FakeXPC(_scripted_values())
-    sim = XPlaneBackend(xpc=fake_b, settle_s=0.0)
+    sim = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
     ctrl_b = ControllingSystem(xpc=fake_b)
     env = RolloutEnv(sim, ctrl_b, shield=None)
     env.reset(scenario)
@@ -197,7 +197,7 @@ def test_reward_counts_shield_and_jerk():
 def test_env_reset_and_step_shapes_and_history():
     scenario = SCENARIO_PRESETS["default"]
     fake = FakeXPC(_scripted_values())
-    sim = XPlaneBackend(xpc=fake, settle_s=0.0)
+    sim = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)
     ctrl = ControllingSystem(xpc=fake)
     env = RolloutEnv(sim, ctrl, history_len=3, shield=None)
 
@@ -225,7 +225,7 @@ def test_env_with_shield_at_identity_still_parity():
         ctrl_a.control_step(DT, send=True)
 
     fake_b = FakeXPC(_scripted_values())
-    env = RolloutEnv(XPlaneBackend(xpc=fake_b, settle_s=0.0),
+    env = RolloutEnv(XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False),
                      ControllingSystem(xpc=fake_b), shield=Shield())
     env.reset(scenario)
     for _ in range(n):
