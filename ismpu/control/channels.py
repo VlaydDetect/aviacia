@@ -73,6 +73,7 @@ class ControlsState:
         print("\n[MultiChannelAutoBrake] Остановка. Сброс всех управляющих органов.")
         self.cmd_brake_l = self.cmd_brake_r = self.cmd_rev_l = self.cmd_rev_r = self.rudder_cmd = 0.0
         self.send_commands(xpc)
+        self.break_control = True
 
 
 class LongitudinalChannel:

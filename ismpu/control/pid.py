@@ -64,7 +64,7 @@ class PIDController:
             self.filtered_derivative = 0.0
 
         logger.debug("PID '%s': error=%s, integral=%s, derivative=%s", self.name, error, self.integral, derivative)
-        cprint(f"PID '{self.name}': error={error}, integral={self.integral}, derivative={derivative}", "red")
+        # cprint(f"PID '{self.name}': error={error}, integral={self.integral}, derivative={derivative}", "red")
 
         self.prev_error = error
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)

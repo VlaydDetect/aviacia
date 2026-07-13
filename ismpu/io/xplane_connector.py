@@ -26,8 +26,11 @@ class XPlaneConnectX():
         self.reverse_index = {}
         self.current_dref_values = {}
 
-    def reload_scenery(self):
-        self.sendCMND("sim/operation/reload_scenery")
+    def reload_aircraft(self):
+        self.sendCMND("sim/operation/reload_aircraft_no_art")
+
+    def fix_all_systems(self):
+        self.sendCMND("sim/operation/fix_all_systems")
 
     def subscribeDREFs(self, subscribed_drefs: list[Tuple[str, int]], history: float = 0.0, timeout: float = 5.0,
                        retry_interval: float = 0.5) -> None:

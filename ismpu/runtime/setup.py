@@ -26,6 +26,13 @@ def setup_touchdown_uuee(xpc: XPlaneConnectX, speed_knots: float = 140.0, descen
     :param descent_rate_fpm: Вертикальная скорость снижения в футах в минуту (положительное число)
     :param pitch_deg: Угол тангажа (типичный угол кабрирования при касании основных стоек)
     """
+
+    # xpc.reload_aircraft()
+    # time.sleep(12)
+
+    xpc.fix_all_systems()
+    time.sleep(1)
+
     # 1. Замораживаем физическое время симулятора.
     # Это необходимо, чтобы все сетевые пакеты (позиция, конфигурация, скорости)
     # применились в рамках одного расчетного кадра до начала обсчета физики.
@@ -68,17 +75,15 @@ def setup_touchdown_uuee(xpc: XPlaneConnectX, speed_knots: float = 140.0, descen
     xpc.sendDREF(POS_Q, 0.0)
     xpc.sendDREF(POS_R, 0.0)
 
-    # xpc.reload_scenery()
-    # time.sleep(30)
-    # xpc.sendCMND("sim/view/chase")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
-    # xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/view/chase")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
+    xpc.sendCMND("sim/general/up_fast")
 
     time.sleep(0.1)
