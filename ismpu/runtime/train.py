@@ -33,6 +33,7 @@ class TrainConfig:
     checkpoint_dir: str = "checkpoints"
     checkpoint_every: int = 20
     silence_console: bool = True      # заглушить cprint контура (иначе флуд на 20 Гц×5)
+    init_from: str | None = None      # SFT-чекпоинт (npgs_sft.pt) — тёплый старт перед PPO
     npgs: NPGSConfig = field(default_factory=NPGSConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
@@ -92,19 +93,29 @@ class CSVLogger:
 # --------------------------------------------------------------------------- #
 
 def build_xplane_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 49000):
-    """Строит (env, npgs, trainer) на общем коннекторе X-Plane. Требует запущенный X-Plane."""
+    """Строит (env, npgs, trainer) на общем коннекторе X-Plane. Требует запущенный X-Plane.
+
+    С `cfg.init_from` — грузит SFT-подогретые веса (тёплый старт; конфиг/нормировка берутся
+    из чекпоинта). При `ppo.lambda_anchor > 0` замороженная SFT-копия ставится как
+    `trainer.sft_reference` (L_anchor — не забывать пресеты)."""
     from ismpu.io.xplane_connector import XPlaneConnectX
     from ismpu.control.system import ControllingSystem
     from ismpu.envs.sim_interface import XPlaneBackend
     from ismpu.envs.rollout_env import RolloutEnv
 
+    net = NPGS.load(cfg.init_from) if cfg.init_from else NPGS(cfg.npgs)
+
     xpc = XPlaneConnectX(ip=ip, port=port)
     sim = XPlaneBackend(xpc=xpc)               # общий коннектор — обязательное условие обучения
     controller = ControllingSystem(xpc=xpc)
-    env = RolloutEnv(sim, controller, history_len=cfg.npgs.window, shield=Shield())
+    env = RolloutEnv(sim, controller, history_len=net.cfg.window, shield=Shield())
 
-    net = NPGS(cfg.npgs)
     trainer = PPOTrainer(net, cfg.ppo, total_updates=cfg.total_updates)
+    if cfg.init_from and cfg.ppo.lambda_anchor > 0:
+        ref = NPGS.load(cfg.init_from, map_location=trainer.device)
+        for p in ref.parameters():
+            p.requires_grad_(False)
+        trainer.sft_reference = ref.to(trainer.device)
     return env, net, trainer
 
 
@@ -154,4 +165,6 @@ def smoke_train(env, scenario_provider, *, npgs: NPGS | None = None,
 
 
 if __name__ == "__main__":
-    train()
+    cfg = TrainConfig()
+    # cfg.silence_console = False
+    train(cfg=cfg)

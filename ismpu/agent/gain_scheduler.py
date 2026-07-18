@@ -1,33 +1,25 @@
-"""Neural PID Gain Scheduler (NPGS) — актор + критик (план §10).
+"""Neural PID Gain Scheduler (NPGS) — актор + критик (план §10; выход — АБСОЛЮТНЫЕ коэффициенты).
 
-Планировщик коэффициентов: PID остаётся классическим plant'ом, сеть лишь
-**предсказывает мультипликативные поправки** к его коэффициентам (+ веса каналов).
-Это НЕ классический PIDNN (передаточная функция PID в сеть не встраивается — запрет ТЗ).
+Планировщик коэффициентов: PID остаётся классическим plant'ом, а сеть **предсказывает
+абсолютные коэффициенты** его регуляторов (kp/ki/kd × 5) + веса каналов. Это НЕ классический
+PIDNN (передаточная функция PID в сеть не встраивается — её считает `PIDController`).
 
-Поток (общий энкодер, актор и критик делят его):
-    obs (B, T, 56)
-      → LayerNorm по признакам кадра
-      → Feature Encoder  Linear(56→256)→GELU→Linear(256→256)→GELU (+residual), time-distributed
-      → GRU(256, 2 слоя)
-      → MultiHeadAttention(256, 4 heads) + residual → attention-пулинг → (B, 256)
-      → Shared trunk  Linear(256→256)→GELU→Linear(256→128)→GELU (+skip) → z_shared (B, 128)
-      → Context Fusion  Linear(128→128)→GELU → c (B, 128)   (+ опц. голова фазы движения)
-    Головы (вход [z_shared ⊕ c], 256):
-      Heading→α(runway_center,3) · Brake→α(3, дубль L/R) · Reverse→α(3, дубль L/R) · Weights→(w_lon,w_lat)
-      = 11 выходов политики → детерминированно разворачиваются в 17-мерный `Corrections`.
-    Критик — голова от z_shared: Linear(128→64)→GELU→Linear(64→1) → V(s).
+Параметризация выхода (лог-tanh вокруг референса, см. `agent.gain_space`):
+    gain_i   = ref_i · exp(s_i · tanh(z_i))   → внутри физической полосы [lo_i, hi_i]
+    weight_j = 1 + tanh(z_j)                   → [0, 2]
+`ref/s` — из семейства пресетов (геом. середина + лог-полуширина). Головы gain'ов
+инициализируются **bias'ом на DEFAULT** (`gain_space.default_bias()`) → при старте выход ≈
+классический DEFAULT (безопасный старт; точная классика — через Shield-fallback на пресет).
 
-Ограничение выхода (гладко, = уровень 1 Shield):
-    α = 1 + Δα_max·tanh(z) → [0.5, 1.5]   (Δα_max = 0.5)
-    w = 1 + tanh(z)        → [0, 2]
-Голова mean инициализируется малым orthogonal-gain → на старте z≈0 ⇒ α≈1, w≈1
-(инвариант identity, §1: старт обучения ≈ классика).
+Поток энкодера без изменений: obs (B,T,56) → LayerNorm → FeatureEncoder → GRU×2 →
+MultiheadAttention → attention-пулинг → trunk → z_shared(128) → Context Fusion c(128).
+Головы (вход [z_shared⊕c]): Heading→runway_center(3), Brake→L/R(6), Reverse→L/R(6),
+Weights→(w_lon,w_lat) = **17 выходов** (= ACTION_DIM; L/R больше НЕ дублируются — асимметрия
+тормоза/реверса нужна для reverse-fail пресетов, а симметрию восстанавливает SFT-prior).
 
-Политика — tanh-squashed Gaussian: `mean` из голов, `log_std` обучаемый вектор
-(state-independent, init ≈ −0.5). Greedy (поставка) = mean, без сэмплинга.
-
-Для PPO наружу отдаётся сэмпл `u` (11-мерный, ДО ограничения) — по нему пересчитывается
-log-prob на апдейте; в среду уходит развёрнутый ограниченный 17-мерный вектор.
+Политика (PPO) — Gaussian над сырым `u` (pre-squash); в среду уходит `to_gains(u)`.
+`log_std` — обучаемый вектор, инициализируется по слотам так, чтобы шаг исследования был
+равномерно-мультипликативным (`s_i·std_z_i ≈ exploration_frac`). Greedy (поставка) = mean.
 """
 
 from __future__ import annotations
@@ -41,25 +33,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ismpu.envs.observation import OBS_DIM
-from ismpu.agent.shield import ACTION_DIM, REGULATOR_ORDER
+from ismpu.config.regulators import REGULATOR_ORDER, N_GAINS, ACTION_DIM
+from ismpu.agent import gain_space
 from ismpu.agent import normalization as norm
 
-# Разбивка 11 выходов политики: 3 heading + 3 brake + 3 reverse + 2 weights.
-N_HEADING, N_BRAKE, N_REVERSE, N_WEIGHTS = 3, 3, 3, 2
-N_ALPHA_OUT = N_HEADING + N_BRAKE + N_REVERSE   # 9 множителей α (до дублирования L/R)
-POLICY_DIM = N_ALPHA_OUT + N_WEIGHTS            # 11 выходов политики
-N_PHASES = 5                                    # касание / скоростной / средний / руление / стоп
+# Разбивка 17 выходов: runway_center(3) + brake_l/r(6) + reverse_l/r(6) + weights(2).
+N_HEADING, N_BRAKE, N_REVERSE, N_WEIGHTS = 3, 6, 6, 2
+POLICY_DIM = N_GAINS + N_WEIGHTS          # 17 = ACTION_DIM
+N_GAIN_OUT = N_GAINS                       # 15 gain-выходов (первые в 17-мерном действии)
+N_PHASES = 5                               # касание / скоростной / средний / руление / стоп
 
-# Фазы движения (метки для опц. вспомогательной задачи, метки из groundspeed).
 PHASE_TOUCHDOWN, PHASE_HIGH, PHASE_MID, PHASE_TAXI, PHASE_STOP = range(N_PHASES)
-_PHASE_BOUNDS_KTS = (150.0, 90.0, 30.0, 5.0)    # верхние границы фаз (убыв.) → метка
+_PHASE_BOUNDS_KTS = (150.0, 90.0, 30.0, 5.0)
 
 
 @dataclass
 class NPGSConfig:
     """Гиперпараметры архитектуры NPGS (замораживаются вместе с весами при поставке)."""
     obs_dim: int = OBS_DIM
-    window: int = 16              # T кадров истории (≈0.8 с при 20 Гц)
+    window: int = 16
     d_model: int = 256
     gru_layers: int = 2
     attn_heads: int = 4
@@ -67,9 +59,9 @@ class NPGSConfig:
     context_dim: int = 128
     head_hidden: tuple = (64, 32)
     n_phases: int = N_PHASES
-    dropout: float = 0.0          # в RL dropout вредит политике; по умолчанию нет
-    log_std_init: float = -0.5
-    delta_alpha_max: float = 0.5  # α ∈ [1−Δ, 1+Δ] = [0.5, 1.5] (уровень 1 Shield)
+    dropout: float = 0.0
+    exploration_frac: float = 0.15   # целевой мультипликативный шаг исследования gain'ов (±15%)
+    weight_std: float = 0.3          # std исследования весов каналов
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -82,24 +74,26 @@ class NPGSConfig:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-def layer_init(layer: nn.Linear, gain: float = math.sqrt(2.0), bias: float = 0.0) -> nn.Linear:
-    """Orthogonal-инициализация (лучшая практика PPO): скрытые √2, mean-голова 0.01, value 1.0."""
+def layer_init(layer: nn.Linear, gain: float = math.sqrt(2.0), bias=0.0) -> nn.Linear:
     nn.init.orthogonal_(layer.weight, gain)
-    nn.init.constant_(layer.bias, bias)
+    if isinstance(bias, (int, float)):
+        nn.init.constant_(layer.bias, float(bias))
+    else:  # вектор bias (для gain-голов → старт ≈ DEFAULT)
+        with torch.no_grad():
+            layer.bias.copy_(torch.as_tensor(bias, dtype=layer.bias.dtype))
     return layer
 
 
-def _mlp_head(in_dim: int, hidden: tuple, out_dim: int, out_gain: float) -> nn.Sequential:
+def _mlp_head(in_dim: int, hidden: tuple, out_dim: int, out_gain: float, out_bias=0.0) -> nn.Sequential:
     layers, d = [], in_dim
     for h in hidden:
         layers += [layer_init(nn.Linear(d, h)), nn.GELU()]
         d = h
-    layers.append(layer_init(nn.Linear(d, out_dim), gain=out_gain))
+    layers.append(layer_init(nn.Linear(d, out_dim), gain=out_gain, bias=out_bias))
     return nn.Sequential(*layers)
 
 
 def phase_labels_from_groundspeed_kts(gs_kts) -> np.ndarray:
-    """Метка фазы движения по путевой скорости (для вспомогательной задачи, §10)."""
     gs = np.asarray(gs_kts, dtype=np.float32)
     label = np.full(gs.shape, PHASE_STOP, dtype=np.int64)
     hi, mid, taxi, stop = _PHASE_BOUNDS_KTS
@@ -110,8 +104,17 @@ def phase_labels_from_groundspeed_kts(gs_kts) -> np.ndarray:
     return label
 
 
+def _init_log_std() -> torch.Tensor:
+    """Per-output log_std: gain-слоты `log(frac)−log(s_i)` (равномерный мульт. шаг), веса `log(σ_w)`."""
+    cfg = NPGSConfig()
+    log_std = np.empty(POLICY_DIM, dtype=np.float32)
+    log_std[:N_GAINS] = np.log(cfg.exploration_frac) - np.log(gain_space.GAIN_S)
+    log_std[N_GAINS:] = math.log(cfg.weight_std)
+    return torch.tensor(log_std)
+
+
 class NPGS(nn.Module):
-    """Neural PID Gain Scheduler: общий энкодер + головы актора + голова критика."""
+    """Neural PID Gain Scheduler: общий энкодер + головы актора (абс. gain'ы) + голова критика."""
 
     def __init__(self, config: NPGSConfig | None = None):
         super().__init__()
@@ -126,7 +129,7 @@ class NPGS(nn.Module):
         self.gru = nn.GRU(d, d, num_layers=cfg.gru_layers, batch_first=True)
         self.attn = nn.MultiheadAttention(d, cfg.attn_heads, batch_first=True)
         self.attn_norm = nn.LayerNorm(d)
-        self.pool_query = nn.Parameter(torch.randn(d) * 0.02)   # обучаемый запрос attention-пулинга
+        self.pool_query = nn.Parameter(torch.randn(d) * 0.02)
         self.trunk1 = layer_init(nn.Linear(d, d))
         self.trunk2 = layer_init(nn.Linear(d, cfg.trunk_dim))
         self.trunk_skip = layer_init(nn.Linear(d, cfg.trunk_dim))
@@ -136,128 +139,107 @@ class NPGS(nn.Module):
         self.context = layer_init(nn.Linear(cfg.trunk_dim, cfg.context_dim))
         self.phase_head = _mlp_head(cfg.context_dim, (64,), cfg.n_phases, out_gain=0.01)
 
-        # --- Головы актора (вход [z_shared ⊕ c]) ---
+        # --- Головы актора (вход [z_shared ⊕ c]); gain-головы стартуют ≈ DEFAULT ---
         head_in = cfg.trunk_dim + cfg.context_dim
-        self.head_heading = _mlp_head(head_in, cfg.head_hidden, N_HEADING, out_gain=0.01)
-        self.head_brake = _mlp_head(head_in, cfg.head_hidden, N_BRAKE, out_gain=0.01)
-        self.head_reverse = _mlp_head(head_in, cfg.head_hidden, N_REVERSE, out_gain=0.01)
-        self.head_weights = _mlp_head(head_in, cfg.head_hidden, N_WEIGHTS, out_gain=0.01)
-        self.log_std = nn.Parameter(torch.full((POLICY_DIM,), float(cfg.log_std_init)))
+        bias = gain_space.default_bias()                      # (15,) в порядке REGULATOR_ORDER×(kp,ki,kd)
+        self.head_heading = _mlp_head(head_in, cfg.head_hidden, N_HEADING, 0.01, out_bias=bias[0:3])
+        self.head_brake = _mlp_head(head_in, cfg.head_hidden, N_BRAKE, 0.01, out_bias=bias[3:9])
+        self.head_reverse = _mlp_head(head_in, cfg.head_hidden, N_REVERSE, 0.01, out_bias=bias[9:15])
+        self.head_weights = _mlp_head(head_in, cfg.head_hidden, N_WEIGHTS, 0.01, out_bias=0.0)
+        self.log_std = nn.Parameter(_init_log_std())
 
         # --- Критик (голова от z_shared) ---
         self.critic = _mlp_head(cfg.trunk_dim, (64,), 1, out_gain=1.0)
+
+        # Референс/полуширина gain-пространства (буферы: едут с моделью, входят в state_dict).
+        self.register_buffer("gain_ref", torch.tensor(gain_space.GAIN_REF, dtype=torch.float32))
+        self.register_buffer("gain_s", torch.tensor(gain_space.GAIN_S, dtype=torch.float32))
 
     # ------------------------------------------------------------------ #
     # Энкодер
     # ------------------------------------------------------------------ #
 
     def encode(self, obs: torch.Tensor):
-        """obs (B, T, 56) → (z_shared (B,128), c (B,128), phase_logits (B,n_phases))."""
-        if obs.dim() == 2:               # (T, 56) → (1, T, 56)
+        if obs.dim() == 2:
             obs = obs.unsqueeze(0)
         x = self.input_norm(obs)
         h = F.gelu(self.enc1(x))
-        h = F.gelu(self.enc2(h)) + h     # residual, time-distributed
+        h = F.gelu(self.enc2(h)) + h
         h = self.dropout(h)
 
-        seq, _ = self.gru(h)             # (B, T, d)
-        a, _ = self.attn(seq, seq, seq)  # self-attention по времени
-        a = self.attn_norm(a + seq)      # residual + norm
+        seq, _ = self.gru(h)
+        a, _ = self.attn(seq, seq, seq)
+        a = self.attn_norm(a + seq)
 
         scores = torch.einsum("btd,d->bt", a, self.pool_query) / math.sqrt(self.cfg.d_model)
         w = torch.softmax(scores, dim=1)
-        pooled = torch.einsum("bt,btd->bd", w, a)   # attention-пулинг → (B, d)
+        pooled = torch.einsum("bt,btd->bd", w, a)
 
         t = F.gelu(self.trunk1(pooled))
         t = F.gelu(self.trunk2(t))
-        z_shared = t + self.trunk_skip(pooled)      # (B, trunk_dim)
+        z_shared = t + self.trunk_skip(pooled)
 
-        c = F.gelu(self.context(z_shared))          # контекст фазы (B, context_dim)
+        c = F.gelu(self.context(z_shared))
         phase_logits = self.phase_head(c)
         return z_shared, c, phase_logits
 
     def forward(self, obs: torch.Tensor):
-        """→ (mean (B,11), value (B,), phase_logits (B,n_phases))."""
+        """→ (mean (B,17), value (B,), phase_logits (B,n_phases))."""
         z_shared, c, phase_logits = self.encode(obs)
         head_in = torch.cat([z_shared, c], dim=-1)
         mean = torch.cat([
-            self.head_heading(head_in),
-            self.head_brake(head_in),
-            self.head_reverse(head_in),
-            self.head_weights(head_in),
-        ], dim=-1)                                  # (B, 11)
-        value = self.critic(z_shared).squeeze(-1)   # (B,)
+            self.head_heading(head_in),   # runway_center (3)
+            self.head_brake(head_in),     # brake_l, brake_r (6)
+            self.head_reverse(head_in),   # rev_l, rev_r (6)
+            self.head_weights(head_in),   # w_lon, w_lat (2)
+        ], dim=-1)                        # (B, 17) в layout REGULATOR_ORDER + веса
+        value = self.critic(z_shared).squeeze(-1)
         return mean, value, phase_logits
 
     # ------------------------------------------------------------------ #
-    # Ограничение выхода и разворот в 17-мерное действие
+    # Отображение сырого выхода → абсолютные gain'ы + веса (= 17-мерное действие)
     # ------------------------------------------------------------------ #
 
-    def bound(self, u: torch.Tensor) -> torch.Tensor:
-        """11 сырых выходов → ограниченные поправки: α=1+Δ·tanh, w=1+tanh."""
-        alpha = 1.0 + self.cfg.delta_alpha_max * torch.tanh(u[..., :N_ALPHA_OUT])
-        weight = 1.0 + torch.tanh(u[..., N_ALPHA_OUT:])
-        return torch.cat([alpha, weight], dim=-1)
-
-    @staticmethod
-    def expand_to_action(bounded: torch.Tensor) -> torch.Tensor:
-        """11 ограниченных поправок → 17-мерный вектор (layout `Corrections`/`REGULATOR_ORDER`).
-
-        Тормоза и реверс симметричны (§1 принцип 2): один набор α дублируется на L/R.
-        Порядок: runway_center(3) · brake_l(3) · brake_r(3) · rev_l(3) · rev_r(3) · w_lon · w_lat.
-        """
-        heading = bounded[..., 0:3]
-        brake = bounded[..., 3:6]
-        reverse = bounded[..., 6:9]
-        weights = bounded[..., 9:11]
-        return torch.cat([heading, brake, brake, reverse, reverse, weights], dim=-1)
+    def to_gains(self, u: torch.Tensor) -> torch.Tensor:
+        """17 сырых выходов → [абс. gains×15, w_lon, w_lat] (layout `REGULATOR_ORDER` + веса)."""
+        gains = self.gain_ref * torch.exp(self.gain_s * torch.tanh(u[..., :N_GAINS]))
+        weights = 1.0 + torch.tanh(u[..., N_GAINS:])
+        return torch.cat([gains, weights], dim=-1)
 
     # ------------------------------------------------------------------ #
-    # Политика: сэмплирование, оценка, log-prob (tanh-squashed Gaussian)
+    # Политика (Gaussian над сырым u; squash — детерминированный `to_gains`)
     # ------------------------------------------------------------------ #
 
     def _dist(self, mean: torch.Tensor):
         std = torch.exp(self.log_std).expand_as(mean)
         return torch.distributions.Normal(mean, std)
 
-    @staticmethod
-    def _logprob(dist, u: torch.Tensor) -> torch.Tensor:
-        """log π(u) с tanh-поправкой −Σ log(1 − tanh²(u)) (изменение переменных)."""
-        logp = dist.log_prob(u).sum(-1)
-        logp = logp - torch.log(1.0 - torch.tanh(u) ** 2 + 1e-6).sum(-1)
-        return logp
-
     def get_action(self, obs: torch.Tensor, deterministic: bool = False):
-        """Один шаг актора. Возвращает dict с 17-мерным действием и величинами для PPO.
-
-        - `action` (…, 17) — ограниченное действие для среды (`decode`/`Shield`);
-        - `raw` (…, 11)    — сэмпл `u` ДО ограничения (хранится в буфере PPO);
-        - `logp`, `value`, `entropy`, `phase_logits`.
-        """
+        """Один шаг актора. `action` (…,17) — абс. gain'ы для среды; `raw` (…,17) — сэмпл u для PPO."""
         mean, value, phase_logits = self.forward(obs)
         dist = self._dist(mean)
         u = mean if deterministic else dist.rsample()
-        action = self.expand_to_action(self.bound(u))
-        logp = self._logprob(dist, u)
-        entropy = dist.entropy().sum(-1)   # базовая Gaussian-энтропия (бонус)
+        action = self.to_gains(u)
+        logp = dist.log_prob(u).sum(-1)
+        entropy = dist.entropy().sum(-1)
         return {"action": action, "raw": u, "logp": logp, "value": value,
                 "entropy": entropy, "phase_logits": phase_logits, "mean": mean}
 
     def evaluate_actions(self, obs: torch.Tensor, u: torch.Tensor):
-        """Пересчёт на апдейте PPO для сохранённых `u`. → (logp, entropy, value, mean, phase_logits)."""
+        """Пересчёт на апдейте PPO. → (logp, entropy, value, mean, phase_logits)."""
         mean, value, phase_logits = self.forward(obs)
         dist = self._dist(mean)
-        logp = self._logprob(dist, u)
+        logp = dist.log_prob(u).sum(-1)
         entropy = dist.entropy().sum(-1)
         return logp, entropy, value, mean, phase_logits
 
     # ------------------------------------------------------------------ #
-    # Инференс из numpy (среда/поставка) и сериализация
+    # Инференс из numpy и сериализация
     # ------------------------------------------------------------------ #
 
     @torch.no_grad()
     def act_numpy(self, obs_window: np.ndarray, deterministic: bool = False):
-        """obs (T,56) np → (action_17 np, raw_11 np, logp float, value float)."""
+        """obs (T,56) np → (action_17 np, raw_17 np, logp float, value float)."""
         device = self.log_std.device
         obs = torch.as_tensor(obs_window, dtype=torch.float32, device=device)
         out = self.get_action(obs, deterministic=deterministic)
@@ -266,7 +248,7 @@ class NPGS(nn.Module):
                 float(out["logp"].item()), float(out["value"].item()))
 
     def save(self, path: str) -> None:
-        """Веса + конфиг + слепок нормировки одним артефактом (детерминизм поставки, §14)."""
+        """Веса + конфиг + слепок нормировки (включая gain-пространство) одним артефактом."""
         torch.save({"state_dict": self.state_dict(), "config": self.cfg.to_dict(),
                     "normalization": norm.snapshot()}, path)
 
@@ -281,5 +263,5 @@ class NPGS(nn.Module):
 
 def build_npgs(config: NPGSConfig | None = None, device: str = "cpu") -> NPGS:
     model = NPGS(config).to(device)
-    assert POLICY_DIM == 11 and len(REGULATOR_ORDER) * 3 + 2 == ACTION_DIM == 17
+    assert POLICY_DIM == ACTION_DIM == 17
     return model

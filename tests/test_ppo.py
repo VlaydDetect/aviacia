@@ -129,11 +129,11 @@ def test_gae_zeroes_bootstrap_after_done():
 
 def test_env_returns_sequence_window():
     from ismpu.envs.observation import OBS_DIM
-    from ismpu.envs.action import IDENTITY_ACTION
+    from ismpu.envs.action import REFERENCE_ACTION
     env = _make_env(window=6)
     obs, _ = env.reset(_provider())
     assert obs.shape == (6, OBS_DIM)
-    obs2, reward, term, trunc, info = env.step(IDENTITY_ACTION)
+    obs2, reward, term, trunc, info = env.step(REFERENCE_ACTION)
     assert obs2.shape == (6, OBS_DIM)
     assert np.isfinite(reward)
 
@@ -180,8 +180,9 @@ def test_smoke_train_helper_runs():
     assert len(trainer.history) == 1
 
 
-def test_lambda_smooth_pulls_toward_identity():
-    # При сильном L_smooth и нулевом reward-градиенте политика тянется к identity.
+def test_lambda_smooth_temporal_term_finite_and_trains():
+    # L_smooth теперь — временная гладкость коэффициентов (выход ≈ прошлые gain'ы из obs).
+    # Проверяем, что сильный вес не ломает обучение и терм конечен/неотрицателен.
     torch.manual_seed(0)
     env = _make_env(window=6, shield=False)
     net = NPGS(NPGSConfig(window=6))
@@ -189,8 +190,6 @@ def test_lambda_smooth_pulls_toward_identity():
                     lambda_smooth=5.0, lr=1e-3, device="cpu")
     trainer = PPOTrainer(net, cfg, total_updates=3)
     trainer.train(env, _provider, total_updates=3)
-    # средний выход близок к identity (α≈1): |tanh(mean)| мал
-    obs = torch.randn(8, 6, 56)
-    with torch.no_grad():
-        mean, _, _ = net(obs)
-    assert float(torch.tanh(mean).abs().mean()) < 0.2
+    m = trainer.history[-1]
+    assert math.isfinite(m["l_smooth"]) and m["l_smooth"] >= 0.0
+    assert all(math.isfinite(h["pg_loss"]) for h in trainer.history)

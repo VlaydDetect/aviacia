@@ -44,6 +44,9 @@ class FakeXPC:
     def pauseSIM(self, flag):
         self.paused.append(flag)
 
+    def fix_all_systems(self):
+        self.sendCMND("sim/operation/fix_all_systems")
+
     def subscribeDREFs(self, subs, timeout=5.0):
         for dref, _freq in subs:
             self.current_dref_values.setdefault(dref, {"value": 0.0})
@@ -359,9 +362,11 @@ def test_presets_mirror_control_registry_with_same_pids():
     assert SCENARIO_PRESETS["nws_fail"].control is NWS_FAIL
 
 
-def test_presets_carry_standard_weather():
-    for name, scenario in SCENARIO_PRESETS.items():
-        w = scenario.weather
+def test_calm_presets_carry_standard_weather():
+    # Спокойные пресеты (default + отказные) — ясно/штиль/сухо. Погодные пресеты
+    # (RIGHT_WIND/WET/...) несут СВОЮ погоду (ScenarioConfig.weather) и здесь не проверяются.
+    for name in ("default", "nws_fail", "left_reverse_fail", "right_reverse_fail"):
+        w = SCENARIO_PRESETS[name].weather
         assert w.wind_speed_kts == 0.0          # штиль
         assert w.gust_kts == 0.0
         assert w.runway_friction == 0.0         # сухо (Dry)

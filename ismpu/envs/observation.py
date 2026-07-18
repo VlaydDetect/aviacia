@@ -17,9 +17,10 @@ import numpy as np
 from ismpu.agent.normalization import (
     XTE_SCALE, HEADING_SCALE, LOOKAHEAD_SCALE, SPEED_SCALE, SPEED_ERR_SCALE, ACCEL_SCALE,
     WIND_SCALE, FRICTION_SCALE, VIS_SCALE, DERIV_SCALE,
-    linear, log_norm, gain_ratio, symmetric, clip_unit,
+    linear, log_norm, symmetric, clip_unit,
 )
-from ismpu.agent.shield import REGULATOR_ORDER
+from ismpu.agent import gain_space
+from ismpu.config.regulators import REGULATOR_ORDER
 from ismpu.utils.converts import Converts
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
@@ -53,6 +54,11 @@ _OBSERVER = ["mu_hat", "wind_cross_hat", "brake_eff", "nws_eff", "tau_delay"]
 FEATURE_NAMES = _GEOMETRY + _SPEED + _CONTROLS + _PID + _FAILURES + _WEATHER + _OBSERVER
 OBS_DIM = len(FEATURE_NAMES)  # 4 + 4 + 5 + 30 + 3 + 5 + 5 = 56
 
+# Индексы gain-признаков (лог-норма коэффициентов, «прошлый выход сети») в порядке
+# выхода NPGS (REGULATOR_ORDER × kp/ki/kd) — общий контракт для ppo (L_smooth), pretrain
+# (маскирование «копирования входа») и capture.
+GAIN_FEATURE_INDICES = [FEATURE_NAMES.index(f"{reg}:{k}") for reg in REGULATOR_ORDER for k in ("kp", "ki", "kd")]
+
 
 class ObservationBuilder:
     """Строит нормированный вектор наблюдения одного кадра."""
@@ -62,8 +68,12 @@ class ObservationBuilder:
         self.runway_length_m = runway_length_m or tracker.haversine_distance(
             RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
 
-    def build(self, telemetry, controller, base_gains, weather, observer: ObserverEstimate | None = None) -> np.ndarray:
-        """Собирает нормированный кадр. При невалидной телеметрии — нулевой вектор."""
+    def build(self, telemetry, controller, weather, observer: ObserverEstimate | None = None) -> np.ndarray:
+        """Собирает нормированный кадр. При невалидной телеметрии — нулевой вектор.
+
+        Коэффициенты PID кодируются как **абсолютные** в лог-норме gain-пространства
+        (`gain_space.gain_norm_scalar`) — это «прошлые коэффициенты» (последний выход сети),
+        база больше не нужна (сеть предсказывает абсолютные gain'ы, не поправки)."""
         if not telemetry.valid or None in (telemetry.lat, telemetry.lon,
                                            telemetry.heading_true_deg, telemetry.groundspeed_ms):
             return np.zeros(OBS_DIM, dtype=np.float32)
@@ -97,13 +107,12 @@ class ObservationBuilder:
         feats["reverse_r"] = clip_unit(-st.cmd_rev_r)
         feats["rudder"] = clip_unit(st.rudder_cmd)
 
-        # --- PID × 5 (динамические признаки) ---
+        # --- PID × 5 (динамические признаки; абсолютные gain'ы в лог-норме) ---
         for reg in REGULATOR_ORDER:
             pid = controller.pids[reg]
-            b = base_gains[reg]
-            feats[f"{reg}:kp"] = gain_ratio(pid.kp, b["kp"])
-            feats[f"{reg}:ki"] = gain_ratio(pid.ki, b["ki"])
-            feats[f"{reg}:kd"] = gain_ratio(pid.kd, b["kd"])
+            feats[f"{reg}:kp"] = gain_space.gain_norm_scalar(pid.kp, reg, "kp")
+            feats[f"{reg}:ki"] = gain_space.gain_norm_scalar(pid.ki, reg, "ki")
+            feats[f"{reg}:kd"] = gain_space.gain_norm_scalar(pid.kd, reg, "kd")
             aw = pid.anti_windup or 1.0
             feats[f"{reg}:integral"] = clip_unit(pid.integral / aw)
             feats[f"{reg}:deriv"] = clip_unit(pid.filtered_derivative / DERIV_SCALE)

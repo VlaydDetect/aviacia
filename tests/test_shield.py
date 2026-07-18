@@ -1,112 +1,112 @@
-"""Юнит-тесты Shield: каждый уровень/правило, инвариант identity, fallback."""
+"""Юнит-тесты Shield (абсолютные коэффициенты): уровни/правила, пресет как якорь, fallback."""
 
 import pytest
 
 from ismpu.agent.shield import (
-    Shield, ShieldConfig, Corrections, RuntimeState, ACTION_DIM, REGULATOR_ORDER,
+    Shield, ShieldConfig, GainCommand, RuntimeState, ACTION_DIM, REGULATOR_ORDER,
     base_gains_from_pids, apply_gains_to_pids,
 )
+from ismpu.agent import gain_space as gs
 from ismpu.control.channels import ControlsState
 from ismpu.control.pid import PIDController
 
 
-BASE = {
+# Пресет-якорь = коэффициенты DEFAULT (внутри физической полосы gain-пространства).
+PRESET = {
     "runway_center_pid": {"kp": 0.0015, "ki": 0.0001, "kd": 0.065},
     "pid_brake_l": {"kp": 0.1, "ki": 0.01, "kd": 0.05},
     "pid_brake_r": {"kp": 0.1, "ki": 0.01, "kd": 0.05},
     "pid_rev_l": {"kp": 0.03, "ki": 0.002, "kd": 0.01},
     "pid_rev_r": {"kp": 0.03, "ki": 0.002, "kd": 0.01},
 }
+BRAKE_HI = gs.GAIN_HI_MAP["pid_brake_l"]["kp"]   # физический потолок brake kp (0.24)
 
 
-def _corr(**overrides) -> Corrections:
-    c = Corrections.identity()
-    for reg, triple in overrides.items():
-        c.alpha[reg] = triple
+def _cmd(**overrides) -> GainCommand:
+    """GainCommand = пресет с абсолютными override'ами по регуляторам."""
+    c = GainCommand.from_gains(PRESET)
+    for reg, gains in overrides.items():
+        c.gains[reg].update(gains)
     return c
 
 
 # --------------------------------------------------------------------------- #
-# Инвариант identity (§1): α = 1, веса = 1 → эффективные gain'ы == базовым
+# Пресет-как-команда → эффективные gain'ы == пресет (identity-аналог)
 # --------------------------------------------------------------------------- #
 
-def test_identity_reproduces_base_gains_no_activation():
+def test_preset_command_reproduces_preset_no_activation():
     sh = Shield()
-    eff, safe, rep = sh.guard_coefficients(Corrections.identity(), BASE)
-    for reg in BASE:
-        assert eff[reg] == pytest.approx(BASE[reg])
-    assert not rep.active
-    assert rep.l_shield == 0.0 and rep.l_smooth == 0.0
-    assert rep.fallback is False
+    eff, safe, rep = sh.guard_coefficients(GainCommand.from_gains(PRESET), PRESET)
+    for reg in PRESET:
+        assert eff[reg] == pytest.approx(PRESET[reg])
+    assert not rep.active and rep.l_shield == 0.0 and rep.l_smooth == 0.0 and rep.fallback is False
 
 
-def test_identity_stays_inert_across_ticks():
+def test_preset_command_inert_across_ticks():
     sh = Shield()
     for _ in range(5):
-        eff, _, rep = sh.guard_coefficients(Corrections.identity(), BASE)
+        eff, _, rep = sh.guard_coefficients(GainCommand.from_gains(PRESET), PRESET)
         assert not rep.active
-        assert eff["pid_brake_l"]["kp"] == pytest.approx(BASE["pid_brake_l"]["kp"])
+        assert eff["pid_brake_l"]["kp"] == pytest.approx(PRESET["pid_brake_l"]["kp"])
 
 
 # --------------------------------------------------------------------------- #
-# Уровень 1 — clip поправок
+# Уровень 1 — clip к физической полосе gain-пространства
 # --------------------------------------------------------------------------- #
 
-def test_level1_clips_alpha_to_band():
+def test_level1_clips_gain_to_physical_band():
     sh = Shield()
-    eff, safe, rep = sh.guard_coefficients(_corr(pid_brake_l=(2.0, 1.0, 1.0)), BASE)
-    assert safe.alpha["pid_brake_l"][0] == pytest.approx(1.5)   # 2.0 → alpha_max
-    assert eff["pid_brake_l"]["kp"] == pytest.approx(BASE["pid_brake_l"]["kp"] * 1.5)
+    eff, safe, rep = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.5}), PRESET)  # 0.5 > hi(0.24), < OOD
+    assert safe.gains["pid_brake_l"]["kp"] == pytest.approx(BRAKE_HI)
+    assert eff["pid_brake_l"]["kp"] == pytest.approx(BRAKE_HI)  # hi(0.24) < 2.5·preset(0.25) → L2 не режет
     assert rep.level1_active
     assert rep.l_shield == pytest.approx(sh.config.w_level1)
 
 
 def test_level1_clips_channel_weights():
     sh = Shield()
-    corr = Corrections.identity()
-    corr.w_lon = 2.5   # > weight_max(2.0), но < weight_ood_max(3.0) → clip, не OOD
-    _, safe, rep = sh.guard_coefficients(corr, BASE)
+    cmd = GainCommand.from_gains(PRESET)
+    cmd.w_lon = 2.5   # > weight_max(2.0), но < weight_ood_max(3.0) → clip, не OOD
+    _, safe, rep = sh.guard_coefficients(cmd, PRESET)
     assert safe.w_lon == pytest.approx(2.0)
     assert rep.level1_active and not rep.ood
 
 
 # --------------------------------------------------------------------------- #
-# OOD → fallback на классику
+# OOD → fallback на пресет
 # --------------------------------------------------------------------------- #
 
-def test_ood_triggers_fallback_to_identity():
+def test_ood_triggers_fallback_to_preset():
     sh = Shield()
-    eff, safe, rep = sh.guard_coefficients(_corr(pid_brake_l=(3.0, 1.0, 1.0)), BASE)
+    eff, safe, rep = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 1.0}), PRESET)  # > hi·factor → OOD
     assert rep.ood and rep.fallback
-    assert safe.alpha["pid_brake_l"] == (1.0, 1.0, 1.0)          # заменено на identity
-    assert eff["pid_brake_l"]["kp"] == pytest.approx(BASE["pid_brake_l"]["kp"])
+    assert safe.gains["pid_brake_l"]["kp"] == pytest.approx(PRESET["pid_brake_l"]["kp"])
+    assert eff["pid_brake_l"]["kp"] == pytest.approx(PRESET["pid_brake_l"]["kp"])
     assert rep.l_shield == pytest.approx(sh.config.w_fallback)
 
 
 # --------------------------------------------------------------------------- #
-# Уровень 2 — hard bounds, rate-limit
+# Уровень 2 — hard bounds вокруг пресета, rate-limit
 # --------------------------------------------------------------------------- #
 
-def test_level2_hard_bounds_clip_effective_gain():
-    sh = Shield(ShieldConfig(hard_high_factor=1.2))   # искусственно узкая граница
-    eff, safe, rep = sh.guard_coefficients(_corr(pid_brake_l=(1.5, 1.0, 1.0)), BASE)
-    # α=1.5 не режется уровнем 1, но 1.5·base > 1.2·base → зажимается уровнем 2
-    assert eff["pid_brake_l"]["kp"] == pytest.approx(BASE["pid_brake_l"]["kp"] * 1.2)
+def test_level2_hard_bounds_clip_around_preset():
+    sh = Shield(ShieldConfig(hard_high_factor=1.2))     # узкая граница вокруг пресета
+    eff, safe, rep = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.15}), PRESET)  # 1.5·preset
+    assert eff["pid_brake_l"]["kp"] == pytest.approx(PRESET["pid_brake_l"]["kp"] * 1.2)
     assert rep.level2_active
 
 
 def test_level2_rate_limit_between_ticks():
     sh = Shield()
-    sh.guard_coefficients(Corrections.identity(), BASE)              # такт 1: prev = base
-    eff, _, rep = sh.guard_coefficients(_corr(pid_brake_l=(1.5, 1.0, 1.0)), BASE)  # такт 2
-    base_kp = BASE["pid_brake_l"]["kp"]
-    # Δ = 0.5·base зажимается rate_limit_frac=0.25 → prev + 0.25·base = 1.25·base
-    assert eff["pid_brake_l"]["kp"] == pytest.approx(base_kp * 1.25)
+    sh.guard_coefficients(GainCommand.from_gains(PRESET), PRESET)                     # такт 1: prev = preset
+    eff, _, rep = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.15}), PRESET)       # такт 2: +0.05 = 0.5·base
+    base_kp = PRESET["pid_brake_l"]["kp"]
+    assert eff["pid_brake_l"]["kp"] == pytest.approx(base_kp * 1.25)                  # зажат до +0.25·base
     assert rep.level2_active and rep.l_smooth > 0.0
 
 
 # --------------------------------------------------------------------------- #
-# Уровень 3 — поведение команд
+# Уровень 3 — поведение команд (без изменений)
 # --------------------------------------------------------------------------- #
 
 def test_level3_disables_reverse_below_60kts():
@@ -129,32 +129,28 @@ def test_level3_keeps_reverse_above_60kts():
 
 def test_level3_limits_brake_jerk():
     sh = Shield()
-    c1 = ControlsState()
-    c1.cmd_brake_l = 0.0
-    sh.guard_command(c1, RuntimeState(groundspeed_kts=100.0))   # prev = 0
-    c2 = ControlsState()
-    c2.cmd_brake_l = 1.0
+    c1 = ControlsState(); c1.cmd_brake_l = 0.0
+    sh.guard_command(c1, RuntimeState(groundspeed_kts=100.0))
+    c2 = ControlsState(); c2.cmd_brake_l = 1.0
     out, rep = sh.guard_command(c2, RuntimeState(groundspeed_kts=100.0))
-    assert out.cmd_brake_l == pytest.approx(0.5)   # прирост зажат brake_rate_limit
+    assert out.cmd_brake_l == pytest.approx(0.5)
     assert rep.level3_active and rep.l_smooth > 0.0
 
 
 def test_level3_heading_soft_penalty_no_fallback():
     sh = Shield()
     _, rep = sh.guard_command(ControlsState(), RuntimeState(groundspeed_kts=100.0, heading_error_deg=9.0))
-    assert rep.level3_active and "L3:heading_soft" in rep.rules
-    assert not rep.fallback
+    assert rep.level3_active and "L3:heading_soft" in rep.rules and not rep.fallback
 
 
 def test_level3_heading_hard_latches_fallback_next_tick():
     sh = Shield()
     _, rep = sh.guard_command(ControlsState(), RuntimeState(groundspeed_kts=100.0, heading_error_deg=20.0))
     assert rep.fallback and "L3:heading_hard" in rep.rules
-    # следующий такт коэффициентов — классика (identity), даже с агрессивной поправкой
-    eff, safe, rep2 = sh.guard_coefficients(_corr(pid_brake_l=(1.5, 1.0, 1.0)), BASE)
+    # следующий такт коэффициентов — пресет, даже с агрессивной командой
+    eff, safe, rep2 = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.15}), PRESET)
     assert rep2.fallback
-    assert safe.alpha["pid_brake_l"] == (1.0, 1.0, 1.0)
-    assert eff["pid_brake_l"]["kp"] == pytest.approx(BASE["pid_brake_l"]["kp"])
+    assert eff["pid_brake_l"]["kp"] == pytest.approx(PRESET["pid_brake_l"]["kp"])
 
 
 # --------------------------------------------------------------------------- #
@@ -163,31 +159,30 @@ def test_level3_heading_hard_latches_fallback_next_tick():
 
 def test_reset_clears_state():
     sh = Shield()
-    sh.guard_coefficients(_corr(pid_brake_l=(1.5, 1.0, 1.0)), BASE)
+    sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.15}), PRESET)
     sh.guard_command(ControlsState(), RuntimeState(groundspeed_kts=100.0, heading_error_deg=20.0))
     sh.reset()
     assert sh._prev_gains is None and sh._prev_brakes is None and sh._fallback_latched is False
-    # после reset rate-лимит не срабатывает на первом такте
-    _, _, rep = sh.guard_coefficients(_corr(pid_brake_l=(1.5, 1.0, 1.0)), BASE)
+    _, _, rep = sh.guard_coefficients(_cmd(pid_brake_l={"kp": 0.15}), PRESET)
     assert not any(r.startswith("L2:rate") for r in rep.rules)
 
 
-def test_corrections_vector_roundtrip():
-    c = Corrections.identity()
-    c.alpha["pid_rev_l"] = (1.2, 0.9, 1.1)
+def test_gain_command_vector_roundtrip():
+    c = GainCommand.from_gains(PRESET)
+    c.gains["pid_rev_l"] = {"kp": 0.05, "ki": 0.003, "kd": 0.02}
     c.w_lat = 1.3
     vec = c.to_vector()
     assert len(vec) == ACTION_DIM
-    back = Corrections.from_vector(vec)
-    assert back.alpha == c.alpha
+    back = GainCommand.from_vector(vec)
+    assert back.gains == c.gains
     assert back.w_lon == pytest.approx(c.w_lon) and back.w_lat == pytest.approx(1.3)
 
 
 def test_gain_bridge_helpers_with_real_pids():
-    pids = {reg: PIDController(kp=BASE[reg]["kp"], ki=BASE[reg]["ki"], kd=BASE[reg]["kd"], name=reg)
+    pids = {reg: PIDController(kp=PRESET[reg]["kp"], ki=PRESET[reg]["ki"], kd=PRESET[reg]["kd"], name=reg)
             for reg in REGULATOR_ORDER}
     bg = base_gains_from_pids(pids)
     assert bg["pid_brake_l"]["kp"] == pytest.approx(0.1)
-    eff = {reg: {"kp": 9.0, "ki": 8.0, "kd": 7.0} for reg in REGULATOR_ORDER}
+    eff = {reg: {"kp": 0.09, "ki": 0.008, "kd": 0.007} for reg in REGULATOR_ORDER}
     apply_gains_to_pids(pids, eff)
-    assert pids["pid_brake_l"].kp == 9.0 and pids["pid_rev_r"].kd == 7.0
+    assert pids["pid_brake_l"].kp == 0.09 and pids["pid_rev_r"].kd == 0.007

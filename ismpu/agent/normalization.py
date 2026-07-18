@@ -12,7 +12,7 @@
 
 import math
 
-NORM_VERSION = 1
+NORM_VERSION = 2   # v2: NPGS выдаёт абсолютные коэффициенты → gain-пространство (см. gain_space.py)
 
 # --- Глобальные физические масштабы (линейная нормировка x/scale, если не указано иное) ---
 XTE_SCALE = 30.0             # cross-track error, м
@@ -25,7 +25,8 @@ WIND_SCALE = 20.0            # компоненты ветра, м/с
 FRICTION_SCALE = 15.0        # runway_friction (enum 0..15)
 VIS_SCALE = 16000.0          # видимость, м (лог-нормировка)
 DERIV_SCALE = 20.0           # отфильтрованная производная PID (масштаб, эмпирический)
-GAIN_LOG_HALF = math.log(1.5)  # log(α_max): ratio gain'а 0.5..1.5 → ≈ [-1, 1]
+# Нормировка коэффициентов PID — в лог-пространстве gain'ов (`agent.gain_space`), т.к.
+# сеть теперь предсказывает АБСОЛЮТНЫЕ коэффициенты (не поправки к базе). См. gain_norm там.
 
 
 def clip_unit(x: float) -> float:
@@ -42,16 +43,6 @@ def log_norm(x: float, scale: float) -> float:
     return math.log1p(x) / math.log1p(scale)
 
 
-def gain_ratio(current: float, base: float) -> float:
-    """Отношение эффективного gain'а к базовому в лог-шкале: 1→0, 1.5→+1, 0.5→−1."""
-    if base <= 0.0:
-        return 0.0
-    ratio = current / base
-    if ratio <= 0.0:
-        return -1.0
-    return clip_unit(math.log(ratio) / GAIN_LOG_HALF)
-
-
 def symmetric(x: float, lo: float, hi: float) -> float:
     """Отображает [lo, hi] → [-1, 1] (для PID output по его границам)."""
     if hi <= lo:
@@ -62,11 +53,15 @@ def symmetric(x: float, lo: float, hi: float) -> float:
 
 
 def snapshot() -> dict:
-    """Сериализуемый слепок контракта нормировки (сохраняется вместе с весами)."""
+    """Сериализуемый слепок контракта нормировки (сохраняется вместе с весами).
+
+    Включает таблицу gain-пространства (`gain_space.snapshot()`) — так чекпоинт полностью
+    фиксирует и масштабы obs, и отображение z↔коэффициенты PID (детерминизм поставки)."""
+    from ismpu.agent import gain_space  # локальный импорт: избегаем цикла на уровне модуля
     return {
         "version": NORM_VERSION,
         "xte": XTE_SCALE, "heading": HEADING_SCALE, "lookahead": LOOKAHEAD_SCALE,
         "speed": SPEED_SCALE, "speed_err": SPEED_ERR_SCALE, "accel": ACCEL_SCALE,
         "wind": WIND_SCALE, "friction": FRICTION_SCALE, "visibility": VIS_SCALE,
-        "derivative": DERIV_SCALE, "gain_log_half": GAIN_LOG_HALF,
+        "derivative": DERIV_SCALE, "gain_space": gain_space.snapshot(),
     }

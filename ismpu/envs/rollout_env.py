@@ -1,13 +1,13 @@
 """RolloutEnv — Gymnasium-совместимая среда поверх SimInterface + классического контура.
 
 Оборачивает `SimInterface` (сброс/телеметрия/погода/отказы) и `ControllingSystem`
-(классический PID-контур). Действие актора — мультипликативные поправки (§6): на
-каждом такте они применяются к коэффициентам PID и весам каналов, затем контур
-считает команду, (опц.) её проверяет Shield, команда уходит в симулятор, а из новой
+(классический PID-контур). Действие актора — **абсолютные коэффициенты PID** (+ веса
+каналов): на каждом такте они записываются в регуляторы, затем контур считает команду,
+(опц.) её проверяет Shield (пресет — якорь), команда уходит в симулятор, а из новой
 телеметрии собирается наблюдение (§5) и покомпонентный reward (§11).
 
-**Инвариант identity (§1):** `env.step(IDENTITY_ACTION)` при `shield=None` даёт ровно
-те же команды, что классический `control_step` — проверяется тестом.
+**Парити классики (§1):** `env.step(preset_action(preset))` при `shield=None` даёт ровно
+те же команды, что классический `control_step` со связанным пресетом — проверяется тестом.
 
 Gymnasium импортируется опционально: если пакет есть — пространства это `gym.spaces.Box`,
 иначе — лёгкий `_SimpleBox` (среда всё равно работает и тестируется без gymnasium).
@@ -86,7 +86,7 @@ class RolloutEnv:
         self.max_steps = max_steps
 
         self._history: deque = deque(maxlen=history_len)
-        self._base_gains: dict | None = None
+        self._preset_gains: dict | None = None   # пресет сценария — якорь Shield (не база obs)
         self._scenario: Scenario | None = None
         self._prev_command: ControlsState | None = None
         self._steps = 0
@@ -102,8 +102,8 @@ class RolloutEnv:
     def reset(self, scenario: Scenario, *, seed=None):
         self._scenario = scenario
         telemetry = self.sim.reset(scenario)          # телепорт + погода + отказы (среда)
-        scenario.apply_control(self.controller)        # базовые PID + активация отказа пресета
-        self._base_gains = base_gains_from_pids(self.controller.pids)
+        scenario.apply_control(self.controller)        # seed PID пресета + активация отказа
+        self._preset_gains = base_gains_from_pids(self.controller.pids)  # пресет-якорь Shield
         if self.shield is not None:
             self.shield.reset()
         self.controller.set_channel_weights(1.0, 1.0)
@@ -117,9 +117,9 @@ class RolloutEnv:
         return self._stacked(), {}
 
     def step(self, action):
-        # 1) Поправки актора → коэффициенты PID + веса каналов (опц. через Shield).
-        corrections = decode(action)
-        apply_corrections(corrections, self._base_gains, self.controller, shield=self.shield)
+        # 1) Абсолютные коэффициенты актора → PID + веса каналов (опц. через Shield, якорь — пресет).
+        command = decode(action)
+        apply_corrections(command, self._preset_gains, self.controller, shield=self.shield)
 
         # 2) Состояние для поведенческих проверок Shield (по текущей телеметрии).
         pre = self.sim.read_telemetry()
@@ -158,7 +158,7 @@ class RolloutEnv:
     # --- внутреннее ---
 
     def _observe(self, telemetry) -> np.ndarray:
-        return self.obs_builder.build(telemetry, self.controller, self._base_gains,
+        return self.obs_builder.build(telemetry, self.controller,
                                       self._scenario.weather, ObserverEstimate())
 
     def _stacked(self) -> np.ndarray:

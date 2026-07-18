@@ -1,42 +1,45 @@
 """Shield — детерминированный защитный контур между актором и классическим PID.
 
-Философия (плана §1/§9): актор выдаёт **мультипликативные поправки** к коэффициентам
-PID (`α_p, α_i, α_d` на каждый регулятор) и веса влияния каналов (`w_lon, w_lat`).
-Shield — НЕ обучается, всегда активен, и нейросеть не может подать команду мимо него.
-Он гарантирует, что при тождественных поправках (α = 1, веса = 1) поведение бит-в-бит
-совпадает с классикой (инвариант identity).
+Философия (плана §1/§9): актор (NPGS) выдаёт **абсолютные коэффициенты PID** (`kp, ki, kd`
+на каждый регулятор) и веса влияния каналов (`w_lon, w_lat`). Shield — НЕ обучается, всегда
+активен, и нейросеть не может подать команду мимо него.
+
+**Пресет сценария — якорь безопасности.** Даже при абсолютном выходе Shield центрирует
+допустимый коридор на сертифицированном пресете сценария (передаётся как `preset_gains`):
+hard-bounds и rate-limit — вокруг пресета, fallback — прямая запись пресета. Так классический
+контроллер остаётся активной границей и точкой отката (ключевой аргумент ТЗ-совместимости:
+сеть — ограниченный советчик вокруг классики, не сам регулятор). PID-передаточная функция в
+сеть не встроена — её считает `PIDController`.
 
 Три уровня + fallback (диаграмма, блок 4):
 
-1. **Поправки** — clip слишком больших `α`/весов к допустимым границам.
-2. **Коэффициенты PID** — после применения поправок: hard bounds, консистентность
-   (неотрицательность gain'ов), rate-limit между тактами, OOD-детектор (сырой выход
-   сети далеко за обучающим диапазоном → fallback на классику).
-3. **Runtime safety** — поведенческие проверки итоговых команд: реверс на низкой
-   скорости (<60 узлов), чрезмерно резкое торможение (rate), срыв по курсу.
-4. **Fallback** — при OOD или грубом нарушении курса поправки заменяются на identity
-   (чистый классический PID) на этот/следующий такт.
+1. **Коэффициенты** — clip абсолютных gain'ов к физическому диапазону gain-пространства
+   (`agent.gain_space`, `[lo, hi]`) и весов к `[weight_min, weight_max]`.
+2. **Согласованность с пресетом** — hard-bounds `[hard_low·preset, hard_high·preset]`,
+   неотрицательность, rate-limit между тактами; OOD-детектор (грубо аномальный вход → fallback).
+3. **Runtime safety** — поведенческие проверки итоговых команд: реверс на низкой скорости
+   (<60 узлов), чрезмерно резкое торможение (rate), срыв по курсу.
+4. **Fallback** — при OOD или грубом нарушении курса эффективные gain'ы = пресет сценария
+   (чистая классика) на этот/следующий такт.
 
-Связь с loss (§11): активация уровня → штраф в `L_shield`; резкие скачки коэффициентов
-и команд → в `L_smooth`. Обе величины накапливаются в `ShieldReport`.
+Связь с loss (§11): активация уровня → штраф в `L_shield`; резкие скачки коэффициентов и
+команд → в `L_smooth`. Обе величины накапливаются в `ShieldReport`.
 
-Интеграция (Этап 4): в inference-пути актора среда вызывает
-`guard_coefficients(corrections, base_gains)` ДО расчёта команд контуром, применяет
-эффективные gain'ы к PID, затем `guard_command(command, runtime_state)` ПОСЛЕ — на
-итоговом `ControlsState`. Здесь модуль автономен и покрыт юнит-тестами (§9: «Shield
-реализуется и тестируется до актора»).
+Интеграция (Этап 4): в inference-пути среда вызывает
+`guard_coefficients(gain_command, preset_gains)` ДО расчёта команд контуром, применяет
+эффективные gain'ы к PID, затем `guard_command(command, runtime_state)` ПОСЛЕ — на итоговом
+`ControlsState`.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
 
 from ismpu.control.channels import ControlsState
-from ismpu.control.pid import PIDController
+from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS, N_GAINS, ACTION_DIM
+from ismpu.agent import gain_space
 
-# Порядок регуляторов = ключи словаря `pids` в ControllingSystem (см. clamp_all).
-REGULATOR_ORDER = ("runway_center_pid", "pid_brake_l", "pid_brake_r", "pid_rev_l", "pid_rev_r")
-N_ALPHA = len(REGULATOR_ORDER) * 3  # 15 поправок к (kp, ki, kd)
-ACTION_DIM = N_ALPHA + 2            # + (w_lon, w_lat) = 17
+# Обратная совместимость имён (ранее объявлялись здесь).
+N_ALPHA = N_GAINS   # 15 коэффициентов (kp, ki, kd) × 5 регуляторов
 
 
 def _clip(x, lo, hi):
@@ -48,33 +51,34 @@ def _clip(x, lo, hi):
 # --------------------------------------------------------------------------- #
 
 @dataclass
-class Corrections:
-    """Выход актора: мультипликативные поправки к gain'ам + веса каналов.
+class GainCommand:
+    """Выход актора: абсолютные коэффициенты PID + веса каналов.
 
-    `alpha[reg] = (α_p, α_i, α_d)` — множители к (kp, ki, kd) регулятора `reg`.
+    `gains[reg] = {'kp','ki','kd'}` — абсолютные коэффициенты регулятора `reg`.
     `w_lon`, `w_lat` — веса влияния продольного/латерального каналов.
     """
-    alpha: dict
+    gains: dict
     w_lon: float = 1.0
     w_lat: float = 1.0
 
     @classmethod
-    def identity(cls, regulators=REGULATOR_ORDER) -> "Corrections":
-        return cls(alpha={reg: (1.0, 1.0, 1.0) for reg in regulators}, w_lon=1.0, w_lat=1.0)
+    def from_gains(cls, gains: dict, w_lon: float = 1.0, w_lat: float = 1.0) -> "GainCommand":
+        """Построение из словаря коэффициентов (напр. пресета сценария)."""
+        return cls(gains={reg: dict(g) for reg, g in gains.items()}, w_lon=w_lon, w_lat=w_lat)
 
     @classmethod
-    def from_vector(cls, vec, regulators=REGULATOR_ORDER) -> "Corrections":
-        """Плоский вектор актора (17,) → Corrections. Layout: [α×15, w_lon, w_lat]."""
-        alpha, i = {}, 0
+    def from_vector(cls, vec, regulators=REGULATOR_ORDER) -> "GainCommand":
+        """Плоский вектор действия (17,) → GainCommand. Layout: [gains×15, w_lon, w_lat]."""
+        gains, i = {}, 0
         for reg in regulators:
-            alpha[reg] = (float(vec[i]), float(vec[i + 1]), float(vec[i + 2]))
-            i += 3
-        return cls(alpha=alpha, w_lon=float(vec[i]), w_lat=float(vec[i + 1]))
+            gains[reg] = {k: float(vec[i + j]) for j, k in enumerate(GAIN_KEYS)}
+            i += len(GAIN_KEYS)
+        return cls(gains=gains, w_lon=float(vec[i]), w_lat=float(vec[i + 1]))
 
     def to_vector(self, regulators=REGULATOR_ORDER) -> list:
         vec = []
         for reg in regulators:
-            vec.extend(self.alpha[reg])
+            vec.extend(self.gains[reg][k] for k in GAIN_KEYS)
         vec.extend((self.w_lon, self.w_lat))
         return vec
 
@@ -115,20 +119,17 @@ class ShieldReport:
 @dataclass(frozen=True)
 class ShieldConfig:
     """Границы и веса штрафов Shield (все — настраиваемые, а не свойства сети)."""
-    # Уровень 1 — clip поправок
-    alpha_min: float = 0.5
-    alpha_max: float = 1.5
+    # Уровень 1 — веса каналов
     weight_min: float = 0.0
     weight_max: float = 2.0
-    # OOD — сырой выход сети за этими границами → fallback на классику
-    alpha_ood_min: float = 0.2
-    alpha_ood_max: float = 2.0
+    # OOD — грубо аномальный вход → fallback на пресет
+    gain_ood_factor: float = 3.0    # gain вне [lo/factor, hi·factor] → OOD
     weight_ood_min: float = -0.5
     weight_ood_max: float = 3.0
-    # Уровень 2 — эффективные gain'ы (мультипликативные границы вокруг базовых)
+    # Уровень 2 — эффективные gain'ы (мультипликативные границы вокруг ПРЕСЕТА)
     hard_low_factor: float = 0.3
     hard_high_factor: float = 2.5
-    rate_limit_frac: float = 0.25   # макс |Δgain|/base за такт
+    rate_limit_frac: float = 0.25   # макс |Δgain|/preset за такт
     # Уровень 3 — поведение
     reverse_min_speed_kts: float = 60.0   # реверс запрещён ниже (ср. LongitudinalChannel)
     brake_rate_limit: float = 0.5         # макс прирост тормозной команды за такт
@@ -146,12 +147,12 @@ class ShieldConfig:
 # --------------------------------------------------------------------------- #
 
 def base_gains_from_pids(pids: dict) -> dict:
-    """Снимок базовых (kp, ki, kd) регуляторов — вход Shield."""
+    """Снимок (kp, ki, kd) регуляторов — пресет-якорь для Shield и т.п."""
     return {reg: {"kp": p.kp, "ki": p.ki, "kd": p.kd} for reg, p in pids.items()}
 
 
 def apply_gains_to_pids(pids: dict, gains: dict) -> None:
-    """Записывает эффективные gain'ы обратно в регуляторы (Этап 4, перед control_step)."""
+    """Записывает эффективные gain'ы обратно в регуляторы (перед control_step)."""
     for reg, g in gains.items():
         pids[reg].kp = g["kp"]
         pids[reg].ki = g["ki"]
@@ -174,15 +175,14 @@ class Shield:
         self._prev_brakes: Optional[tuple] = None
         self._fallback_latched = False
 
-    # --- Уровни 1–2: поправки → безопасные эффективные gain'ы --------------- #
+    # --- Уровни 1–2: абсолютные коэффициенты → безопасные эффективные gain'ы ---- #
 
-    def guard_coefficients(self, corrections: Corrections, base_gains: dict) -> tuple:
-        """Уровни 1–2. Возвращает `(effective_gains, safe_corrections, report)`.
+    def guard_coefficients(self, command: GainCommand, preset_gains: dict) -> tuple:
+        """Уровни 1–2. Возвращает `(effective_gains, safe_command, report)`.
 
-        `effective_gains[reg] = {'kp','ki','kd'}` — после clip поправок, применения к
-        базе, hard bounds, консистентности и rate-limit. При OOD/защёлкнутом fallback —
-        identity (классические gain'ы).
-        """
+        `effective_gains[reg] = {'kp','ki','kd'}` — после clip к физдиапазону, hard-bounds
+        вокруг пресета, неотрицательности и rate-limit. При OOD/защёлкнутом fallback —
+        коэффициенты пресета сценария (классика)."""
         cfg = self.config
         report = ShieldReport()
 
@@ -192,63 +192,55 @@ class Shield:
             report.l_shield += cfg.w_fallback
             report._mark_level(3)
             self._fallback_latched = False
-            safe = Corrections.identity(tuple(base_gains))
-        elif self._is_ood(corrections):
+            safe = GainCommand.from_gains(preset_gains)
+        elif self._is_ood(command):
             report.ood = True
             report.fallback = True
             report.rules.append("OOD:fallback")
             report.l_shield += cfg.w_fallback
             report._mark_level(2)
-            safe = Corrections.identity(tuple(base_gains))
+            safe = GainCommand.from_gains(preset_gains)
         else:
-            safe = self._clip_corrections(corrections, report)
+            safe = self._clip_command(command, report)
 
-        eff = self._apply(safe, base_gains)
-        self._enforce_bounds(eff, base_gains, report)
-        self._enforce_rate_limit(eff, base_gains, report)
+        eff = {reg: dict(safe.gains[reg]) for reg in safe.gains}
+        self._enforce_bounds(eff, preset_gains, report)
+        self._enforce_rate_limit(eff, preset_gains, report)
         self._prev_gains = {reg: dict(g) for reg, g in eff.items()}
         return eff, safe, report
 
-    def _clip_corrections(self, corr: Corrections, report: ShieldReport) -> Corrections:
+    def _clip_command(self, cmd: GainCommand, report: ShieldReport) -> GainCommand:
         cfg = self.config
-        new_alpha = {}
-        for reg, (ap, ai, ad) in corr.alpha.items():
-            cap, cai, cad = (_clip(ap, cfg.alpha_min, cfg.alpha_max),
-                             _clip(ai, cfg.alpha_min, cfg.alpha_max),
-                             _clip(ad, cfg.alpha_min, cfg.alpha_max))
-            if (cap, cai, cad) != (ap, ai, ad):
-                self._flag(report, f"L1:alpha_clip:{reg}", level=1)
-            new_alpha[reg] = (cap, cai, cad)
-        w_lon = _clip(corr.w_lon, cfg.weight_min, cfg.weight_max)
-        w_lat = _clip(corr.w_lat, cfg.weight_min, cfg.weight_max)
-        if w_lon != corr.w_lon or w_lat != corr.w_lat:
+        new_gains = {}
+        for reg, g in cmd.gains.items():
+            lo, hi = gain_space.GAIN_LO_MAP[reg], gain_space.GAIN_HI_MAP[reg]
+            clipped = {k: _clip(g[k], lo[k], hi[k]) for k in GAIN_KEYS}
+            if any(clipped[k] != g[k] for k in GAIN_KEYS):
+                self._flag(report, f"L1:gain_clip:{reg}", level=1)
+            new_gains[reg] = clipped
+        w_lon = _clip(cmd.w_lon, cfg.weight_min, cfg.weight_max)
+        w_lat = _clip(cmd.w_lat, cfg.weight_min, cfg.weight_max)
+        if w_lon != cmd.w_lon or w_lat != cmd.w_lat:
             self._flag(report, "L1:weight_clip", level=1)
-        return Corrections(alpha=new_alpha, w_lon=w_lon, w_lat=w_lat)
+        return GainCommand(gains=new_gains, w_lon=w_lon, w_lat=w_lat)
 
-    def _is_ood(self, corr: Corrections) -> bool:
+    def _is_ood(self, cmd: GainCommand) -> bool:
         cfg = self.config
-        for triple in corr.alpha.values():
-            for a in triple:
-                if a < cfg.alpha_ood_min or a > cfg.alpha_ood_max:
+        for reg, g in cmd.gains.items():
+            lo, hi = gain_space.GAIN_LO_MAP[reg], gain_space.GAIN_HI_MAP[reg]
+            for k in GAIN_KEYS:
+                if g[k] < lo[k] / cfg.gain_ood_factor or g[k] > hi[k] * cfg.gain_ood_factor:
                     return True
-        for w in (corr.w_lon, corr.w_lat):
+        for w in (cmd.w_lon, cmd.w_lat):
             if w < cfg.weight_ood_min or w > cfg.weight_ood_max:
                 return True
         return False
 
-    @staticmethod
-    def _apply(corr: Corrections, base: dict) -> dict:
-        eff = {}
-        for reg, g in base.items():
-            ap, ai, ad = corr.alpha.get(reg, (1.0, 1.0, 1.0))
-            eff[reg] = {"kp": g["kp"] * ap, "ki": g["ki"] * ai, "kd": g["kd"] * ad}
-        return eff
-
-    def _enforce_bounds(self, eff: dict, base: dict, report: ShieldReport) -> None:
+    def _enforce_bounds(self, eff: dict, preset: dict, report: ShieldReport) -> None:
         cfg = self.config
         for reg, g in eff.items():
-            for k in ("kp", "ki", "kd"):
-                b = base[reg][k]
+            for k in GAIN_KEYS:
+                b = preset[reg][k]
                 v = g[k]
                 if v < 0.0:  # консистентность: gain'ы неотрицательны
                     v = 0.0
@@ -260,13 +252,13 @@ class Shield:
                     v = cv
                 g[k] = v
 
-    def _enforce_rate_limit(self, eff: dict, base: dict, report: ShieldReport) -> None:
+    def _enforce_rate_limit(self, eff: dict, preset: dict, report: ShieldReport) -> None:
         cfg = self.config
         if self._prev_gains is None:
             return
         for reg, g in eff.items():
-            for k in ("kp", "ki", "kd"):
-                b = base[reg][k]
+            for k in GAIN_KEYS:
+                b = preset[reg][k]
                 if b <= 0.0:
                     continue
                 prev = self._prev_gains[reg][k]

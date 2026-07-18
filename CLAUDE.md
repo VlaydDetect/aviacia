@@ -12,13 +12,17 @@ Code comments and console output are in Russian.
 
 This is the R&D project **ИСМПУ** (shifr `Интеграл-КБО-МС-ГосНИИАС-ИСМПУ-2026`, due 2026-07-28). The
 work is moving from the current classical-PID prototype toward a **hybrid neural controller**: the
-classical PID loop stays as the plant, and a **Neural PID Gain Scheduler (NPGS)** actor (trained with PPO)
-generates *multiplicative corrections* to the PID gains plus channel-influence weights, guarded by a
-deterministic **Shield** and, later, an optional physics-informed **PINN observer**.
+classical PID loop stays as the plant, and a **Neural PID Gain Scheduler (NPGS)** actor (SFT-warm-started,
+then trained with PPO) predicts the **absolute PID coefficients** (kp/ki/kd × 5 regulators) plus
+channel-influence weights, guarded by a deterministic **Shield** and, later, an optional physics-informed
+**PINN observer**.
 
 The NPGS is **not** a classic "PIDNN": the ТЗ forbids embedding the PID transfer function into the network,
-so the net only *predicts gain corrections* — it never becomes the controller. Full architecture in
-`implementation_plan.md` §10; targets **A330-300** (X-Plane training) and **МС-21** (bench deployment).
+so the net only *predicts the coefficients* the classical `PIDController` then uses — it never becomes the
+controller. **The net emits absolute gains** (not multiplicative α) so a supervised warm-start (SFT/behavioral
+cloning) can regress toward the hand-tuned expert presets; safety is preserved because the Shield keeps the
+per-scenario preset as its bound/fallback anchor. Full architecture in `implementation_plan.md` §10; targets
+**A330-300** (X-Plane training) and **МС-21** (bench deployment).
 
 ## Planning & reference documents
 
@@ -51,10 +55,14 @@ Read these before making architectural changes — they define the target design
   until `KeyboardInterrupt`, which resets all controls. Pick a prepared preset by name —
   `main("nws_fail" | "default" | "left_reverse_fail" | "right_reverse_fail")` from
   `ismpu.envs.scenario.SCENARIO_PRESETS` (control tuning + standard weather bundled).
+- **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (needs X-Plane). Captures classical
+  rollouts of the non-draft presets and behavior-clones the NPGS toward their coefficients → `checkpoints/npgs_sft.pt`.
+  Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)` (see `tests/test_pretrain.py`).
 - **Train the NPGS:** `python -m ismpu.runtime.train` (needs X-Plane). Builds env + controller on **one
-  shared connector**, PPO + curriculum, checkpoints to `checkpoints/`. Offline (no X-Plane) validation of the
-  PPO loop: `ismpu.runtime.train.smoke_train(env, provider, updates=...)` with a scripted backend (see
-  `tests/test_ppo.py`).
+  shared connector**, PPO + curriculum, checkpoints to `checkpoints/`. Set `TrainConfig.init_from="checkpoints/npgs_sft.pt"`
+  to start from the SFT warm-start (strongly recommended — a cold net emits DEFAULT gains, unsafe on failures).
+  Offline (no X-Plane) validation of the PPO loop: `ismpu.runtime.train.smoke_train(env, provider, updates=...)`
+  with a scripted backend (see `tests/test_ppo.py`).
 - **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). Run under the
   venv (has pytest + torch). Simulator-free — PID numerics, tracker geodesy, reference-speed curves, one full
   `control_step` through a mock connector, plus the NPGS/PPO layer (network shapes/identity, GAE, loss terms,
@@ -78,15 +86,17 @@ except: `PIDController` debug output went from `cprint` to `logging.debug`, sile
 - `ismpu/control/` — the classical loop: `pid.py`, `runway_tracker.py`, `trajectory.py`, `channels.py`
   (`ControlsState` + the two channels), `system.py` (`ControllingSystem`), `failures.py`.
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — edit here to change runway), `constants.py`,
-  `scenarios.py` (PID presets per scenario, extracted from the notebook cells), `requirements.py`
-  (the ТЗ acceptance thresholds), `aircraft.py`.
-- `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`), `loop.py` (the 20 Hz loop + `main()`), and
-  `train.py` (Phase 4: PPO training loop + `smoke_train`). `evaluate.py`/`deploy.py` come in Phases 5/6.
+  `scenarios.py` (PID presets per scenario + each preset's weather; `ScenarioConfig.draft` flags uncalibrated),
+  `regulators.py` (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` — neutral, breaks a shield↔gain_space cycle),
+  `requirements.py` (the ТЗ acceptance thresholds), `aircraft.py`.
+- `ismpu/runtime/` — `setup.py` (`setup_touchdown_uuee`), `loop.py` (the 20 Hz loop + `main()`), `train.py`
+  (PPO loop + `smoke_train`, `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start). `evaluate.py`/`deploy.py` come in Phases 5/6.
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
 - `ismpu/envs/` — environment + RL layer: `weather.py`, `sim_interface.py`, `scenario.py`,
   `scenario_generator.py` (Phase 1) and `observation.py` / `action.py` / `reward.py` / `rollout_env.py` (Phase 2).
-- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_scheduler.py` (NPGS
-  actor+critic) + `ppo.py` (all done). `observer.py` comes in Phase 7. `ismpu/gui/` — not yet created.
+- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_space.py` (absolute-gain map)
+  + `gain_scheduler.py` (NPGS actor+critic) + `ppo.py` + `pretrain.py` (SFT/BC) (all done). `observer.py` comes
+  in Phase 7. `ismpu/gui/` — not yet created.
 
 ## X-Plane communication (`ismpu/io/xplane_connector.py`)
 
@@ -217,21 +227,25 @@ The transport-agnostic seam between the controller and whatever it runs against 
 
 The Gymnasium-compatible training env wrapping `SimInterface` + the classical controller (plan §5/§6).
 
-- **`observation.py`** — `ObservationBuilder.build(...)` → a **56-dim** normalized frame (geometry 4 / speed 4 /
-  last controls 5 / PID×5 dynamic state 30 / failure flags 3 / weather 5 / **observer slots 5**, zeroed via
-  `ObserverEstimate` until Phase 7). `FEATURE_NAMES` fixes the order; invalid telemetry → zero frame.
-- **`agent/normalization.py`** — the normalization contract: **fixed physical scales** (constants, not batch
-  statistics — determinism at deploy), `snapshot()` serialized with the weights.
-- **`action.py`** — action is `(17,) = [α×15, w_lon, w_lat]` (same layout as `Corrections`). `apply_corrections`
-  writes effective gains into `controller.pids` and channel weights into the channels (optionally via Shield).
-  `IDENTITY_ACTION` (all α=1, weights=1) must reproduce classical behaviour.
+- **`observation.py`** — `ObservationBuilder.build(telemetry, controller, weather, observer)` → a **56-dim**
+  normalized frame (geometry 4 / speed 4 / last controls 5 / PID×5 dynamic state 30 / failure flags 3 / weather 5
+  / **observer slots 5**). The PID `kp/ki/kd` slots now encode the **absolute** current gains in gain-space
+  log-norm (`gain_space.gain_norm_scalar`, = the net's previous output; no `base_gains` arg anymore).
+  `GAIN_FEATURE_INDICES` lists those 15 slots (used by ppo's `L_smooth` and SFT's anti-copycat masking).
+  `FEATURE_NAMES` fixes the order; invalid telemetry → zero frame.
+- **`agent/normalization.py`** — fixed physical scales (constants, not batch stats); `snapshot()` includes the
+  `gain_space` table and is serialized with the weights.
+- **`action.py`** — action is `(17,) = [gains×15, w_lon, w_lat]` (**absolute** kp/ki/kd, `GainCommand` layout).
+  `apply_corrections(command, preset_gains, controller, shield)` writes the gains into `controller.pids` and
+  channel weights (optionally via the preset-anchored Shield). `REFERENCE_ACTION` = DEFAULT gains; `preset_action(preset)`
+  (float64, exact) reproduces a scenario's classical behaviour.
 - **`reward.py`** — per-component reward (lateral / speed / jerk / shield / heading / instability), thresholds
   from `config/requirements.py`. Pure function.
 - **`rollout_env.py`** — `RolloutEnv(reset/step)`, obs-history ring buffer emitting the window as a
   **sequence `(history_len, 56)`** (the NPGS input; changed from the old flat vector in Phase 4), optional
   Shield in the inference path. Gymnasium is imported **optionally** (spaces are `Box` if installed, else a
-  tiny `_SimpleBox`). **Identity invariant:** `env.step(IDENTITY_ACTION)` (shield off) is bit-for-bit equal to
-  the classical `control_step` — the invariant the whole hybrid design rests on (test `test_env_identity_parity...`).
+  tiny `_SimpleBox`). **Parity:** `env.step(preset_action(preset))` (shield off) is bit-for-bit equal to the
+  classical `control_step` for that scenario (test `test_env_preset_action_parity...`).
 - Small additive control-loop hooks (classical behaviour unchanged at defaults): `PIDController.last_output`,
   channel `w_lon`/`w_lat` (× PID outputs before `clamp_all`), `ControllingSystem.control_step(send=False)` and
   `set_channel_weights`. The env sends commands via `SimInterface.step`, but the controller reads telemetry from
@@ -243,52 +257,78 @@ Deterministic guard between the (future) neural actor and the classical PID loop
 trained, is always active, and the network can't issue a command that bypasses it. Built and unit-tested
 standalone, ahead of the actor.
 
-- The actor's output is `Corrections`: multiplicative `α` per PID gain (5 regulators × `kp/ki/kd` = 15) plus
-  channel weights `w_lon/w_lat` (`ACTION_DIM = 17`; `from_vector`/`to_vector` ready for the net).
-- **Three levels + fallback:** (1) clip `α`/weights to bands; (2) apply corrections to base gains, then hard
-  bounds + non-negativity + per-tick rate-limit + OOD detector; (3) runtime checks on the resulting
-  `ControlsState` — reverse below 60 kts, brake jerk, heading divergence. OOD or a gross heading blow-out
-  latches a **fallback** to identity corrections (pure classical PID).
-- `ShieldReport` carries per-level activation flags, the `l_shield`/`l_smooth` penalty accumulators (fed to
-  the multi-component loss, plan §11), and the list of triggered rules (for the ТЗ 5.1.5 contribution
-  analysis).
-- **Identity invariant** (plan §1): `α = 1`, weights = 1 → effective gains == base and the Shield stays
-  silent — the same invariant the whole hybrid design rests on.
-- Integration (Phase 4): `guard_coefficients(corrections, base_gains)` runs *before* `control_step`;
-  `guard_command(command, runtime_state)` runs *after*, on the final `ControlsState`. Bridge helpers
-  `base_gains_from_pids` / `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
+- The actor's output is `GainCommand`: **absolute** `kp/ki/kd` per regulator (5 × 3 = 15) plus channel weights
+  `w_lon/w_lat` (`ACTION_DIM = 17`; `from_vector`/`to_vector`/`from_gains`).
+- **The per-scenario preset is the safety anchor** (passed to `guard_coefficients` as `preset_gains`): the net
+  emits absolute gains, but the Shield still centers the allowed corridor on the certified preset.
+- **Three levels + fallback:** (1) clip gains to the physical band `[lo,hi]` (`gain_space`), weights to `[0,2]`;
+  (2) hard bounds `[hard_low·preset, hard_high·preset]` + non-negativity + per-tick rate-limit + OOD detector;
+  (3) runtime checks on the resulting `ControlsState` — reverse below 60 kts, brake jerk, heading divergence.
+  OOD or a gross heading blow-out latches a **fallback** that writes the **preset gains** directly (certified
+  classical). This preset-as-bound/fallback is the ТЗ-compliance argument (bounded advisory, not "net is controller").
+- `ShieldReport` carries per-level flags, `l_shield`/`l_smooth` accumulators, and triggered rules (ТЗ 5.1.5).
+- **Parity (plan §1):** feeding a `GainCommand` equal to the scenario preset → effective gains == preset and the
+  Shield stays silent (the absolute-gain analog of the old α=1 identity).
+- Integration: `guard_coefficients(gain_command, preset_gains)` runs *before* `control_step`;
+  `guard_command(command, runtime_state)` runs *after*. Bridge helpers `base_gains_from_pids` /
+  `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
+
+## Gain space (`ismpu/agent/gain_space.py`) — single source of truth
+
+The NPGS outputs **absolute** coefficients, so there's a fixed physical map from the net's raw output `z` to a
+gain, per (regulator, kp|ki|kd) slot — 15 slots in `REGULATOR_ORDER × (kp,ki,kd)` order (=`config/regulators.py`).
+`gain_i = ref_i · exp(s_i · tanh(z_i))` (⇒ bounded to `[lo_i, hi_i]`); inverse `inv_gain` (for SFT targets);
+`gain_norm`/`gain_norm_scalar` (obs normalization = `tanh(z)`). The table (`GAIN_REF/S/LO/HI/DEFAULT` + `*_MAP`
+dicts) is **computed from the preset family** `config.scenarios.SCENARIOS` at import (geometric-midpoint `ref`,
+log half-width `s` sized to span the presets ± `EXPAND`) and frozen into `normalization.snapshot()` → the
+checkpoint pins the whole gain space. Because presets span up to ~70× on some gains, this log-space map (not a
+±50% band) is what makes SFT-to-preset expressible. `config/regulators.py` holds `REGULATOR_ORDER`/`GAIN_KEYS`/
+`N_GAINS`/`ACTION_DIM` (neutral module so `shield` and `gain_space` avoid an import cycle; `shield` re-exports).
 
 ## Neural PID Gain Scheduler (NPGS) — actor/critic (`ismpu/agent/gain_scheduler.py`, plan §10)
 
 The neural actor+critic (~1.4 M params). **Renamed from "PIDNN"** because the ТЗ forbids embedding the PID
-transfer function in the net — NPGS keeps the classical PID as plant and only predicts multiplicative gain
-corrections + channel weights. Design is frozen; `implementation_plan.md` §10 is the full spec.
+transfer function in the net — NPGS keeps the classical PID as plant and only predicts its coefficients. It emits
+**absolute gains** (not multiplicative α), which is what makes the SFT warm-start toward expert presets work.
 
 - **Input:** a window of `T` observation frames → `(B, T, 56)` (`T≈16` ≈ 0.8 s at 20 Hz; `NPGSConfig.window`).
-  Windowed-recurrent (RNN reprocesses the window each tick) rather than stateful — avoids PPO+hidden-state
-  pitfalls and is deterministic for deploy. `rollout_env` now emits the window as a **sequence** `(T,56)`
-  (its `observation_space`/`_stacked` changed from the old flat vector in Phase 4).
+  Windowed-recurrent, deterministic for deploy. `rollout_env` emits the window as a **sequence** `(T,56)`.
 - **Shared encoder** (`encode()`, actor + critic share it): input `LayerNorm` → time-distributed
   `Linear(56→256)→GELU→Linear(256→256)→GELU` (+residual) → `GRU(256)×2` → `MultiheadAttention(256,4)` (+residual,
-  LayerNorm) → learned-query attention pooling → shared trunk `Linear(256→256)→Linear(256→128)` (+skip) →
-  `z_shared (128)`.
-- **Context Fusion (hierarchy):** a branch off `z_shared` produces the **movement-phase** context `c (128)`
-  (touchdown / high-speed / mid / taxi / stop; `phase_head` + `phase_labels_from_groundspeed_kts` feed an
-  optional auxiliary loss, `lambda_phase=0` by default). Every head receives `[z_shared ⊕ c]` — this quiets the
-  reverse heads below 60 kts while brake heads take over, without hand-coding it.
-- **Heads** (`Linear(256→64)→GELU→Linear(64→32)→GELU→Linear(32→out)`): Heading→α(runway_center, 3),
-  Brake→α(3, duplicated to L/R — symmetric, asymmetry via `w_lat`), Reverse→α(3, duplicated to L/R),
-  Weights→`(w_lon,w_lat)`. **11 policy outputs** (`POLICY_DIM`) expanded by `expand_to_action` to the **17-dim
-  `Corrections`** (order matches `shield.REGULATOR_ORDER` + weights). `bound()`: `α = 1 + 0.5·tanh(z)` →
-  `[0.5,1.5]` (= Shield level 1); `w = 1 + tanh(z)` → `[0,2]`.
-- **Policy:** tanh-squashed Gaussian (state-independent learnable `log_std`, init ≈ −0.5); mean heads init
-  small orthogonal gain (0.01) so `α≈1` at start ⇒ training begins ≈ classical (identity invariant). PPO stores
-  the pre-squash sample `raw` (11-dim) and recomputes log-prob via `evaluate_actions`; the env gets the bounded
-  17-dim `action`. Greedy (deploy) = mean; `act_numpy` is the single-window inference entry.
-- **Critic:** a **head** off `z_shared` (not a separate net) → `V(s)`.
-- **Serialization:** `NPGS.save/load` bundle weights + `NPGSConfig` + normalization `snapshot()` in one file —
-  the deterministic deploy artifact (plan §14).
-- **Downstream:** every output passes through the Shield before reaching the PID loop — the net can't bypass it.
+  LayerNorm) → learned-query attention pooling → shared trunk `Linear(256→256)→Linear(256→128)` (+skip) → `z_shared`.
+- **Context Fusion:** a branch off `z_shared` → **movement-phase** context `c (128)` (`phase_head` +
+  `phase_labels_from_groundspeed_kts` feed an optional aux loss). Every head receives `[z_shared ⊕ c]`.
+- **Heads** (`Linear(256→64)→GELU→Linear(64→32)→GELU→Linear(32→out)`): Heading→runway_center(3), Brake→L/R(6),
+  Reverse→L/R(6), Weights→`(w_lon,w_lat)`. **17 policy outputs = ACTION_DIM** (L/R brake/reverse are now
+  **independent** — asymmetric-brake presets like reverse-fail need it; SFT provides the symmetry prior the old
+  weight-sharing used to bake in). `to_gains(u)`: first 15 → `ref·exp(s·tanh(z))` (absolute gains), last 2 →
+  `1+tanh(z)` (weights). Gain heads init with a **DEFAULT bias** (`gain_space.default_bias()`) → cold-net output
+  ≈ classical DEFAULT (safe start).
+- **Policy:** plain Gaussian over the raw `u` (17-dim); `to_gains` is a deterministic env-side squash (no tanh
+  Jacobian in the log-prob). `log_std` is a **per-output vector** init so `s_i·std_z_i ≈ exploration_frac` (uniform
+  multiplicative exploration ±15% across gains despite very different `s_i`). Greedy (deploy) = mean; `act_numpy`.
+- **Critic:** a **head** off `z_shared` → `V(s)`.
+- **"Identity"/parity:** there's no α=1 identity; the analog is `preset_action(preset)` (write the scenario's
+  preset gains exactly, float64) → env reproduces classical `control_step` bit-for-bit (`REFERENCE_ACTION` = DEFAULT).
+  Safety on failures rests on SFT-init + Shield, not on a default-identity.
+- **Serialization:** `NPGS.save/load` bundle weights + `NPGSConfig` + normalization `snapshot()` (incl. gain space).
+- **Downstream:** every output passes through the Shield (preset-anchored) before reaching the PID loop.
+
+## SFT warm-start (`ismpu/agent/pretrain.py`, `ismpu/runtime/{capture,pretrain}.py`, plan Stage B)
+
+Supervised pretraining (behavioral cloning) so PPO starts near the expert presets instead of DEFAULT — PPO alone
+converges slowly. `runtime/capture.py` runs the **classical** controller in-process inside `RolloutEnv` (action =
+`preset_action(preset)`) and records `(obs_window, target_z)` where `target_z = inv_gain(preset gains)` (weights→0).
+Obs must come from the live `ObservationBuilder` (the PID block — integral/deriv/last_output — isn't in any
+telemetry DataRef, so raw-DataRef reconstruction is wrong). `agent/pretrain.py::pretrain_sft` regresses the policy
+`mean → target_z` (MSE, `log_std` frozen). **Anti-copycat (critical):** the obs carries "previous gains" and the
+BC target is constant per rollout, so the net could just copy the input; `pretrain` replaces the gain features with
+**fresh U(−1,1) noise per batch** (not zeros — real values are in `[−1,1]` too, so no train/inference shift),
+forcing the net to key on the disturbance (failure/weather) features. Canonical labeling: each **non-draft** preset
+(`ScenarioConfig.draft`) is its own regime run in its own conditions; never mix inconsistent labels.
+`runtime/pretrain.py` orchestrates capture→BC→checkpoint (`npgs_sft.pt`); `smoke_pretrain(env, scenarios)` is the
+offline (no-X-Plane) path used in `tests/test_pretrain.py`. `train.py` loads it via `TrainConfig.init_from`;
+`ppo.lambda_anchor>0` additionally keeps a frozen SFT copy as `trainer.sft_reference` (anti-forgetting).
 
 ## PPO training (`ismpu/agent/ppo.py`, `ismpu/runtime/train.py`, plan §11)
 
@@ -296,7 +336,9 @@ Compact CleanRL-style PPO over a **single** env (X-Plane is one instance). `PPOT
 `RolloutBuffer`, `compute_gae` does GAE(λ) with a done-mask bootstrap, `update` runs minibatch epochs with a
 clipped surrogate + value-clipping, advantage normalization, entropy bonus, grad-clip 0.5, KL early-stop, and
 LR annealing. Multi-component loss `L = L_ppo + λs·L_smooth + λp·L_phys(=0) + λsh·L_shield(=0)`:
-- **L_smooth** is a *differentiable* anchor pulling the predicted corrections toward identity (`(bound(mean)−1)²`).
+- **L_smooth** is a *differentiable* temporal-smoothness penalty: `(tanh(mean) − prev_gain_norm)²` where
+  `prev_gain_norm` is the obs's encoded previous gains — plus an optional SFT-prior anchor to a frozen SFT copy
+  (`lambda_anchor`, anti-forgetting) set via `PPOTrainer.sft_reference`.
 - Non-differentiable penalties (jerk, Shield intervention, heading, instability) enter through the **reward**
   (`envs/reward.py`), so they shape the advantage — the correct way to inject them into PPO.
 - **L_phys** (observer residual, §12) and **L_shield** (a `tanh(mean)⁴` band-barrier) are wired hooks with

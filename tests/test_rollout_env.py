@@ -10,7 +10,7 @@ from ismpu.control.channels import ControlsState
 from ismpu.envs.sim_interface import XPlaneBackend
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, FEATURE_NAMES, ObserverEstimate
-from ismpu.envs.action import decode, apply_corrections, IDENTITY_ACTION, ACTION_LOW, ACTION_HIGH
+from ismpu.envs.action import decode, apply_corrections, preset_action, REFERENCE_ACTION, ACTION_LOW, ACTION_HIGH
 from ismpu.envs.reward import compute_reward, RewardWeights
 from ismpu.envs.rollout_env import RolloutEnv
 from ismpu.agent.shield import base_gains_from_pids
@@ -54,6 +54,9 @@ class FakeXPC:
     def pauseSIM(self, *a):
         pass
 
+    def fix_all_systems(self):
+        pass
+
     def subscribeDREFs(self, subs, timeout=5.0):
         for dref, _ in subs:
             self.current_dref_values.setdefault(dref, {"value": 0.0})
@@ -67,11 +70,12 @@ class FakeXPC:
 
 
 # --------------------------------------------------------------------------- #
-# Инвариант identity: env.step(IDENTITY) == классический control_step (§1)
+# Парити классики: env.step(preset_action) == классический control_step (§1)
+# (сеть теперь выдаёт АБСОЛЮТНЫЕ gain'ы; классику воспроизводит действие = коэффициенты пресета)
 # --------------------------------------------------------------------------- #
 
-def test_env_identity_parity_matches_classical_control_step():
-    scenario = SCENARIO_PRESETS["default"]
+def test_env_preset_action_parity_matches_classical_control_step():
+    scenario = SCENARIO_PRESETS["default"]     # пресет default → preset_action == REFERENCE_ACTION
     n_steps = 6
 
     # (A) чистая классика
@@ -82,32 +86,34 @@ def test_env_identity_parity_matches_classical_control_step():
         ctrl_a.control_step(DT, send=True)
     classical = fake_a.control_sends()
 
-    # (B) среда с тождественным действием и без Shield
+    # (B) среда с действием = точные коэффициенты пресета (float64) без Shield
     fake_b = FakeXPC(_scripted_values())
     sim = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
     ctrl_b = ControllingSystem(xpc=fake_b)
     env = RolloutEnv(sim, ctrl_b, shield=None)
     env.reset(scenario)
+    action = preset_action(base_gains_from_pids(ctrl_b.pids))   # точная запись пресета
     for _ in range(n_steps):
-        env.step(IDENTITY_ACTION)
+        env.step(action)
     via_env = fake_b.control_sends()
 
     assert len(classical) == 5 * n_steps
     assert via_env == pytest.approx(classical)   # бит-в-бит совпадение команд
 
 
-def test_identity_action_leaves_gains_and_weights_unchanged():
+def test_preset_action_leaves_scenario_gains_unchanged():
     fake = FakeXPC(_scripted_values())
     ctrl = ControllingSystem(xpc=fake)
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
-    base = base_gains_from_pids(ctrl.pids)
+    preset = base_gains_from_pids(ctrl.pids)
 
-    apply_corrections(decode(IDENTITY_ACTION), base, ctrl, shield=None)
+    # действие = абсолютные коэффициенты пресета → gain'ы не меняются
+    apply_corrections(decode(preset_action(preset)), preset, ctrl, shield=None)
 
-    for reg in base:
-        assert ctrl.pids[reg].kp == base[reg]["kp"]
-        assert ctrl.pids[reg].ki == base[reg]["ki"]
-        assert ctrl.pids[reg].kd == base[reg]["kd"]
+    for reg in preset:
+        assert ctrl.pids[reg].kp == pytest.approx(preset[reg]["kp"])
+        assert ctrl.pids[reg].ki == pytest.approx(preset[reg]["ki"])
+        assert ctrl.pids[reg].kd == pytest.approx(preset[reg]["kd"])
     assert ctrl.longitudinal_channel.w_lon == 1.0
     assert ctrl.lateral_channel.w_lat == 1.0
 
@@ -134,8 +140,7 @@ def test_observation_in_normalized_range():
     ctrl = _ready_controller()
     telem = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=50.0,
                       heading_true_deg=float(RWY_HEADING_TRUE), roll_deg=2.0, accel_long_g=-0.3)
-    base = base_gains_from_pids(ctrl.pids)
-    obs = ObservationBuilder().build(telem, ctrl, base, SCENARIO_PRESETS["nws_fail"].weather, ObserverEstimate())
+    obs = ObservationBuilder().build(telem, ctrl, SCENARIO_PRESETS["nws_fail"].weather, ObserverEstimate())
     assert obs.shape == (OBS_DIM,)
     assert obs.dtype == np.float32
     assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
@@ -145,8 +150,7 @@ def test_observation_invalid_telemetry_is_zeros():
     from ismpu.envs.sim_interface import Telemetry
     ctrl = _ready_controller()
     telem = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
-    base = base_gains_from_pids(ctrl.pids)
-    obs = ObservationBuilder().build(telem, ctrl, base, SCENARIO_PRESETS["default"].weather)
+    obs = ObservationBuilder().build(telem, ctrl, SCENARIO_PRESETS["default"].weather)
     assert np.count_nonzero(obs) == 0
 
 
@@ -154,15 +158,17 @@ def test_observation_invalid_telemetry_is_zeros():
 # Action Space
 # --------------------------------------------------------------------------- #
 
-def test_identity_action_decodes_to_identity_corrections():
-    corr = decode(IDENTITY_ACTION)
-    assert all(triple == (1.0, 1.0, 1.0) for triple in corr.alpha.values())
-    assert corr.w_lon == 1.0 and corr.w_lat == 1.0
+def test_reference_action_decodes_to_default_gains():
+    from ismpu.agent import gain_space as gs
+    cmd = decode(REFERENCE_ACTION)
+    for i, (reg, key) in enumerate(gs.SLOTS):
+        assert cmd.gains[reg][key] == pytest.approx(gs.GAIN_DEFAULT[i])
+    assert cmd.w_lon == 1.0 and cmd.w_lat == 1.0
 
 
 def test_action_bounds_shape():
     assert ACTION_LOW.shape == (17,) and ACTION_HIGH.shape == (17,)
-    assert np.all(ACTION_LOW <= IDENTITY_ACTION) and np.all(IDENTITY_ACTION <= ACTION_HIGH)
+    assert np.all(ACTION_LOW <= REFERENCE_ACTION) and np.all(REFERENCE_ACTION <= ACTION_HIGH)
 
 
 # --------------------------------------------------------------------------- #
@@ -205,15 +211,15 @@ def test_env_reset_and_step_shapes_and_history():
     assert obs.shape == (3, OBS_DIM)        # окно истории как последовательность (T, 56)
     assert info == {}
 
-    obs, reward, terminated, truncated, info = env.step(IDENTITY_ACTION)
+    obs, reward, terminated, truncated, info = env.step(REFERENCE_ACTION)
     assert obs.shape == (3, OBS_DIM)
     assert isinstance(reward, float)
     assert not terminated and not truncated
     assert "reward_components" in info
 
 
-def test_env_with_shield_at_identity_still_parity():
-    # Shield при identity — no-op, поэтому команды те же, что у классики.
+def test_env_with_shield_at_preset_still_parity():
+    # Действие = пресет → Shield no-op (пресет внутри всех границ), команды = классика.
     from ismpu.agent.shield import Shield
     scenario = SCENARIO_PRESETS["default"]
     n = 4
@@ -225,11 +231,13 @@ def test_env_with_shield_at_identity_still_parity():
         ctrl_a.control_step(DT, send=True)
 
     fake_b = FakeXPC(_scripted_values())
+    ctrl_b = ControllingSystem(xpc=fake_b)
     env = RolloutEnv(XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False),
-                     ControllingSystem(xpc=fake_b), shield=Shield())
+                     ctrl_b, shield=Shield())
     env.reset(scenario)
+    action = preset_action(base_gains_from_pids(ctrl_b.pids))
     for _ in range(n):
-        env.step(IDENTITY_ACTION)
+        env.step(action)
 
     assert fake_b.control_sends() == pytest.approx(fake_a.control_sends())
 

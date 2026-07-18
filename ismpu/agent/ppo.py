@@ -3,10 +3,11 @@
 `L = L_ppo + λ_s·L_smooth + λ_p·L_phys + λ_sh·L_shield` (+ опц. вспом. фаза).
 
 - **L_ppo** — clipped surrogate + GAE(λ)-advantage от критика + value-clipping.
-- **L_smooth** — дифференцируемый штраф за отклонение поправок от identity (плавность/
-  близость к классике): `Σ(α−1)² + Σ(w−1)²` по батчу от текущей политики. Рывки
-  управления и активация Shield входят также через **reward** (`envs/reward.py`) — так
-  недифференцируемые штрафы корректно попадают в advantage.
+- **L_smooth** — дифференцируемый штраф **временной гладкости коэффициентов**: расхождение
+  выхода сети с ПРОШЛЫМИ gain'ами (закодированы в obs как лог-норма = `tanh(z)`),
+  `Σ(tanh(mean)−prev_gain_norm)²`. Опц. + SFT-prior-anchor `‖mean − mean_SFT‖²` (не забывать
+  пресеты). Рывки управления и активация Shield входят также через **reward**
+  (`envs/reward.py`) — так недифференцируемые штрафы корректно попадают в advantage.
 - **L_phys** — хук обсервера (§12); `λ_p = 0` до его включения, слагаемое уже в сумме.
 - **L_shield** — хук штрафа за вмешательство Shield; `λ_sh = 0` по умолчанию (основной
   сигнал Shield идёт через reward), барьерный терм подключается тем же швом.
@@ -30,12 +31,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ismpu.agent.gain_scheduler import NPGS, POLICY_DIM, N_ALPHA_OUT, phase_labels_from_groundspeed_kts
+from ismpu.agent.gain_scheduler import NPGS, POLICY_DIM, N_GAIN_OUT, phase_labels_from_groundspeed_kts
 from ismpu.agent.normalization import SPEED_SCALE
-from ismpu.envs.observation import FEATURE_NAMES
+from ismpu.envs.observation import FEATURE_NAMES, GAIN_FEATURE_INDICES
 from ismpu.utils.converts import Converts
 
 _GS_IDX = FEATURE_NAMES.index("ground_speed")   # индекс путевой скорости в кадре obs
+_GAIN_FEAT_IDX = GAIN_FEATURE_INDICES           # gain-признаки (лог-норма прошлых коэффициентов)
 
 
 @dataclass
@@ -56,6 +58,7 @@ class PPOConfig:
     anneal_lr: bool = True
     # Многокомпонентный loss
     lambda_smooth: float = 1e-3
+    lambda_anchor: float = 0.0      # SFT-prior-anchor к замороженной SFT-копии (Stage C)
     lambda_phys: float = 0.0        # хук обсервера (§12), включается позже
     lambda_shield: float = 0.0      # хук штрафа Shield (основной сигнал — через reward)
     lambda_phase: float = 0.0       # вспом. задача фазы движения (§10)
@@ -110,6 +113,7 @@ class PPOTrainer:
         self.global_step = 0
         self.update_idx = 0
         self.history: list[dict] = []
+        self.sft_reference: NPGS | None = None   # замороженная SFT-копия для L_anchor (Stage C)
         # Состояние потоковой среды (между rollout'ами не теряем эпизод).
         self._next_obs: np.ndarray | None = None
         self._next_done: float = 1.0
@@ -243,9 +247,16 @@ class PPOTrainer:
 
                 ent = entropy.mean()
 
-                # L_smooth: отклонение ограниченных поправок от identity (дифференцируемо).
-                bounded = self.net.bound(mean)
-                l_smooth = (bounded - 1.0).pow(2).sum(-1).mean()
+                # L_smooth: временная гладкость коэффициентов — штраф за расхождение выхода сети
+                # с ПРОШЛЫМИ gain'ами (закодированы в obs как лог-норма = tanh(z)). Дифференцируемо.
+                cur_gain_norm = torch.tanh(mean[:, :N_GAIN_OUT])
+                prev_gain_norm = b_obs[mb_t][:, -1, _GAIN_FEAT_IDX]
+                l_smooth = (cur_gain_norm - prev_gain_norm).pow(2).sum(-1).mean()
+                # + опц. SFT-prior-anchor: не забывать пресеты (замороженная SFT-копия, Stage C).
+                if self.sft_reference is not None and cfg.lambda_anchor > 0:
+                    with torch.no_grad():
+                        ref_mean, _, _ = self.sft_reference(b_obs[mb_t])
+                    l_smooth = l_smooth + cfg.lambda_anchor * (mean - ref_mean).pow(2).sum(-1).mean()
 
                 # Хуки §11 (по умолчанию нулевой вклад).
                 l_shield = self._shield_barrier(mean)
