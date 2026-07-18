@@ -255,9 +255,9 @@ PUDDLY_AQUAPLANING = WeatherState(runway_friction=RunwayCondition.PUDDLY.value, 
 
 ICY = WeatherState(runway_friction=RunwayCondition.ICY.value, temperature_c=-8.0, visibility_m=6000.0)
 
-STRONG_CROSSWIND = WeatherState.from_crosswind(crosswind_kts=20.0, headwind_kts=5.0)
+STRONG_CROSSWIND = WeatherState.from_crosswind(crosswind_kts=10.0, headwind_kts=5.0)
 
-GUSTY_CROSSWIND = WeatherState.from_crosswind(crosswind_kts=18.0, headwind_kts=4.0,
+GUSTY_CROSSWIND = WeatherState.from_crosswind(crosswind_kts=10.0, headwind_kts=4.0,
                                               gust_kts=12.0, turbulence=5.0, variability_pct=0.6)
 
 LOW_VISIBILITY = WeatherState(visibility_m=800.0, rain_pct=0.3)

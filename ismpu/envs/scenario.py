@@ -85,9 +85,13 @@ class Scenario:
         control = SCENARIOS[name]
         if failures is None:
             failures = (control.failure,) if control.failure is not FailureMode.NONE else ()
+
+        if weather is None:
+            weather = control.weather if control.weather is not None else STANDARD_WEATHER
+
         return cls(
             scenario_id=scenario_id or name, seed=seed, control=control,
-            weather=weather if weather is not None else STANDARD_WEATHER,
+            weather=weather,
             failures=tuple(failures),
             touchdown=touchdown if touchdown is not None else _STANDARD_TOUCHDOWN,
             sensor_noise=sensor_noise if sensor_noise is not None else SensorNoise(),
