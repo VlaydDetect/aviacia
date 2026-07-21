@@ -139,12 +139,34 @@ def _nominal_values(groundspeed=50.0):
     }
 
 
+def _backend(mock):
+    """Бэкенд поверх мок-коннектора: контур зависит только от SimInterface."""
+    from ismpu.envs.sim_interface import XPlaneBackend
+    return XPlaneBackend(xpc=mock, settle_s=0.0, reload_each_reset=False)
+
+
+def _telemetry(values: dict):
+    """Кадр телеметрии из набора значений DataRef.
+
+    Контур больше не читает коннектор сам — кадр подаётся параметром `control_step`, поэтому
+    тесты собирают его так же, как это делает бэкенд.
+    """
+    from ismpu.envs.sim_interface import Telemetry
+    return Telemetry(
+        lat=values.get(LATITUDE), lon=values.get(LONGITUDE),
+        groundspeed_ms=values.get(GROUNDSPEED), heading_true_deg=values.get(TRUE_PSI),
+        valid=None not in (values.get(LATITUDE), values.get(LONGITUDE),
+                           values.get(GROUNDSPEED), values.get(TRUE_PSI)),
+    )
+
+
 def test_control_step_emits_five_bounded_commands():
-    mock = MockXPC(_nominal_values(groundspeed=50.0))
-    controller = ControllingSystem(xpc=mock)
+    values = _nominal_values(groundspeed=50.0)
+    mock = MockXPC(values)
+    controller = ControllingSystem(_backend(mock))
     DEFAULT.apply(controller)
 
-    stop = controller.control_step(0.05)
+    stop = controller.control_step(0.05, _telemetry(values))
 
     assert stop is False
     assert len(mock.sent) == 5
@@ -166,12 +188,13 @@ def test_nws_fail_preset_injects_failure():
     from ismpu.config.scenarios import NWS_FAIL
     from ismpu.io.datarefs import YOKE_HEADING_RATIO
 
-    mock = MockXPC(_nominal_values(groundspeed=50.0))
-    controller = ControllingSystem(xpc=mock)
+    values = _nominal_values(groundspeed=50.0)
+    mock = MockXPC(values)
+    controller = ControllingSystem(_backend(mock))
     NWS_FAIL.apply(controller)
 
     assert controller.failures.state.steering_eff == 0.0  # отказ активирован
-    controller.control_step(0.05)
+    controller.control_step(0.05, _telemetry(values))
     # apply_failures обнулил руль перед отправкой (удержание — дифф. торможением/тягой)
     assert dict(mock.sent)[YOKE_HEADING_RATIO] == pytest.approx(0.0)
 
@@ -179,7 +202,7 @@ def test_nws_fail_preset_injects_failure():
 def test_default_preset_leaves_all_actuators_healthy():
     from ismpu.config.scenarios import DEFAULT
 
-    controller = ControllingSystem(xpc=MockXPC(_nominal_values()))
+    controller = ControllingSystem(_backend(MockXPC(_nominal_values())))
     DEFAULT.apply(controller)
 
     assert controller.failures.state.steering_eff == 1.0  # отказ не активирован
@@ -188,10 +211,28 @@ def test_default_preset_leaves_all_actuators_healthy():
 def test_control_step_stops_and_sends_nothing_on_missing_telemetry():
     values = _nominal_values()
     values[GROUNDSPEED] = None  # выпадение телеметрии
-    controller = ControllingSystem(xpc=MockXPC(values))
+    mock = MockXPC(values)
+    controller = ControllingSystem(_backend(mock))
     DEFAULT.apply(controller)
 
-    stop = controller.control_step(0.05)
+    stop = controller.control_step(0.05, _telemetry(values))
 
     assert stop is True
-    assert controller.xpc.sent == []
+    assert mock.sent == []
+
+
+def test_control_step_stops_on_invalid_frame_even_with_numeric_fields():
+    """Бэкенд стенда при обрыве связи отдаёт НУЛИ с valid=False, а не None.
+
+    Проверка «поле is None» пропустила бы groundspeed = 0.0 дальше, где он тут же выглядел бы
+    как «достигнута скорость руления», и эпизод молча засчитался бы пройденным.
+    """
+    from ismpu.envs.sim_interface import Telemetry
+
+    mock = MockXPC(_nominal_values())
+    controller = ControllingSystem(_backend(mock))
+    DEFAULT.apply(controller)
+    dropped = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
+
+    assert controller.control_step(0.05, dropped) is True
+    assert mock.sent == []

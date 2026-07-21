@@ -152,6 +152,34 @@ class RunwayTracker:
             "desired_heading_deg": np.degrees(desired_heading),
         }
 
+    def guidance_from_deviation(self, aircraft_heading_deg, runway_heading_deg, xte_m, ground_speed):
+        """Guidance по курсу ВПП и измеренному отклонению — без собственной геодезии.
+
+        Нужна для стенда заказчика: он сообщает `RunwayHeading` и `LateralDeviation`, но **не**
+        координаты торцов ВПП, поэтому геодезическую задачу решать не из чего. Зато и не надо:
+        то же самое выражается через курс ВПП и отклонение.
+
+        Эквивалентна `guidance()`: пеленг на точку упреждения отличается от оси ВПП на
+        `atan2(-e, L)`, к чему добавляется Stanley-коррекция `atan2(-k·e, L)`. Сверено численно —
+        совпадает с геодезической формой с точностью до расхождения между `RWY_HEADING_TRUE` и
+        фактическим пеленгом между торцами (≈0.01°, артефакт конфигурации).
+        """
+        lookahead = self.lookahead_min + self.lookahead_gain * ground_speed
+        L = max(lookahead, 1.0)
+
+        heading_error = np.radians(self.wrap_deg(runway_heading_deg - aircraft_heading_deg))
+        heading_error += np.arctan2(-xte_m, L)                      # геометрия точки упреждения
+        heading_error += np.arctan2(-self.xte_gain * xte_m, L)      # Stanley-подобная коррекция
+        heading_error = self.wrap_pi(heading_error)
+
+        return {
+            "xte": xte_m,
+            "along": None,          # вдоль-трековая координата на стенде не восстанавливается
+            "lookahead": lookahead,
+            "heading_error_deg": np.degrees(heading_error),
+            "desired_heading_deg": float(runway_heading_deg),
+        }
+
     def get_cross_track_error(self, lat_ac: float, lon_ac: float):
         """Возвращает отклонение от осевой линии в метрах. >0 - правее оси, <0 - левее."""
         d_ac = self.haversine_distance(RWY_START_LAT, RWY_START_LON, lat_ac, lon_ac) / self.R

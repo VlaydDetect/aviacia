@@ -3,8 +3,10 @@
 `ControlsState` — разделяемая по тактам структура команд (тормоза, реверс, руль).
 `LongitudinalChannel` — управление скоростью (тормоза + реверс) по эталонной кривой.
 `LateralChannel` — удержание оси (руление + дифференциальное торможение).
-Перенесено из main.ipynb без изменения логики; строковые DREF заменены на
-именованные константы из io.datarefs (эквивалентно).
+
+**Транспорта здесь нет.** Каналы получают телеметрию параметром и складывают команды в
+`ControlsState`; отправкой занимается бэкенд (`SimInterface.step`). Раньше `ControlsState`
+сам писал DataRef'ы X-Plane, из-за чего контур нельзя было запустить на стенде заказчика.
 """
 
 from dataclasses import dataclass
@@ -16,26 +18,38 @@ from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import ReferenceTrajectory
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.failures import FailureState
-from ismpu.io.xplane_connector import XPlaneConnectX
-from ismpu.io.datarefs import (
-    GROUNDSPEED, LATITUDE, LONGITUDE, TRUE_PSI,
-    LEFT_BRAKE_RATIO, RIGHT_BRAKE_RATIO, THROTTLE_RATIO_L, THROTTLE_RATIO_R,
-    YOKE_HEADING_RATIO,
-)
 
 
 @dataclass
 class ControlsState:
-    break_control = False
+    """Разделяемая по тактам структура команд.
+
+    Аннотации типов обязательны: без них `@dataclass` не видит ни одного поля, и тогда
+    (а) `__eq__` сравнивает пустой набор — любые два экземпляра равны независимо от команд,
+    (б) значения живут как атрибуты класса до первой записи в экземпляр.
+    """
+    break_control: bool = False
 
     # commands
-    rudder_cmd = 0.0
+    rudder_cmd: float = 0.0
 
-    cmd_brake_l = 0.0
-    cmd_brake_r = 0.0
+    cmd_brake_l: float = 0.0
+    cmd_brake_r: float = 0.0
 
-    cmd_rev_l = 0.0
-    cmd_rev_r = 0.0
+    cmd_rev_l: float = 0.0
+    cmd_rev_r: float = 0.0
+
+    def reset(self):
+        """Сброс к нейтральным командам — новый эпизод начинается с чистого состояния.
+
+        Критично для `break_control`: он выставляется в конце КАЖДОГО нормального пробега
+        (достигнута скорость руления), и без сброса следующий эпизод завершался бы на первом
+        же такте.
+        """
+        self.break_control = False
+        self.rudder_cmd = 0.0
+        self.cmd_brake_l = self.cmd_brake_r = 0.0
+        self.cmd_rev_l = self.cmd_rev_r = 0.0
 
     def apply_failures(self, failures_state: FailureState):
         self.rudder_cmd *= failures_state.steering_eff
@@ -57,30 +71,22 @@ class ControlsState:
         self.cmd_rev_l = pids['pid_rev_l'].clamp(self.cmd_rev_l)
         self.cmd_rev_r = pids['pid_rev_r'].clamp(self.cmd_rev_r)
 
-    def send_commands(self, xpc: XPlaneConnectX) -> bool:
-        if self.break_control:
-            return True
+    def neutralize(self):
+        """Обнуляет все органы управления. Отправку делает вызывающий через `SimInterface.step`.
 
-        xpc.sendDREF(LEFT_BRAKE_RATIO, self.cmd_brake_l)
-        xpc.sendDREF(RIGHT_BRAKE_RATIO, self.cmd_brake_r)
-        xpc.sendDREF(THROTTLE_RATIO_L, self.cmd_rev_l)
-        xpc.sendDREF(THROTTLE_RATIO_R, self.cmd_rev_r)
-        xpc.sendDREF(YOKE_HEADING_RATIO, self.rudder_cmd)
-
-        return False
-
-    def control_exception(self, xpc: XPlaneConnectX):
-        print("\n[MultiChannelAutoBrake] Остановка. Сброс всех управляющих органов.")
-        self.cmd_brake_l = self.cmd_brake_r = self.cmd_rev_l = self.cmd_rev_r = self.rudder_cmd = 0.0
-        self.send_commands(xpc)
-        self.break_control = True
+        Нейтральная команда, а не молчание: если просто перестать слать, последнее отклонение
+        останется приложенным до срабатывания сторожа на той стороне.
+        """
+        self.cmd_brake_l = self.cmd_brake_r = 0.0
+        self.cmd_rev_l = self.cmd_rev_r = 0.0
+        self.rudder_cmd = 0.0
 
 
 class LongitudinalChannel:
-    def __init__(self, xpc: XPlaneConnectX, pid_brake_l: PIDController, pid_brake_r: PIDController,
-                 pid_rev_l: PIDController, pid_rev_r: PIDController, trajectory: ReferenceTrajectory):
-        self.xpc = xpc
+    """Управление скоростью по эталонной кривой. Телеметрию получает параметром, не читает сам."""
 
+    def __init__(self, pid_brake_l: PIDController, pid_brake_r: PIDController,
+                 pid_rev_l: PIDController, pid_rev_r: PIDController, trajectory: ReferenceTrajectory):
         self.trajectory = trajectory
 
         self.pid_brake_l = pid_brake_l
@@ -93,12 +99,16 @@ class LongitudinalChannel:
 
         print("[LongitudinalChannel] Запуск продольного канала.")
 
-    def calc_commands(self, dt: float, state: ControlsState):
-        current_speed_ms = self.xpc.current_dref_values[GROUNDSPEED]['value']
-        if current_speed_ms is None:
+    def calc_commands(self, dt: float, state: ControlsState, telemetry):
+        # `valid` проверяется ПЕРВЫМ и отдельно от полей: бэкенд стенда при обрыве связи отдаёт
+        # нули, а не None, и проверка «поле is None» пропустила бы groundspeed = 0.0 дальше —
+        # где оно тут же выглядело бы как «достигнута скорость руления».
+        if not telemetry.valid or telemetry.groundspeed_ms is None:
             state.cmd_brake_l = state.cmd_brake_r = state.cmd_rev_l = state.cmd_rev_r = 0.0
             state.break_control = True
             return
+
+        current_speed_ms = telemetry.groundspeed_ms
 
         self.traveled_distance_m += current_speed_ms * dt
         ref_speed_ms = self.trajectory.get_reference_speed(self.traveled_distance_m)
@@ -138,10 +148,10 @@ class LongitudinalChannel:
 
 
 class LateralChannel:
-    def __init__(self, xpc: XPlaneConnectX, pid: PIDController, tracker: RunwayTracker, steering_brake_gain=0.4,
-                 steering_rev_gain=0.0):
-        self.xpc = xpc
+    """Удержание оси ВПП. Телеметрию получает параметром, не читает сам."""
 
+    def __init__(self, pid: PIDController, tracker: RunwayTracker, steering_brake_gain=0.4,
+                 steering_rev_gain=0.0):
         self.pid = pid
 
         self.tracker = tracker
@@ -151,17 +161,39 @@ class LateralChannel:
 
         print("[LateralChannel] Запуск латерального канала.")
 
-    def calc_commands(self, dt: float, state: ControlsState):
-        lat = self.xpc.current_dref_values[LATITUDE]['value']
-        lon = self.xpc.current_dref_values[LONGITUDE]['value']
-        heading = self.xpc.current_dref_values[TRUE_PSI]["value"]
-        groundspeed_ms = self.xpc.current_dref_values[GROUNDSPEED]["value"]
-        if None in (lat, lon, heading, groundspeed_ms):
-            cprint(f"[RunwayCenteringSystem] Error: drefs values is None", "red")
+    def _guidance(self, telemetry, heading, groundspeed_ms):
+        """Guidance по тому, что даёт бэкенд. → словарь guidance или None, если данных нет.
+
+        Стенд заказчика сообщает курс ВПП и боковое отклонение напрямую — тогда собственная
+        геодезия не нужна и, главное, не применима: координат торцов ВПП стенд не передаёт, и
+        считать от захардкоженного Шереметьево значило бы вести ВС по чужой осевой линии.
+
+        X-Plane этих полей не даёт → работает прежний геодезический путь, бит-в-бит как раньше.
+        """
+        runway_heading = getattr(telemetry, "runway_heading_deg", None)
+        lateral_deviation = getattr(telemetry, "lateral_deviation_m", None)
+        if runway_heading is not None and lateral_deviation is not None:
+            return self.tracker.guidance_from_deviation(
+                heading, runway_heading, lateral_deviation, groundspeed_ms)
+
+        if None in (telemetry.lat, telemetry.lon):
+            return None
+        return self.tracker.guidance(telemetry.lat, telemetry.lon, heading, groundspeed_ms)
+
+    def calc_commands(self, dt: float, state: ControlsState, telemetry):
+        heading = telemetry.heading_true_deg
+        groundspeed_ms = telemetry.groundspeed_ms
+        # `valid` — первым: см. комментарий в LongitudinalChannel.calc_commands.
+        if not telemetry.valid or None in (heading, groundspeed_ms):
+            cprint(f"[RunwayCenteringSystem] Error: telemetry is invalid", "red")
             state.rudder_cmd = 0.0
             return
 
-        guidance = self.tracker.guidance(lat, lon, heading, groundspeed_ms)
+        guidance = self._guidance(telemetry, heading, groundspeed_ms)
+        if guidance is None:
+            cprint(f"[RunwayCenteringSystem] Error: telemetry is invalid", "red")
+            state.rudder_cmd = 0.0
+            return
 
         error = guidance["heading_error_deg"]
         # w_lat — вес влияния латерального канала (=1 у классики); масштабирует руль и дифф. микс.

@@ -1,9 +1,8 @@
 """Цикл обучения NPGS через PPO с domain randomization (план §11, Этап 4).
 
-Собирает тренировочный стек: **один** коннектор X-Plane, разделяемый бэкендом
-`XPlaneBackend` и классическим контуром `ControllingSystem` (среда шлёт команды через
-`SimInterface.step`, а контур читает телеметрию из того же `xpc.current_dref_values`,
-поэтому коннектор обязан быть общим), `RolloutEnv` со Shield в inference-пути и NPGS.
+Собирает тренировочный стек: коннектор X-Plane за бэкендом `XPlaneBackend`, классический контур
+`ControllingSystem` (телеметрию получает параметром от среды, коннектор ему нужен только для
+прямой отправки в классическом цикле), `RolloutEnv` со Shield в inference-пути и NPGS.
 Учебный план (curriculum) поднимает `difficulty` от 0 к 1 по ходу обучения через
 `ScenarioGenerator`. Чекпоинты и CSV-лог по каждому терму — в `checkpoint_dir`.
 
@@ -23,6 +22,7 @@ from dataclasses import dataclass, field
 from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
 from ismpu.agent.ppo import PPOTrainer, PPOConfig
 from ismpu.agent.shield import Shield
+from ismpu.config.regulators import validate_action_contract
 
 
 @dataclass
@@ -103,11 +103,15 @@ def build_xplane_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 4900
     from ismpu.envs.sim_interface import XPlaneBackend
     from ismpu.envs.rollout_env import RolloutEnv
 
+    # Контракт обучаемого слоя проверяется ДО того, как потрачен прогон: рассинхронизация
+    # «сеть настраивает не то, что заявлено» иначе всплыла бы только на инференсе.
+    validate_action_contract()
+
     net = NPGS.load(cfg.init_from) if cfg.init_from else NPGS(cfg.npgs)
 
     xpc = XPlaneConnectX(ip=ip, port=port)
-    sim = XPlaneBackend(xpc=xpc)               # общий коннектор — обязательное условие обучения
-    controller = ControllingSystem(xpc=xpc)
+    sim = XPlaneBackend(xpc=xpc)
+    controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=net.cfg.window, shield=Shield())
 
     trainer = PPOTrainer(net, cfg.ppo, total_updates=cfg.total_updates)

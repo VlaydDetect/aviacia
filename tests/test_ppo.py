@@ -91,7 +91,7 @@ class ScriptedBackend(XPlaneBackend):
 
 def _make_env(window=6, shield=True):
     sim = ScriptedBackend()
-    ctrl = ControllingSystem(xpc=sim.xpc)   # общий коннектор (обязательное условие обучения)
+    ctrl = ControllingSystem(sim)
     return RolloutEnv(sim, ctrl, history_len=window, shield=Shield() if shield else None)
 
 

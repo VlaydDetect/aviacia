@@ -14,10 +14,10 @@ Gymnasium импортируется опционально: если пакет
 API совместим: `reset(scenario) -> (obs, info)`, `step(action) -> (obs, reward,
 terminated, truncated, info)`.
 
-Замечание о транспорте: команды отправляются через `SimInterface.step`, но контур
-читает телеметрию из `xpc.current_dref_values` — поэтому для обучения `sim` и
-`controller` должны делить один коннектор (X-Plane). Это тренировочный путь; поставка
-(Этап 6) — отдельный детерминированный рантайм.
+Замечание о транспорте: и телеметрия, и команды идут через `SimInterface` — среда читает кадр
+`sim.read_telemetry()` и передаёт его в `control_step` параметром. Контур не знает, против чего
+он работает, поэтому общий коннектор `sim` и `controller` больше не требуется: тот же код
+исполняется и на X-Plane, и на стенде заказчика.
 """
 
 from collections import deque
@@ -26,14 +26,18 @@ from dataclasses import dataclass
 import numpy as np
 
 from ismpu.config.constants import DT
+from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
+from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.sim_interface import SimInterface
 from ismpu.envs.scenario import Scenario
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, ACTION_LOW, ACTION_HIGH
-from ismpu.envs.reward import compute_reward, RewardWeights
+from ismpu.envs.reward import (
+    compute_reward, RewardWeights, EpisodeObjective, saturation_fraction,
+)
 from ismpu.agent.shield import RuntimeState, base_gains_from_pids
 
 try:  # gymnasium опционален
@@ -59,6 +63,24 @@ def _make_box(low, high):
     if _gym_spaces is not None:
         return _gym_spaces.Box(low=low, high=high, dtype=np.float32)
     return _SimpleBox(low=low, high=high, shape=low.shape)
+
+
+def heading_deviation_deg(telemetry) -> float:
+    """Отклонение курса ВС от направления ВПП — приёмочная величина ТЗ 5.1.3.3 / 5.1.2.4.
+
+    ТЗ формулирует требование как «удержание курса в пределах ±5° **от направления ВПП**», то есть
+    нормируется состояние ВС, а не команда. `RunwayTracker.guidance()["heading_error_deg"]` для
+    этого не годится: там пеленг на точку упреждения минус курс плюс Stanley-коррекция по сносу,
+    то есть **ошибка команды руления**. При смещении 5 м от оси и идеально выдержанном курсе она
+    показывает −6.35° и объявила бы провал гейта ±5°, хотя отклонение курса ровно нулевое.
+
+    Курс ВПП берётся из телеметрии, если бэкенд его сообщает (стенд заказчика), иначе — из
+    конфигурации (X-Plane, где ВПП фиксирована).
+    """
+    runway_heading = getattr(telemetry, "runway_heading_deg", None)
+    if runway_heading is None:
+        runway_heading = RWY_HEADING_TRUE
+    return RunwayTracker.wrap_deg(telemetry.heading_true_deg - runway_heading)
 
 
 def _snapshot_command(state: ControlsState) -> ControlsState:
@@ -90,6 +112,9 @@ class RolloutEnv:
         self._scenario: Scenario | None = None
         self._prev_command: ControlsState | None = None
         self._steps = 0
+        # Эпизодный objective: то же определение «хорошего пробега», что и у потактового
+        # reward, но сводное — идёт в приёмку, отбор чекпоинтов и вес SFT-меток.
+        self.objective = EpisodeObjective()
 
         # Наблюдение — окно истории как ПОСЛЕДОВАТЕЛЬНОСТЬ (T, 56) (вход NPGS, §10/Этап 4),
         # а не плоский вектор: сеть обрабатывает временную ось (GRU/attention).
@@ -109,6 +134,7 @@ class RolloutEnv:
         self.controller.set_channel_weights(1.0, 1.0)
         self._steps = 0
         self._prev_command = None
+        self.objective = EpisodeObjective(weights=self.objective.weights)
 
         obs = self._observe(telemetry)
         self._history.clear()
@@ -125,8 +151,8 @@ class RolloutEnv:
         pre = self.sim.read_telemetry()
         runtime = self._runtime_state(pre)
 
-        # 3) Расчёт команды контуром без отправки.
-        break_control = self.controller.control_step(self.dt, send=False)
+        # 3) Расчёт команды контуром по прочитанному кадру, без отправки.
+        break_control = self.controller.control_step(self.dt, pre, send=False)
         command = self.controller.state
         shield_report = None
         if self.shield is not None and not break_control:
@@ -150,6 +176,10 @@ class RolloutEnv:
         self._prev_command = _snapshot_command(command)
         info = {"reward_components": components, "shield": shield_report,
                 "break_control": break_control, "off_runway": off_runway}
+        if terminated or truncated:
+            # Сводка эпизода — для приёмки (runtime/evaluate.py), веса SFT-меток и отбора
+            # чекпоинтов. Считается из тех же отсчётов, что и потактовый reward.
+            info["objective"] = self.objective.summary()
         return self._stacked(), reward, terminated, truncated, info
 
     def close(self):
@@ -166,13 +196,17 @@ class RolloutEnv:
         return np.stack(list(self._history)).astype(np.float32)
 
     def _runtime_state(self, telemetry) -> RuntimeState:
+        """Состояние для поведенческих проверок Shield.
+
+        Курс здесь — отклонение от направления ВПП, а не ошибка команды: Shield ловит **срыв по
+        курсу**, то есть расхождение состояния, и на ошибке команды он срабатывал бы просто от
+        бокового смещения при идеально выдержанном курсе.
+        """
         gs_kts = (telemetry.groundspeed_ms or 0.0) * Converts.MS_TO_KTS
-        heading_err = 0.0
-        if telemetry.valid and None not in (telemetry.lat, telemetry.lon, telemetry.heading_true_deg):
-            g = self.controller.lateral_channel.tracker.guidance(
-                telemetry.lat, telemetry.lon, telemetry.heading_true_deg, telemetry.groundspeed_ms)
-            heading_err = g["heading_error_deg"]
-        return RuntimeState(groundspeed_kts=gs_kts, heading_error_deg=heading_err)
+        heading_dev = 0.0
+        if telemetry.valid and telemetry.heading_true_deg is not None:
+            heading_dev = heading_deviation_deg(telemetry)
+        return RuntimeState(groundspeed_kts=gs_kts, heading_error_deg=heading_dev)
 
     def _reward(self, telemetry, command, shield_report):
         if not telemetry.valid or None in (telemetry.lat, telemetry.lon,
@@ -184,13 +218,35 @@ class RolloutEnv:
 
         g = self.controller.lateral_channel.tracker.guidance(
             telemetry.lat, telemetry.lon, telemetry.heading_true_deg, telemetry.groundspeed_ms)
-        ref = self.controller.longitudinal_channel.trajectory.get_reference_speed(
-            self.controller.longitudinal_channel.traveled_distance_m)
+        lon_channel = self.controller.longitudinal_channel
+        ref = lon_channel.trajectory.get_reference_speed(lon_channel.traveled_distance_m)
+        speed_error_ms = telemetry.groundspeed_ms - ref
+        gs_kts = telemetry.groundspeed_ms * Converts.MS_TO_KTS
+        # Насыщение — доля команд, упёршихся в границу своего PID: регулятор исчерпал
+        # авторитет, дальнейшая ошибка ничем не парируется.
+        saturation = saturation_fraction(command, self.controller.pids)
+        roll_deg = telemetry.roll_deg or 0.0
+        yaw_rate = telemetry.r_rad or 0.0
+        heading_dev = heading_deviation_deg(telemetry)
+
         comp = compute_reward(
-            xte_m=g["xte"], heading_error_deg=g["heading_error_deg"],
-            speed_error_ms=telemetry.groundspeed_ms - ref,
+            xte_m=g["xte"], heading_error_deg=heading_dev,
+            speed_error_ms=speed_error_ms,
             command=command, prev_command=self._prev_command,
-            roll_deg=telemetry.roll_deg or 0.0, yaw_rate=telemetry.r_rad or 0.0,
+            roll_deg=roll_deg, yaw_rate=yaw_rate,
             shield_l_shield=(shield_report.l_shield if shield_report else 0.0),
+            groundspeed_kts=gs_kts, saturation=saturation,
             weights=self.reward_weights)
-        return comp.total, comp, g
+
+        self.objective.add(
+            xte_m=g["xte"], heading_error_deg=heading_dev,
+            speed_error_ms=speed_error_ms, groundspeed_kts=gs_kts,
+            command=command, saturation=saturation,
+            roll_deg=roll_deg, yaw_rate=yaw_rate,
+            traveled_distance_m=lon_channel.traveled_distance_m,
+            shield_report=shield_report)
+        # `heading_error_deg` из guidance — ошибка КОМАНДЫ руления, полезная для диагностики
+        # контура, но не приёмочная величина; кладём её рядом, не подменяя ею отклонение курса.
+        guidance = dict(g)
+        guidance["heading_deviation_deg"] = heading_dev
+        return comp.total, comp, guidance

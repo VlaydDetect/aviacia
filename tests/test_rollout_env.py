@@ -11,8 +11,13 @@ from ismpu.envs.sim_interface import XPlaneBackend
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, FEATURE_NAMES, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, preset_action, REFERENCE_ACTION, ACTION_LOW, ACTION_HIGH
-from ismpu.envs.reward import compute_reward, RewardWeights
-from ismpu.envs.rollout_env import RolloutEnv
+from ismpu.envs.reward import (
+    compute_reward, RewardWeights, EpisodeObjective, saturation_fraction,
+    graded, excess, xte_limit_for, SHAPING_SLOPE, SPEED_TOL_MS, OVERSPEED_FACTOR,
+)
+from ismpu.config.requirements import XTE_ROLLOUT_MAX_M, XTE_TAXI_MAX_M, HEADING_FAULT_MAX_DEG
+from ismpu.envs.rollout_env import RolloutEnv, heading_deviation_deg
+from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.agent import normalization as norm
 from ismpu.io.datarefs import (
@@ -30,6 +35,16 @@ def _scripted_values(groundspeed=50.0):
         GROUNDSPEED: {"value": groundspeed},
         TRUE_PSI: {"value": float(RWY_HEADING_TRUE)},
     }
+
+
+def _telemetry(groundspeed=50.0):
+    """Кадр телеметрии, соответствующий `_scripted_values`.
+
+    Контур больше не читает коннектор сам — кадр подаётся параметром `control_step`.
+    """
+    from ismpu.envs.sim_interface import Telemetry
+    return Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=groundspeed,
+                     heading_true_deg=float(RWY_HEADING_TRUE))
 
 
 class FakeXPC:
@@ -78,18 +93,20 @@ def test_env_preset_action_parity_matches_classical_control_step():
     scenario = SCENARIO_PRESETS["default"]     # пресет default → preset_action == REFERENCE_ACTION
     n_steps = 6
 
-    # (A) чистая классика
+    # (A) чистая классика. Телеметрию читаем тем же бэкендом, что и среда, — иначе парити
+    # проверяло бы заодно и совпадение двух разных способов собрать кадр.
     fake_a = FakeXPC(_scripted_values())
-    ctrl_a = ControllingSystem(xpc=fake_a)
+    sim_a = XPlaneBackend(xpc=fake_a, settle_s=0.0, reload_each_reset=False)
+    ctrl_a = ControllingSystem(sim_a)
     scenario.apply_control(ctrl_a)
     for _ in range(n_steps):
-        ctrl_a.control_step(DT, send=True)
+        ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
     classical = fake_a.control_sends()
 
     # (B) среда с действием = точные коэффициенты пресета (float64) без Shield
     fake_b = FakeXPC(_scripted_values())
     sim = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
-    ctrl_b = ControllingSystem(xpc=fake_b)
+    ctrl_b = ControllingSystem(sim)
     env = RolloutEnv(sim, ctrl_b, shield=None)
     env.reset(scenario)
     action = preset_action(base_gains_from_pids(ctrl_b.pids))   # точная запись пресета
@@ -103,7 +120,7 @@ def test_env_preset_action_parity_matches_classical_control_step():
 
 def test_preset_action_leaves_scenario_gains_unchanged():
     fake = FakeXPC(_scripted_values())
-    ctrl = ControllingSystem(xpc=fake)
+    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
     preset = base_gains_from_pids(ctrl.pids)
 
@@ -124,9 +141,9 @@ def test_preset_action_leaves_scenario_gains_unchanged():
 
 def _ready_controller(preset="nws_fail"):
     fake = FakeXPC(_scripted_values())
-    ctrl = ControllingSystem(xpc=fake)
+    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
     SCENARIO_PRESETS[preset].apply_control(ctrl)
-    ctrl.control_step(DT, send=True)   # заполнить state/PID-внутренности/traveled
+    ctrl.control_step(DT, _telemetry(), send=True)   # заполнить state/PID-внутренности/traveled
     return ctrl
 
 
@@ -172,6 +189,140 @@ def test_action_bounds_shape():
 
 
 # --------------------------------------------------------------------------- #
+# ControlsState: настоящие поля dataclass и сброс между эпизодами
+# --------------------------------------------------------------------------- #
+
+def test_controls_state_has_real_dataclass_fields():
+    """Без аннотаций типов @dataclass не видит полей, и тогда любые два экземпляра равны.
+
+    Это делало бы бессмысленной любую проверку команд через `==`: тест проходил бы всегда.
+    """
+    from dataclasses import fields
+    names = [f.name for f in fields(ControlsState)]
+    assert names == ["break_control", "rudder_cmd",
+                     "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r"]
+
+    a, b = ControlsState(), ControlsState()
+    assert a == b                      # одинаковые команды — равны
+    a.cmd_brake_l = 1.0
+    assert a != b                      # разные команды — НЕ равны
+    assert b.cmd_brake_l == 0.0        # экземпляры независимы
+
+
+def test_controls_state_values_live_in_the_instance_from_construction():
+    """Свежий экземпляр обязан нести все поля в собственном `__dict__`.
+
+    Без аннотаций они были бы атрибутами КЛАССА, а `vars()` нового экземпляра — пустым:
+    значение читалось бы из общего состояния до первой записи в экземпляр.
+    """
+    own = vars(ControlsState())
+    assert set(own) == {"break_control", "rudder_cmd",
+                        "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r"}
+    assert own["cmd_rev_l"] == 0.0
+
+
+def test_break_control_is_cleared_when_a_scenario_is_applied():
+    """`break_control` взводится в конце КАЖДОГО нормального пробега (достигнута скорость
+    руления). Без сброса при настройке сценария следующий эпизод завершался бы на первом такте —
+    в обучении PPO это давало бы эпизоды длиной 1."""
+    fake = FakeXPC(_scripted_values())
+    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    SCENARIO_PRESETS["default"].apply_control(ctrl)
+
+    ctrl.state.break_control = True          # имитируем завершившийся эпизод
+    SCENARIO_PRESETS["default"].apply_control(ctrl)
+    assert ctrl.state.break_control is False
+
+    # ...и такт после сброса действительно выполняется, а не завершается сразу
+    assert ctrl.control_step(DT, _telemetry(), send=True) is False
+
+
+def test_env_reset_clears_a_latched_break_control():
+    scenario = SCENARIO_PRESETS["default"]
+    fake = FakeXPC(_scripted_values())
+    sim = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)
+    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    env = RolloutEnv(sim, ctrl, shield=None)
+
+    env.reset(scenario)
+    ctrl.state.break_control = True
+    env.reset(scenario)
+    assert ctrl.state.break_control is False
+
+    action = preset_action(base_gains_from_pids(ctrl.pids))
+    _obs, _reward, terminated, _truncated, _info = env.step(action)
+    assert terminated is False
+
+
+# --------------------------------------------------------------------------- #
+# Метрика курса: отклонение от ВПП, а не ошибка команды руления
+# --------------------------------------------------------------------------- #
+
+def _telemetry_at(offset_m: float, heading_deg: float, *, runway_heading=None):
+    """Телеметрия ВС на оси ВПП, смещённого вбок на `offset_m` и с заданным курсом."""
+    from ismpu.envs.sim_interface import Telemetry
+    t = RunwayTracker()
+    brg = np.radians(RWY_HEADING_TRUE)
+    lat, lon = t.destination(RWY_START_LAT, RWY_START_LON, brg, 800.0)
+    if offset_m:
+        side = np.radians(RWY_HEADING_TRUE + (90.0 if offset_m > 0 else -90.0))
+        lat, lon = t.destination(lat, lon, side, abs(offset_m))
+    return Telemetry(lat=lat, lon=lon, groundspeed_ms=50.0, heading_true_deg=heading_deg,
+                     runway_heading_deg=runway_heading)
+
+
+def test_heading_deviation_ignores_lateral_offset():
+    """ТЗ 5.1.3.3 нормирует курс «от направления ВПП». Смещение от оси на него не влияет.
+
+    Ошибка команды руления (`guidance()["heading_error_deg"]`) на 5 м смещения показывает −6.35°
+    и объявила бы провал гейта ±5° при идеально выдержанном курсе.
+    """
+    tracker = RunwayTracker()
+    for offset in (0.0, 3.0, 5.0, 10.0):
+        telem = _telemetry_at(offset, float(RWY_HEADING_TRUE))
+        assert heading_deviation_deg(telem) == pytest.approx(0.0, abs=1e-6)
+
+    # А ошибка команды на тех же данных растёт с отклонением — это разные величины.
+    telem = _telemetry_at(5.0, float(RWY_HEADING_TRUE))
+    command_error = tracker.guidance(telem.lat, telem.lon, telem.heading_true_deg, 50.0)
+    assert abs(command_error["heading_error_deg"]) > 5.0
+
+
+def test_heading_deviation_tracks_actual_yaw():
+    telem = _telemetry_at(0.0, float(RWY_HEADING_TRUE) + 4.0)
+    assert heading_deviation_deg(telem) == pytest.approx(4.0)
+    telem = _telemetry_at(0.0, float(RWY_HEADING_TRUE) - 6.0)
+    assert heading_deviation_deg(telem) == pytest.approx(-6.0)
+
+
+def test_heading_deviation_wraps_across_north():
+    telem = _telemetry_at(0.0, float(RWY_HEADING_TRUE) + 358.0)
+    assert heading_deviation_deg(telem) == pytest.approx(-2.0)
+
+
+def test_heading_deviation_prefers_runway_heading_from_telemetry():
+    """На стенде курс ВПП приходит телеметрией; конфиг — только значение по умолчанию."""
+    telem = _telemetry_at(0.0, 100.0, runway_heading=97.0)
+    assert heading_deviation_deg(telem) == pytest.approx(3.0)
+
+
+def test_tz_gate_verdicts_flip_to_correct_after_the_fix():
+    """Таблица из находки: раньше оба случая давали противоположный результат."""
+    from ismpu.runtime.evaluate import evaluate_tz, PASS, FAIL
+
+    def verdict(offset_m, yaw_deg):
+        telem = _telemetry_at(offset_m, float(RWY_HEADING_TRUE) + yaw_deg)
+        diagnostics = {"samples": 100, "xte_rollout_max_m": abs(offset_m),
+                       "xte_taxi_max_m": None, "final_speed_kts": 70.0,
+                       "heading_max_deg": abs(heading_deviation_deg(telem))}
+        criteria = evaluate_tz(diagnostics, SCENARIO_PRESETS["left_reverse_fail"])
+        return next(c.verdict for c in criteria if c.name == "heading_max")
+
+    assert verdict(offset_m=5.0, yaw_deg=0.0) == PASS    # курс выдержан, смещение не при чём
+    assert verdict(offset_m=0.0, yaw_deg=6.0) == FAIL    # курс сорван на оси
+
+
+# --------------------------------------------------------------------------- #
 # Reward
 # --------------------------------------------------------------------------- #
 
@@ -181,7 +332,8 @@ def test_reward_zero_deviation_is_least_penalized():
     bad = compute_reward(xte_m=6.0, heading_error_deg=10.0, speed_error_ms=20.0, command=cmd)
     assert good.total == pytest.approx(0.0)
     assert bad.total < good.total
-    assert bad.xte == pytest.approx(2.0)   # 6 м / 3 м = 2 (вне гейта ±3 м)
+    # 6 м при допуске 3 м: наклон внутри полосы + превышение (6−3)/3 = 1.0
+    assert bad.xte == pytest.approx(SHAPING_SLOPE + 1.0)
 
 
 def test_reward_counts_shield_and_jerk():
@@ -196,6 +348,158 @@ def test_reward_counts_shield_and_jerk():
     assert r.total < 0.0
 
 
+# --- форма гейта ТЗ ---------------------------------------------------------- #
+
+def test_graded_penalty_breaks_exactly_at_the_tz_limit():
+    """Ровно на пороге ТЗ штраф = наклон внутри полосы; дальше растёт много круче."""
+    limit = XTE_ROLLOUT_MAX_M
+    assert graded(0.0, limit) == pytest.approx(0.0)
+    assert graded(limit, limit) == pytest.approx(SHAPING_SLOPE)
+    # Внутри полосы наклон слабый, за порогом — 1.0 на допуск, т.е. в 1/SHAPING_SLOPE раз круче.
+    inside_slope = graded(limit, limit) - graded(0.0, limit)
+    outside_slope = graded(2 * limit, limit) - graded(limit, limit)
+    assert outside_slope == pytest.approx(1.0)
+    assert outside_slope > inside_slope / SHAPING_SLOPE * 0.9
+
+
+def test_excess_is_zero_inside_the_tolerance():
+    assert excess(2.9, XTE_ROLLOUT_MAX_M) == pytest.approx(0.0)
+    assert excess(-2.9, XTE_ROLLOUT_MAX_M) == pytest.approx(0.0)   # знак не важен
+    assert excess(6.0, XTE_ROLLOUT_MAX_M) == pytest.approx(1.0)
+
+
+def test_xte_limit_switches_to_taxi_tolerance_at_low_speed():
+    assert xte_limit_for(80.0) == XTE_ROLLOUT_MAX_M
+    assert xte_limit_for(10.0) == XTE_TAXI_MAX_M
+    assert xte_limit_for(None) == XTE_ROLLOUT_MAX_M   # неизвестна фаза → менее строгий допуск
+    # Одно и то же отклонение на рулении штрафуется сильнее, чем на пробеге.
+    cmd = ControlsState()
+    rollout = compute_reward(xte_m=2.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                             command=cmd, groundspeed_kts=80.0)
+    taxi = compute_reward(xte_m=2.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                          command=cmd, groundspeed_kts=10.0)
+    assert taxi.xte > rollout.xte
+
+
+def test_speed_penalty_is_asymmetric_overspeed_costs_more():
+    """Перелёт по скорости к концу ВПП опаснее недолёта — симметричным модулем не выражается."""
+    cmd = ControlsState()
+    delta = SPEED_TOL_MS + 10.0
+    fast = compute_reward(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=delta, command=cmd)
+    slow = compute_reward(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=-delta, command=cmd)
+    assert fast.speed == pytest.approx(OVERSPEED_FACTOR * slow.speed)
+    # Внутри мёртвой зоны штрафа нет вообще.
+    inside = compute_reward(xte_m=0.0, heading_error_deg=0.0,
+                            speed_error_ms=SPEED_TOL_MS - 0.1, command=cmd)
+    assert inside.speed == pytest.approx(0.0)
+
+
+def test_heading_gate_uses_tz_threshold():
+    cmd = ControlsState()
+    at_limit = compute_reward(xte_m=0.0, heading_error_deg=HEADING_FAULT_MAX_DEG,
+                              speed_error_ms=0.0, command=cmd)
+    beyond = compute_reward(xte_m=0.0, heading_error_deg=2 * HEADING_FAULT_MAX_DEG,
+                            speed_error_ms=0.0, command=cmd)
+    assert at_limit.heading == pytest.approx(SHAPING_SLOPE)
+    assert beyond.heading == pytest.approx(SHAPING_SLOPE + 1.0)
+
+
+# --- насыщение --------------------------------------------------------------- #
+
+def test_saturation_fraction_counts_commands_pegged_at_their_pid_bounds():
+    fake = FakeXPC(_scripted_values())
+    controller = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    SCENARIO_PRESETS["default"].apply_control(controller)
+    pids = controller.pids
+
+    cmd = ControlsState()
+    cmd.cmd_brake_l = cmd.cmd_brake_r = 0.5      # в середине [0, 1]
+    cmd.cmd_rev_l = cmd.cmd_rev_r = -0.5         # в середине [-1, 0]
+    cmd.rudder_cmd = 0.0
+    assert saturation_fraction(cmd, pids) == pytest.approx(0.0)
+
+    cmd.cmd_brake_l = pids["pid_brake_l"].max_out    # тормоз на максимуме — авторитет исчерпан
+    cmd.cmd_rev_l = pids["pid_rev_l"].min_out        # реверс на максимуме (−1) — тоже
+    assert saturation_fraction(cmd, pids) == pytest.approx(2.0 / 5.0)
+
+
+def test_zero_bound_is_not_counted_as_saturation():
+    """Тормоз на 0 = «торможение не требуется», а не «авторитет исчерпан».
+
+    Иначе флаг насыщения поднимался бы на каждом такте, где ВС медленнее эталонной кривой,
+    т.е. в начале почти любого пробега.
+    """
+    fake = FakeXPC(_scripted_values())
+    controller = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    SCENARIO_PRESETS["default"].apply_control(controller)
+    pids = controller.pids
+
+    cmd = ControlsState()
+    cmd.cmd_brake_l = cmd.cmd_brake_r = 0.0      # нижняя граница [0, 1] — но это ноль усилия
+    cmd.cmd_rev_l = cmd.cmd_rev_r = 0.0          # верхняя граница [-1, 0] — тоже ноль усилия
+    cmd.rudder_cmd = 0.0
+    assert saturation_fraction(cmd, pids) == pytest.approx(0.0)
+
+    # А симметричный руль упирается с обеих сторон — обе границы означают усилие.
+    cmd.rudder_cmd = pids["runway_center_pid"].max_out
+    assert saturation_fraction(cmd, pids) == pytest.approx(1.0 / 5.0)
+    cmd.rudder_cmd = pids["runway_center_pid"].min_out
+    assert saturation_fraction(cmd, pids) == pytest.approx(1.0 / 5.0)
+
+    # Насыщение попадает в reward — прежняя версия его не видела вообще.
+    saturated = compute_reward(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                               command=cmd, saturation=1.0)
+    clean = compute_reward(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                           command=cmd, saturation=0.0)
+    assert saturated.total < clean.total
+
+
+# --- эпизодный objective ----------------------------------------------------- #
+
+def test_episode_objective_separates_rollout_and_taxi_phases():
+    obj = EpisodeObjective()
+    cmd = ControlsState()
+    # Пробег: 2 м от оси — внутри ±3 м, нарушения нет.
+    for _ in range(10):
+        obj.add(xte_m=2.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                groundspeed_kts=80.0, command=cmd)
+    # Руление: те же 2 м — уже вне ±1 м.
+    for _ in range(10):
+        obj.add(xte_m=2.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                groundspeed_kts=10.0, command=cmd)
+
+    d = obj.diagnostics()
+    assert d["xte_rollout_max_m"] == pytest.approx(2.0)
+    assert d["xte_taxi_max_m"] == pytest.approx(2.0)
+    comp = obj.summary()["components"]
+    assert comp["xte_rollout"]["raw"] == pytest.approx(0.0)   # в допуске пробега
+    assert comp["xte_taxi"]["raw"] > 0.0                       # вне допуска руления
+
+
+def test_episode_objective_reports_none_for_unobserved_phases():
+    """Отсутствие данных даёт None, а не 0 — приёмка обязана трактовать это как FAIL."""
+    obj = EpisodeObjective()
+    cmd = ControlsState()
+    obj.add(xte_m=0.5, heading_error_deg=0.0, speed_error_ms=0.0,
+            groundspeed_kts=80.0, command=cmd)
+    d = obj.diagnostics()
+    assert d["xte_rollout_max_m"] is not None
+    assert d["xte_taxi_max_m"] is None       # фазы руления в эпизоде не было
+    assert obj.summary()["total_loss"] >= 0.0
+
+
+def test_episode_objective_p95_rate_is_robust_to_a_single_spike():
+    """p95 темпа не ловится одиночным выбросом — в отличие от максимума."""
+    obj = EpisodeObjective()
+    for i in range(100):
+        cmd = ControlsState()
+        cmd.cmd_brake_l = 0.5 if i != 50 else 1.0    # один выброс из ста тактов
+        obj.add(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                groundspeed_kts=80.0, command=cmd)
+    p95 = obj.diagnostics()["rate_p95"]["brake_l"]
+    assert p95 < 0.5    # выброс (скачок 0.5) не попал в 95-й перцентиль
+
+
 # --------------------------------------------------------------------------- #
 # RolloutEnv API
 # --------------------------------------------------------------------------- #
@@ -204,7 +508,7 @@ def test_env_reset_and_step_shapes_and_history():
     scenario = SCENARIO_PRESETS["default"]
     fake = FakeXPC(_scripted_values())
     sim = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)
-    ctrl = ControllingSystem(xpc=fake)
+    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
     env = RolloutEnv(sim, ctrl, history_len=3, shield=None)
 
     obs, info = env.reset(scenario)
@@ -225,15 +529,16 @@ def test_env_with_shield_at_preset_still_parity():
     n = 4
 
     fake_a = FakeXPC(_scripted_values())
-    ctrl_a = ControllingSystem(xpc=fake_a)
+    sim_a = XPlaneBackend(xpc=fake_a, settle_s=0.0, reload_each_reset=False)
+    ctrl_a = ControllingSystem(sim_a)
     scenario.apply_control(ctrl_a)
     for _ in range(n):
-        ctrl_a.control_step(DT, send=True)
+        ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
 
     fake_b = FakeXPC(_scripted_values())
-    ctrl_b = ControllingSystem(xpc=fake_b)
-    env = RolloutEnv(XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False),
-                     ctrl_b, shield=Shield())
+    sim_b = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
+    ctrl_b = ControllingSystem(sim_b)
+    env = RolloutEnv(sim_b, ctrl_b, shield=Shield())
     env.reset(scenario)
     action = preset_action(base_gains_from_pids(ctrl_b.pids))
     for _ in range(n):

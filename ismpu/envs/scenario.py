@@ -68,14 +68,6 @@ class Scenario:
         """Настраивает контур классическими коэффициентами (PID + активация отказа пресета)."""
         return self.control.apply(controller)
 
-    def touchdown_kwargs(self) -> dict:
-        """Аргументы для `setup_touchdown_uuee` (текущий цикл использует их)."""
-        return dict(
-            speed_knots=self.touchdown.speed_knots,
-            descent_rate_fpm=self.touchdown.descent_rate_fpm,
-            pitch_deg=self.touchdown.pitch_deg,
-        )
-
     @classmethod
     def from_preset(cls, name: str, *, weather: WeatherState | None = None,
                     failures: tuple | None = None, touchdown: TouchdownSetup | None = None,

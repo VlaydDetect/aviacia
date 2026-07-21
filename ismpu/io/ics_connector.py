@@ -1,8 +1,24 @@
+"""UDP-мост к стенду заказчика (порт 3030) — транспорт пути поставки.
+
+`ICSInputs` — телеметрия, которую шлёт стенд; `ICSOutputs` — структура управления обратно.
+
+**Кодировка подтверждена разработчиком стенда:** `Struct → Newtonsoft.Json.JsonConvert → string →
+Encoding.UTF8.GetBytes()`, адрес берётся из UDP-заголовка входящего пакета. То есть на проводе
+**чистый JSON**: ни заголовка, ни CRC, ни серийных номеров. Никакого кадрирования на нашей стороне
+быть не должно — добавленные перед payload байты сломали бы разбор на стороне стенда.
+
+Единицы, пределы органов и биты маски валидности — в `config/ics.py`.
+"""
+
 import socket
 import json
+import logging
+import time
 from enum import IntEnum
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class GearState(IntEnum):
@@ -157,14 +173,23 @@ class ICSInputs:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'ICSInputs':
+        """Разбор телеметрии стенда с совместимостью вперёд.
+
+        Асимметрия намеренная (JSON-аналог дописывания полей в бинарный payload):
+        **лишние** ключи игнорируются — стенд может добавить сигнал, и нас это не должно ронять;
+        **отсутствующие** ключи — ошибка. Подставить им ноль значило бы выдумать телеметрию,
+        по которой потом считается управление.
+        """
+        known = {f.name for f in fields(cls)}
+        missing = known - set(data)
+        if missing:
+            raise ValueError(f"[ICS] в пакете стенда нет обязательных полей: {sorted(missing)}")
+
+        payload = {k: v for k, v in data.items() if k in known}
         # Конвертируем сырые значения в IntEnum, где это необходимо
-        if 'NoseGearStatus' in data:
-            data['NoseGearStatus'] = GearState(data['NoseGearStatus'])
-        if 'LeftGearStatus' in data:
-            data['LeftGearStatus'] = GearState(data['LeftGearStatus'])
-        if 'RightGearStatus' in data:
-            data['RightGearStatus'] = GearState(data['RightGearStatus'])
-        return cls(**data)
+        for gear_field in ('NoseGearStatus', 'LeftGearStatus', 'RightGearStatus'):
+            payload[gear_field] = GearState(payload[gear_field])
+        return cls(**payload)
 
 
 @dataclass
@@ -220,54 +245,90 @@ class ICSOutputs:
         return json_str.encode('utf-8')
 
 
+class ResilientSender:
+    """Отправка best-effort со счётчиком ошибок и разрежённым логом.
+
+    Windows отдаёт `WSAECONNRESET` (10054) на UDP-сокете, если получатель закрыл порт: ICMP
+    «port unreachable» всплывает как ошибка на следующей отправке, хотя UDP не соединение.
+    Ронять из-за этого цикл управления нельзя, но и молчать нельзя — отсюда счётчик и лог не
+    чаще раза в `log_interval_s`.
+    """
+
+    WINDOWS_CONNRESET = 10054
+
+    def __init__(self, sock, *, log_interval_s: float = 2.0, clock=time.monotonic):
+        self.sock = sock
+        self.log_interval_s = log_interval_s
+        self._clock = clock
+        self.error_count = 0
+        self._last_log = None
+
+    def send(self, packet: bytes, address) -> bool:
+        """→ True если отправлено. Исключение наружу не выпускается."""
+        try:
+            self.sock.sendto(packet, address)
+            return True
+        except OSError as exc:
+            self.error_count += 1
+            now = self._clock()
+            if self._last_log is None or (now - self._last_log) >= self.log_interval_s:
+                self._last_log = now
+                kind = ("сброс соединения (порт получателя закрыт)"
+                        if getattr(exc, "winerror", None) == self.WINDOWS_CONNRESET
+                        or getattr(exc, "errno", None) == self.WINDOWS_CONNRESET
+                        else "ошибка отправки")
+                logger.warning("[ICS] %s: %s (всего ошибок: %d)", kind, exc, self.error_count)
+            return False
+
+
 class ICSBenchConnector:
-    def __init__(self, listen_ip: str, listen_port: int):
+    """Мост к стенду: JSON поверх UDP, адрес стенда определяется из входящего пакета."""
+
+    def __init__(self, listen_ip: str, listen_port: int, *, sock=None):
         self.listen_addr = (listen_ip, listen_port)
 
         # Адрес стенда определится из заголовка входящего пакета
         self.send_addr: Optional[tuple[str, int]] = None
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(self.listen_addr)
+        self.sock = sock if sock is not None else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if sock is None:
+            self.sock.bind(self.listen_addr)
+
+        self._sender = ResilientSender(self.sock)
 
     def receive_inputs(self, timeout: float = 1.0) -> Optional[ICSInputs]:
-        """
-        Ожидание и получение структуры ICSInputs от стенда.
-        Автоматически извлекает адрес стенда из заголовка UDP-пакета.
-        """
+        """Приём телеметрии стенда. Адрес отправителя определяется автоматически."""
         self.sock.settimeout(timeout)
         try:
-            # Получаем данные и кортеж (IP, Port) отправителя (стенда)
             data, sender_addr = self.sock.recvfrom(65535)
-
-            if self.send_addr != sender_addr:
-                self.send_addr = sender_addr
-                print(f"[ICS] Удаленный адрес стенда определен автоматически: {self.send_addr[0]}:{self.send_addr[1]}")
-
-            json_str = data.decode('utf-8')
-            parsed_dict = json.loads(json_str)
-            return ICSInputs.from_dict(parsed_dict)
-
         except socket.timeout:
             return None
-        except Exception as e:
-            print(f"[ICS] Ошибка десериализации данных от стенда: {e}")
+        except OSError as e:
+            logger.warning("[ICS] Ошибка приёма: %s", e)
             return None
 
-    def send_outputs(self, outputs: ICSOutputs):
-        """
-        Отправка структуры ICSOutputs на стенд.
-        Выполняется только в том случае, если адрес стенда уже был определен.
-        """
-        if self.send_addr is None:
-            print("[ICS] Ошибка отправки: адрес стенда еще не определен (не получено ни одного входящего сообщения).")
-            return
+        if self.send_addr != sender_addr:
+            self.send_addr = sender_addr
+            print(f"[ICS] Удаленный адрес стенда определен автоматически: "
+                  f"{self.send_addr[0]}:{self.send_addr[1]}")
 
         try:
-            packet = outputs.to_json_bytes()
-            self.sock.sendto(packet, self.send_addr)
+            return ICSInputs.from_dict(json.loads(data.decode('utf-8')))
         except Exception as e:
-            print(f"[ICS] Ошибка отправки данных на стенд {self.send_addr}: {e}")
+            logger.warning("[ICS] Ошибка десериализации данных от стенда: %s", e)
+            return None
+
+    def send_outputs(self, outputs: ICSOutputs) -> bool:
+        """Отправка управления на стенд. → отправлено ли (исключение наружу не выпускается)."""
+        if self.send_addr is None:
+            logger.warning("[ICS] Отправка невозможна: адрес стенда ещё не определён "
+                           "(не получено ни одного входящего сообщения).")
+            return False
+        return self._sender.send(outputs.to_json_bytes(), self.send_addr)
+
+    @property
+    def send_error_count(self) -> int:
+        return self._sender.error_count
 
     def close(self):
         self.sock.close()
@@ -280,20 +341,19 @@ def main():
 
     connector.receive_inputs(timeout=2.0)
 
-    try:
-        while True:
-            # # 1. Принимаем телеметрию (Входные сигналы)
-            # inputs = connector.receive_inputs(timeout=2.0)
-            #
-            # if inputs is None:
-            #     print("Таймаут ожидания данных от стенда.")
-            #     continue
+    outputs = ICSOutputs(
+        ControlValidMask=1,
+        ControlMode=ControlModeState.Approach,
+        ModeAIReady=1
+    )
 
-            # 3. Формируем ответ (Выходные сигналы)
-            outputs = ICSOutputs()
-            outputs.ControlValidMask = 0
-            outputs.ControlMode = ControlModeState.ManualTest
-            outputs.ElevatorCmd = -0.1
+    try:
+        deadline = time.time() + 0.2
+        while time.time() < deadline:
+            connector.send_outputs(outputs)
+
+        while True:
+            outputs.ElevatorCmd = 200.0
 
             # 4. Отправляем управление обратно на стенд
             connector.send_outputs(outputs)
@@ -302,3 +362,7 @@ def main():
         print("\nИнтерфейс остановлен пользователем.")
     finally:
         connector.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -56,10 +56,13 @@ def build_capture_stack(cfg: PretrainRunConfig, ip: str = "127.0.0.1", port: int
     from ismpu.control.system import ControllingSystem
     from ismpu.envs.sim_interface import XPlaneBackend
     from ismpu.envs.rollout_env import RolloutEnv
+    from ismpu.config.regulators import validate_action_contract
+
+    validate_action_contract()   # контракт обучаемого слоя — до захвата, а не после
 
     xpc = XPlaneConnectX(ip=ip, port=port)
     sim = XPlaneBackend(xpc=xpc)
-    controller = ControllingSystem(xpc=xpc)
+    controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=cfg.npgs.window, shield=None)
     net = NPGS(cfg.npgs)
     return env, net
@@ -76,8 +79,11 @@ def run_pretrain(cfg: PretrainRunConfig | None = None, ip: str = "127.0.0.1", po
     env, net = build_capture_stack(cfg, ip=ip, port=port)
     try:
         scenarios = build_scenarios(cfg)
-        dataset = capture_dataset(env, scenarios, max_steps=cfg.max_steps)
-        print(f"SFT dataset: {len(dataset)} окон из {len(scenarios)} прогонов")
+        dataset, reports = capture_dataset(env, scenarios, max_steps=cfg.max_steps)
+        kept = [r for r in reports if r["weight"] > 0.0]
+        caveated = [r for r in kept if r["reasons"]]
+        print(f"SFT dataset: {len(dataset)} окон из {len(kept)}/{len(scenarios)} прогонов "
+              f"(отброшено {len(reports) - len(kept)}, с оговорками {len(caveated)})")
         history = pretrain_sft(net, dataset, cfg.pretrain)
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
         path = os.path.join(cfg.checkpoint_dir, cfg.checkpoint_name)
@@ -92,7 +98,7 @@ def smoke_pretrain(env, scenarios, *, npgs: NPGS | None = None,
                    pretrain: PretrainConfig | None = None, max_steps: int = 200):
     """Оффлайн SFT на поданной среде (без X-Plane) — для тестов/отладки. → (net, dataset, history)."""
     net = npgs or NPGS(NPGSConfig(window=env.history_len))
-    dataset = capture_dataset(env, scenarios, max_steps=max_steps, log=None)
+    dataset, _reports = capture_dataset(env, scenarios, max_steps=max_steps, log=None)
     history = pretrain_sft(net, dataset, pretrain or PretrainConfig(epochs=3, batch_size=64, device="cpu"))
     return net, dataset, history
 

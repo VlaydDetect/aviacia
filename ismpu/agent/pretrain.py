@@ -43,9 +43,22 @@ def target_z_from_gains(gains: dict) -> np.ndarray:
 
 @dataclass
 class SFTDataset:
-    """Датасет BC: окна наблюдений и постоянные (на прогон) целевые `target_z`."""
+    """Датасет BC: окна наблюдений, постоянные (на прогон) целевые `target_z` и вес качества.
+
+    `weight` — доверие к метке (1.0 чистый прогон / 0.5 с оговорками); прогоны, нарушившие
+    гейт ТЗ, отбрасываются ещё на захвате (`runtime.capture`). Без этого BC клонирует и
+    плохие траектории тоже: пресет вне своего режима даёт метку, которую воспроизводить не надо.
+    """
     obs: np.ndarray        # (N, T, 56) float32
     target_z: np.ndarray   # (N, 17)   float32
+    weight: np.ndarray | None = None   # (N,) float32; None ≡ все единицы
+
+    def __post_init__(self):
+        if self.weight is None:
+            self.weight = np.ones(len(self.obs), dtype=np.float32)
+        self.weight = np.asarray(self.weight, dtype=np.float32).reshape(-1)
+        if len(self.weight) != len(self.obs):
+            raise ValueError(f"weight ({len(self.weight)}) не совпадает с obs ({len(self.obs)})")
 
     def __len__(self) -> int:
         return len(self.obs)
@@ -53,8 +66,12 @@ class SFTDataset:
     @classmethod
     def concat(cls, parts: list["SFTDataset"]) -> "SFTDataset":
         parts = [p for p in parts if len(p)]
+        if not parts:
+            return cls(np.zeros((0, 0, 0), dtype=np.float32),
+                       np.zeros((0, POLICY_DIM), dtype=np.float32))
         return cls(np.concatenate([p.obs for p in parts]),
-                   np.concatenate([p.target_z for p in parts]))
+                   np.concatenate([p.target_z for p in parts]),
+                   np.concatenate([p.weight for p in parts]))
 
 
 @dataclass
@@ -88,6 +105,7 @@ def pretrain_sft(net: NPGS, dataset: SFTDataset, config: PretrainConfig | None =
 
     obs = torch.as_tensor(dataset.obs, dtype=torch.float32, device=device)
     tz = torch.as_tensor(dataset.target_z, dtype=torch.float32, device=device)
+    wq = torch.as_tensor(dataset.weight, dtype=torch.float32, device=device)
     gain_idx = torch.as_tensor(GAIN_FEATURE_INDICES, device=device)
     phase_lab = _phase_labels(obs) if cfg.lambda_phase > 0 else None
 
@@ -106,7 +124,11 @@ def pretrain_sft(net: NPGS, dataset: SFTDataset, config: PretrainConfig | None =
                                     device=device).uniform_(-1.0, 1.0)
                 x[..., gain_idx] = noise
             mean, _, phase_logits = net(x)
-            mse = F.mse_loss(mean, tz[mb])
+            # Взвешенный MSE: метка с оговорками (0.5) тянет градиент вдвое слабее чистой.
+            # Нормировка на сумму весов, а не на размер батча, — иначе эффективный LR
+            # плавал бы вместе с долей «сомнительных» строк в батче.
+            w = wq[mb].unsqueeze(1)
+            mse = (w * (mean - tz[mb]) ** 2).sum() / (w.sum() * mean.shape[1] + 1e-8)
             loss = mse
             ph = torch.zeros((), device=device)
             if phase_lab is not None:
