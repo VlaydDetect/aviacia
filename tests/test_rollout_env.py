@@ -255,20 +255,85 @@ def test_env_reset_clears_a_latched_break_control():
 
 
 # --------------------------------------------------------------------------- #
+# Прогрев: такты рукопожатия не должны попадать в эпизод
+# --------------------------------------------------------------------------- #
+
+class _WarmUpBackend(XPlaneBackend):
+    """Бэкенд, требующий N тактов прогрева перед включением (имитация стенда)."""
+
+    def __init__(self, xpc, warm_ticks=5):
+        super().__init__(xpc=xpc, settle_s=0.0, reload_each_reset=False)
+        self.warm_ticks = warm_ticks
+        self.warm_frames = 0
+        self._engaged = False
+
+    @property
+    def engaged(self):
+        return self._engaged
+
+    def warm_up(self, timeout_s=10.0):
+        while not self._engaged:
+            self.step(ControlsState())
+            self.warm_frames += 1
+            if self.warm_frames >= self.warm_ticks:
+                self._engaged = True
+        return True
+
+
+def test_warm_up_runs_before_the_episode_and_is_not_counted():
+    """Такты рукопожатия — не шаги эпизода: в это время ВС нами не управлялось.
+
+    Иначе они попали бы в `_steps`, в reward и в `EpisodeObjective`, который использует приёмка.
+    """
+    fake = FakeXPC(_scripted_values())
+    sim = _WarmUpBackend(fake, warm_ticks=5)
+    env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
+
+    env.reset(SCENARIO_PRESETS["default"])
+
+    assert sim.engaged is True              # прогрев отработал внутри reset
+    assert sim.warm_frames == 5
+    assert env._steps == 0                  # но в счётчик эпизода не попал
+    assert env.objective.diagnostics()["samples"] == 0
+
+
+def test_env_reports_engagement_state_in_info():
+    fake = FakeXPC(_scripted_values())
+    sim = _WarmUpBackend(fake, warm_ticks=2)
+    env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
+    env.reset(SCENARIO_PRESETS["default"])
+
+    action = preset_action(base_gains_from_pids(env.controller.pids))
+    _obs, _r, _term, _trunc, info = env.step(action)
+    assert info["engaged"] is True
+
+
+# --------------------------------------------------------------------------- #
 # Метрика курса: отклонение от ВПП, а не ошибка команды руления
 # --------------------------------------------------------------------------- #
 
 def _telemetry_at(offset_m: float, heading_deg: float, *, runway_heading=None):
-    """Телеметрия ВС на оси ВПП, смещённого вбок на `offset_m` и с заданным курсом."""
+    """Телеметрия ВС на оси ВПП, смещённого вбок на `offset_m` и с заданным курсом.
+
+    Курс ВПП, если задан, приходит «сырым» пакетом стенда (как на реальном стенде), а не отдельным
+    полем: его отдаёт property `Telemetry.runway_heading_deg`. Без него (X-Plane) — `ics_inputs=None`.
+    """
+    from dataclasses import fields as _fields
     from ismpu.envs.sim_interface import Telemetry
+    from ismpu.io.ics_connector import ICSInputs
     t = RunwayTracker()
     brg = np.radians(RWY_HEADING_TRUE)
     lat, lon = t.destination(RWY_START_LAT, RWY_START_LON, brg, 800.0)
     if offset_m:
         side = np.radians(RWY_HEADING_TRUE + (90.0 if offset_m > 0 else -90.0))
         lat, lon = t.destination(lat, lon, side, abs(offset_m))
+    ics = None
+    if runway_heading is not None:
+        data = {f.name: 0 for f in _fields(ICSInputs)}
+        data.update(RunwayHeadingValid=1, RunwayHeading=runway_heading)
+        ics = ICSInputs.from_dict(data)
     return Telemetry(lat=lat, lon=lon, groundspeed_ms=50.0, heading_true_deg=heading_deg,
-                     runway_heading_deg=runway_heading)
+                     ics_inputs=ics)
 
 
 def test_heading_deviation_ignores_lateral_offset():

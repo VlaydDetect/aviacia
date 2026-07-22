@@ -1,7 +1,7 @@
 """Тесты SimInterface, бэкендов и генератора сценариев (без реального симулятора)."""
 
 import math
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import pytest
 
@@ -319,13 +319,15 @@ def test_ics_read_telemetry_invalid_on_timeout():
 # --------------------------------------------------------------------------- #
 
 def _engaged_backend(**input_overrides):
-    """Бэкенд с завершённым рукопожатием (подхват пробега по фазе полёта)."""
-    inp = _make_ics_inputs(FlightPhaseValid=1, FlightPhase=int(FlightPhase.LAND_RUN),
+    """Бэкенд с завершённым рукопожатием: стенд подтвердил включение (`AgentIsActive = 1`),
+    режим подхвачен по фазе полёта (`FlightPhase = LandRun`)."""
+    inp = _make_ics_inputs(AgentIsActive=1,
+                           FlightPhaseValid=1, FlightPhase=int(FlightPhase.LAND_RUN),
                            NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1,
                            RightGearWeightOnWheels=1, **input_overrides)
     conn = FakeConnector(inp)
     be = ICSBackend(connector=conn)
-    be.read_telemetry()          # автомат подхватывает пробег
+    be.read_telemetry()          # снимаем подтверждение стенда + подхват пробега
     assert be.engaged
     return be, conn
 
@@ -484,10 +486,13 @@ def test_lateral_channel_uses_runway_geometry_from_telemetry():
     def rudder_for(runway_heading, lateral_deviation):
         controller = ControllingSystem()
         SCENARIO_PRESETS["default"].apply_control(controller)
+        # Курс ВПП и боковое отклонение приходят «сырым» пакетом стенда, а не отдельными полями:
+        # это те же сигналы, что читает property Telemetry.runway_heading_deg / lateral_deviation_m.
         telem = Telemetry(lat=55.96715, lon=37.3865417, groundspeed_ms=50.0,
                           heading_true_deg=runway_heading,   # ВС точно по курсу ВПП
-                          runway_heading_deg=runway_heading,
-                          lateral_deviation_m=lateral_deviation)
+                          ics_inputs=_make_ics_inputs(
+                              RunwayHeadingValid=1, RunwayHeading=runway_heading,
+                              LateralDeviation=lateral_deviation))
         controller.control_step(DT, telem, send=False)
         return controller.state.rudder_cmd
 
@@ -512,6 +517,155 @@ def test_geodetic_path_is_kept_when_the_backend_gives_no_runway_geometry():
                       heading_true_deg=float(RWY_HEADING_TRUE))
     assert telem.runway_heading_deg is None and telem.lateral_deviation_m is None
     controller.control_step(DT, telem, send=False)   # геодезический путь, без исключений
+
+
+# --------------------------------------------------------------------------- #
+# Рукопожатие: сквозной холодный старт на земле
+# --------------------------------------------------------------------------- #
+
+def _cold_ground_inputs(**overrides):
+    """Неподвижное ВС на земле: обжаты все стойки, скорость ниже порога включения."""
+    fields_ = dict(
+        Latitude=55.96715, Longitude=37.3865417, TrueHeading=75.079,
+        GroundSpeed=0.0,
+        NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1, RightGearWeightOnWheels=1)
+    fields_.update(overrides)
+    return _make_ics_inputs(**fields_)
+
+
+class _BenchConnector(FakeConnector):
+    """Фейковый стенд: включает управление (`AgentIsActive = 1`) только после корректного
+    рукопожатия — непрерывной готовности при `ControlMode = Off` и последующего перехода `0 → 4`.
+
+    Так проверяется, что включает нас именно стенд по нашему стимулу, а не наша внутренняя
+    выдержка. До перехода `AgentIsActive = 0`, сколько бы кадров ни ушло.
+    """
+
+    def __init__(self, base_inputs):
+        super().__init__(base_inputs)
+        self._active = False
+        self._saw_off_ready = False
+
+    def send_outputs(self, outputs):
+        self.sent_outputs.append(outputs)
+        if outputs.ModeAIReady == 1 and outputs.ControlMode == ControlModeState.Off:
+            self._saw_off_ready = True          # видели заявку готовности при ControlMode = 0
+        if (self._saw_off_ready and outputs.ModeAIReady == 1
+                and outputs.ControlMode == ControlModeState.Taxi):
+            self._active = True                 # переход 0 → 4 после готовности → включаем
+        return True                             # успешная отправка продвигает выдержку
+
+    def receive_inputs(self, timeout=1.0):
+        if self.inputs is None:
+            return None
+        return replace(self.inputs, AgentIsActive=1 if self._active else 0)
+
+
+def _cold_backend(**overrides):
+    conn = _BenchConnector(_cold_ground_inputs(**overrides))
+    return ICSBackend(connector=conn), conn
+
+
+def test_cold_ground_start_engages_only_after_the_bench_confirms(monkeypatch):
+    """Сквозной прогрев: маска нулевая, пока стенд не подтвердил `AgentIsActive = 1`."""
+    from ismpu.config.ics import ENGAGE_MIN_READY_FRAMES
+
+    monkeypatch.setattr("ismpu.envs.sim_interface.time.sleep", lambda _s: None)
+    be, conn = _cold_backend()
+    be.reset(SCENARIO_PRESETS["default"])
+    assert be.engaged is False
+
+    assert be.warm_up(timeout_s=30.0) is True
+    assert be.engaged is True
+
+    # Всё, что ушло за прогрев, — только заявка готовности: каналы не заявлялись ни разу.
+    warmup = list(conn.sent_outputs)
+    assert all(o.ControlValidMask == 0 for o in warmup)
+    # Две секунды готовности реально передавались кадрами с ControlMode = Off.
+    ready_off = [o for o in warmup
+                 if o.ControlMode == ControlModeState.Off and o.ModeAIReady == 1]
+    assert len(ready_off) >= ENGAGE_MIN_READY_FRAMES
+    # И состоялся переход 0 → 4 — тот самый стимул, по которому стенд нас включил.
+    assert any(o.ControlMode == ControlModeState.Taxi for o in warmup)
+
+    # После подтверждения реальная команда несёт полную маску и ControlMode = Taxi.
+    cmd = ControlsState()
+    cmd.cmd_brake_l = 0.5
+    be.step(cmd)
+    last = conn.sent_outputs[-1]
+    assert last.ControlMode == ControlModeState.Taxi
+    assert last.ControlValidMask == int(ROLLOUT_CONTROL_MASK)
+
+
+def test_warm_up_paces_itself_and_does_not_flood_the_bench(monkeypatch):
+    """Темп задаётся часами, а не sleep.
+
+    Со сломанным (или подменённым) sleep наивный цикл выпаливал 139 тысяч пакетов за две
+    секунды — стенд рассчитан на 20 Гц.
+    """
+    monkeypatch.setattr("ismpu.envs.sim_interface.time.sleep", lambda _s: None)
+    be, conn = _cold_backend()
+    be.reset(SCENARIO_PRESETS["default"])
+    be.warm_up(timeout_s=30.0)
+
+    assert be.engaged is True
+    # ~2 секунды на 20 Гц = ~40 кадров. Даём щедрый запас на дрожание, но ловим порядок величины.
+    assert len(conn.sent_outputs) < 200
+
+
+def test_warm_up_timeout_raises_with_a_diagnosis(monkeypatch):
+    """Молча продолжить нельзя: дальше мы бы «управляли» в пустоту."""
+    monkeypatch.setattr("ismpu.envs.sim_interface.time.sleep", lambda _s: None)
+    be, _ = _cold_backend(NoseGearWeightOnWheels=0)     # стойка не обжата → включения не будет
+
+    with pytest.raises(TimeoutError) as exc:
+        be.warm_up(timeout_s=0.3)
+    assert "стойки" in str(exc.value)                   # причина названа, а не «не получилось»
+    assert be.engaged is False
+
+
+def test_warm_up_is_a_noop_where_no_handshake_is_required():
+    """X-Plane рукопожатия не требует — прогрев не должен ничего ждать."""
+    be = XPlaneBackend(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False)
+    assert be.engaged is True
+    assert be.warm_up(timeout_s=0.0) is True
+
+
+def test_cold_ground_start_does_not_end_the_run_on_the_first_tick():
+    """Раньше неподвижное ВС завершало пробег на первом такте — до рукопожатия.
+
+    «Скорость руления достигнута» тривиально истинна при 0 м/с (порог ≈5.14 м/с), поэтому цикл
+    умирал за ~50 мс при потребных 2000 мс выдержки.
+    """
+    from ismpu.config.constants import DT
+    from ismpu.envs.scenario import SCENARIO_PRESETS
+
+    controller = ControllingSystem()
+    SCENARIO_PRESETS["default"].apply_control(controller)
+    stationary = Telemetry(lat=55.96715, lon=37.3865417, groundspeed_ms=0.0,
+                           heading_true_deg=75.079)
+
+    for _ in range(50):
+        assert controller.control_step(DT, stationary, send=False) is False
+    assert controller.longitudinal_channel.rollout_started is False
+
+
+def test_rollout_completion_still_fires_once_the_run_actually_started():
+    """Защёлка не должна помешать нормальному завершению пробега."""
+    from ismpu.config.constants import DT
+    from ismpu.envs.scenario import SCENARIO_PRESETS
+
+    controller = ControllingSystem()
+    SCENARIO_PRESETS["default"].apply_control(controller)
+
+    fast = Telemetry(lat=55.96715, lon=37.3865417, groundspeed_ms=70.0,
+                     heading_true_deg=75.079)
+    controller.control_step(DT, fast, send=False)
+    assert controller.longitudinal_channel.rollout_started is True
+
+    slow = Telemetry(lat=55.96715, lon=37.3865417, groundspeed_ms=1.0,
+                     heading_true_deg=75.079)
+    assert controller.control_step(DT, slow, send=False) is True    # пробег окончен
 
 
 def test_controller_without_a_backend_fails_loudly():
