@@ -3,8 +3,8 @@
 Два свойства, ради которых всё это делается:
 * разбиение **устойчиво к добавлению** новых сценариев (иначе результаты приёмки не
   сравниваются между прогонами);
-* стохастика X-Plane названа поимённо и превращается в требование реплик (иначе один прогон
-  при болтанке выдаётся за доказательство).
+* стохастика на стороне стенда названа поимённо и превращается в требование реплик (иначе
+  один прогон в неспокойных условиях выдаётся за доказательство).
 """
 
 import pytest
@@ -20,8 +20,7 @@ from ismpu.envs.splits import (
 )
 from ismpu.envs.reproducibility import (
     contract_for, required_replicas, stochastic_sources, worst_replica,
-    XPLANE_NATIVE_TURBULENCE, XPLANE_NATIVE_GUST, XPLANE_WIND_VARIABILITY,
-    DEFAULT_MIN_REPLICAS,
+    BENCH_WIND, BENCH_PRECIPITATION, BENCH_LOW_FRICTION, DEFAULT_MIN_REPLICAS,
 )
 
 
@@ -165,25 +164,32 @@ def test_calm_weather_is_bit_reproducible():
     assert contract.min_replicas == 1
 
 
-def test_turbulence_makes_the_episode_non_reproducible():
-    """Сид у нас, реализация болтанки — у X-Plane. Значит один прогон ничего не доказывает."""
-    weather = WeatherState(turbulence=4.0)
-    contract = contract_for(_scenario("bumpy", weather=weather))
-    assert XPLANE_NATIVE_TURBULENCE in contract.external_stochastic_sources
+def test_wind_makes_the_episode_non_reproducible():
+    """Условия выставляет Заказчик, реализацию сноса считает стенд — повторить его розыгрыш
+    мы не можем, значит один прогон ничего не доказывает."""
+    contract = contract_for(_scenario("windy", weather=WEATHER_PRESETS["crosswind"]))
+    assert BENCH_WIND in contract.external_stochastic_sources
     assert contract.replica_validation_required is True
     assert not contract.bit_reproducible
     assert contract.min_replicas == DEFAULT_MIN_REPLICAS
 
 
 def test_each_stochastic_source_is_named_separately():
-    assert stochastic_sources(WeatherState(gust_kts=10.0)) == (XPLANE_NATIVE_GUST,)
-    assert stochastic_sources(WeatherState(variability_pct=0.5)) == (XPLANE_WIND_VARIABILITY,)
-    combined = stochastic_sources(WeatherState(turbulence=1.0, gust_kts=5.0, variability_pct=0.3))
-    assert set(combined) == {XPLANE_NATIVE_TURBULENCE, XPLANE_NATIVE_GUST, XPLANE_WIND_VARIABILITY}
+    assert stochastic_sources(WeatherState(wind_speed_kts=10.0)) == (BENCH_WIND,)
+    assert stochastic_sources(WeatherState(rain_pct=0.5)) == (BENCH_PRECIPITATION,)
+    assert stochastic_sources(WeatherState(runway_friction=11.0)) == (BENCH_LOW_FRICTION,)
+    combined = stochastic_sources(WeatherState(wind_speed_kts=8.0, rain_pct=0.3,
+                                               runway_friction=2.0))
+    assert set(combined) == {BENCH_WIND, BENCH_PRECIPITATION, BENCH_LOW_FRICTION}
 
 
-def test_gusty_preset_requires_replicas():
-    assert required_replicas(_scenario("g", weather=WEATHER_PRESETS["gusty_crosswind"])) > 1
+def test_a_breath_of_wind_is_not_treated_as_stochastic():
+    """Иначе реплики требовались бы даже в штиль — приёмка утроилась бы без причины."""
+    assert stochastic_sources(WeatherState(wind_speed_kts=0.4)) == ()
+
+
+def test_rough_preset_requires_replicas():
+    assert required_replicas(_scenario("g", weather=WEATHER_PRESETS["crosswind"])) > 1
     assert required_replicas(_scenario("c", weather=WEATHER_PRESETS["clear_dry"])) == 1
 
 

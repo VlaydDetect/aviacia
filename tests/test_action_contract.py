@@ -17,12 +17,11 @@ from ismpu.config.regulators import (
 )
 from ismpu.control.channels import ControlsState
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.sim_interface import XPlaneBackend
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.envs.action import decode, apply_corrections, preset_action
 from ismpu.agent.shield import base_gains_from_pids
 
-from test_rollout_env import FakeXPC, _scripted_values
+from fakes import static_sim
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +107,7 @@ _PID_FIELDS = ("kp", "ki", "kd", "min_out", "max_out",
 
 
 def _controller(preset="nws_fail"):
-    ctrl = ControllingSystem(XPlaneBackend(xpc=FakeXPC(_scripted_values()), settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS[preset].apply_control(ctrl)
     return ctrl
 

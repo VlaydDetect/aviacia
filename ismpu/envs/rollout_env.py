@@ -1,10 +1,10 @@
-"""RolloutEnv — Gymnasium-совместимая среда поверх SimInterface + классического контура.
+"""RolloutEnv — Gymnasium-совместимая среда поверх стенда + классического контура.
 
-Оборачивает `SimInterface` (сброс/телеметрия/погода/отказы) и `ControllingSystem`
-(классический PID-контур). Действие актора — **абсолютные коэффициенты PID** (+ веса
-каналов): на каждом такте они записываются в регуляторы, затем контур считает команду,
-(опц.) её проверяет Shield (пресет — якорь), команда уходит в симулятор, а из новой
-телеметрии собирается наблюдение (§5) и покомпонентный reward (§11).
+Оборачивает `ICSSim` (телеметрия/команды/рукопожатие) и `ControllingSystem` (классический
+PID-контур). Действие актора — **абсолютные коэффициенты PID** (+ веса каналов): на каждом
+такте они записываются в регуляторы, затем контур считает команду, (опц.) её проверяет Shield
+(пресет — якорь), команда уходит на стенд, а из новой телеметрии собирается наблюдение (§5) и
+покомпонентный reward (§11).
 
 **Парити классики (§1):** `env.step(preset_action(preset))` при `shield=None` даёт ровно
 те же команды, что классический `control_step` со связанным пресетом — проверяется тестом.
@@ -14,10 +14,10 @@ Gymnasium импортируется опционально: если пакет
 API совместим: `reset(scenario) -> (obs, info)`, `step(action) -> (obs, reward,
 terminated, truncated, info)`.
 
-Замечание о транспорте: и телеметрия, и команды идут через `SimInterface` — среда читает кадр
-`sim.read_telemetry()` и передаёт его в `control_step` параметром. Контур не знает, против чего
-он работает, поэтому общий коннектор `sim` и `controller` больше не требуется: тот же код
-исполняется и на X-Plane, и на стенде заказчика.
+**Границы эпизода задаёт стенд.** `reset` не расставляет ВС и не выставляет погоду — этого мы
+не умеем: он сбрасывает рукопожатие и внутренний учёт, дожидается включения и стартует с того
+кадра, который стенд даёт. Условия эпизода приходят телеметрией; сценарий говорит лишь, какими
+коэффициентами стартовать.
 """
 
 from collections import deque
@@ -31,7 +31,7 @@ from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.sim_interface import SimInterface
+from ismpu.envs.ics_sim import ICSSim
 from ismpu.envs.scenario import Scenario
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, ACTION_LOW, ACTION_HIGH
@@ -74,8 +74,8 @@ def heading_deviation_deg(telemetry) -> float:
     то есть **ошибка команды руления**. При смещении 5 м от оси и идеально выдержанном курсе она
     показывает −6.35° и объявила бы провал гейта ±5°, хотя отклонение курса ровно нулевое.
 
-    Курс ВПП берётся из телеметрии, если бэкенд его сообщает (стенд заказчика), иначе — из
-    конфигурации (X-Plane, где ВПП фиксирована).
+    Курс ВПП берётся из телеметрии, если стенд его объявляет, иначе — из конфигурации
+    (`config/runway.py`).
     """
     runway_heading = getattr(telemetry, "runway_heading_deg", None)
     if runway_heading is None:
@@ -94,7 +94,7 @@ def _snapshot_command(state: ControlsState) -> ControlsState:
 
 
 class RolloutEnv:
-    def __init__(self, sim: SimInterface, controller: ControllingSystem, *,
+    def __init__(self, sim: ICSSim, controller: ControllingSystem, *,
                  dt: float = DT, history_len: int = 1, shield=None,
                  obs_builder: ObservationBuilder | None = None,
                  reward_weights: RewardWeights | None = None, max_steps: int = 4000):
@@ -126,11 +126,11 @@ class RolloutEnv:
 
     def reset(self, scenario: Scenario, *, seed=None):
         self._scenario = scenario
-        telemetry = self.sim.reset(scenario)          # телепорт + погода + отказы (среда)
+        telemetry = self.sim.reset(scenario)          # сброс рукопожатия + первый кадр стенда
         # Рукопожатие ДО первого шага: иначе такты прогрева попали бы в `_steps`, reward и
-        # objective, хотя ВС в это время нами не управлялось. На X-Plane — no-op.
+        # objective, хотя ВС в это время нами не управлялось.
         if not self.sim.warm_up():
-            raise RuntimeError("симулятор не включил управление — эпизод начинать нельзя")
+            raise RuntimeError("стенд не включил управление — эпизод начинать нельзя")
         telemetry = self.sim.read_telemetry()
         scenario.apply_control(self.controller)        # seed PID пресета + активация отказа
         self._preset_gains = base_gains_from_pids(self.controller.pids)  # пресет-якорь Shield
@@ -165,15 +165,13 @@ class RolloutEnv:
 
         # 4) Отправка команды и получение новой телеметрии.
         post = self.sim.step(command)
-        self.sim.update(self.controller.longitudinal_channel.traveled_distance_m)
 
         # 5) Наблюдение + reward.
         obs = self._observe(post)
         self._history.append(obs)
         reward, components, guidance = self._reward(post, command, shield_report)
 
-        # 6) Завершение. Пробег окончен → передаём управление в руление (ControlMode 3 → 4);
-        # где рукопожатия нет, это no-op.
+        # 6) Завершение. Пробег окончен → передаём управление в руление (ControlMode 3 → 4).
         if break_control:
             self.sim.request_taxi()
 
@@ -198,8 +196,9 @@ class RolloutEnv:
     # --- внутреннее ---
 
     def _observe(self, telemetry) -> np.ndarray:
-        return self.obs_builder.build(telemetry, self.controller,
-                                      self._scenario.weather, ObserverEstimate())
+        # Погода — из самого кадра стенда (`Telemetry.weather`), а не из сценария: сценарий
+        # описывает ожидаемые условия, а сеть должна видеть фактические.
+        return self.obs_builder.build(telemetry, self.controller, None, ObserverEstimate())
 
     def _stacked(self) -> np.ndarray:
         """Окно истории → тензор `(history_len, OBS_DIM)` (последовательность кадров для NPGS)."""

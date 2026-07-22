@@ -1,31 +1,28 @@
-"""Управляющий цикл 20 Гц — замена run-ячейки main.ipynb.
+"""Управляющий цикл 20 Гц против стенда заказчика.
 
-Требует запущенного X-Plane 12 на 127.0.0.1:49000. Порядок: телепорт в точку
-касания → снятие паузы → подписка на телеметрию → цикл `control_step` до
-достижения скорости руления (или Ctrl-C), затем сброс органов управления.
+Порядок: подключение к стенду → рукопожатие (`ModeAIReady` + переход `ControlMode`) → цикл
+`control_step` до достижения скорости руления (или Ctrl-C), затем передача управления в руление
+и сброс органов.
+
+Стенд слушается по UDP (по умолчанию `127.0.0.1:3030`); адрес самого стенда определяется из
+заголовка первого входящего пакета, задавать его не нужно.
 """
 
 import time
 
-from ismpu.io.xplane_connector import XPlaneConnectX
 from ismpu.control.system import ControllingSystem
 from ismpu.config.constants import DT
-from ismpu.envs.sim_interface import SimInterface, XPlaneBackend
-from ismpu.envs.scenario import Scenario, SCENARIO_PRESETS
+from ismpu.envs.ics_sim import ICSSim
+from ismpu.envs.scenario import Scenario, SCENARIO_PRESETS, select_for_telemetry
 
 
-def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario):
-    """Прогоняет один эпизод пробега на уже настроенном контуре по сценарию.
-
-    Телепорт, погода и подписка на телеметрию — забота бэкенда (`SimInterface.reset`), а не
-    цикла: раньше здесь был свой список подписки из четырёх DataRef'ов, расходившийся с
-    двадцатью одним у `XPlaneBackend`.
-    """
+def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
+    """Прогоняет один эпизод пробега на уже настроенном контуре."""
     controller.last_telemetry = sim.reset(scenario)
 
-    # Рукопожатие ДО управления: стенд заказчика принимает команды только после того, как
-    # получит ModeAIReady=1 в течение двух секунд. На X-Plane это no-op.
-    print("Прогрев (ожидание готовности симулятора)...")
+    # Рукопожатие ДО управления: стенд принимает команды только после того, как получит
+    # ModeAIReady=1 в течение двух секунд и увидит переход ControlMode.
+    print("Прогрев (ожидание, пока стенд примет управление)...")
     sim.warm_up()
     controller.last_telemetry = sim.read_telemetry()
 
@@ -43,7 +40,6 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario):
                     controller.hand_over_to_taxi()
                     raise KeyboardInterrupt
 
-                sim.update(controller.longitudinal_channel.traveled_distance_m)
                 last_time = current_time
 
             time.sleep(0.01)  # Снижение нагрузки на CPU
@@ -52,37 +48,30 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario):
         controller.control_exception()
 
 
-def build_sim(backend: str, ip: str, port: int) -> SimInterface:
-    """Бэкенд по имени: `"xplane"` — обучение/отладка, `"ics"` — стенд заказчика."""
-    if backend == "ics":
-        from ismpu.envs.sim_interface import ICSBackend
-        return ICSBackend(listen_ip=ip, listen_port=port)
-    if backend == "xplane":
-        from ismpu.io.xplane_connector import XPlaneConnectX
-        # reload_each_reset=False — лёгкий сброс только телепортом, как было в классическом цикле
-        # (перезагрузка планера нужна обучению, чтобы не копился износ между эпизодами).
-        return XPlaneBackend(xpc=XPlaneConnectX(ip=ip, port=port),
-                             reload_each_reset=False, setup_view=True)
-    raise ValueError(f"неизвестный бэкенд: {backend!r} (ожидается 'xplane' или 'ics')")
+def main(preset: "str | Scenario | None" = None, ip: str = "127.0.0.1", port: int = 3030):
+    """Точка входа: подключиться к стенду, выбрать пресет и запустить пробег.
 
+    `preset=None` — пресет **подбирается по телеметрии** стенда: по фактическим отказам и погоде
+    выбирается сценарий, под который эти условия калибровались (`select_for_telemetry`). Это
+    рабочий режим поставки: конфигурацию борта задаёт Заказчик, и угадывать её именем в
+    командной строке незачем.
 
-def main(preset: "str | Scenario" = "default", ip: str = "127.0.0.1", port: int = 49000,
-         backend: str = "xplane"):
-    """Точка входа: выбрать пресет по имени (или Scenario), настроить контур и запустить.
-
-    Готовые пресеты: `SCENARIO_PRESETS` ("default", "nws_fail", "left_reverse_fail",
-    "right_reverse_fail") — те же коэффициенты, что и раньше, плюс стандартная погода.
-
-    `backend="ics"` запускает тот же контур против стенда заказчика (порт по умолчанию 3030):
-
-        python -c "from ismpu.runtime.loop import main; main(backend='ics', port=3030)"
+    Явное имя (`"default"`, `"nws_fail"`, `"left_reverse_fail"`, `"right_reverse_fail"`, …, см.
+    `SCENARIO_PRESETS`) или готовый `Scenario` перекрывает подбор — для отладки конкретного
+    режима.
     """
-    scenario = preset if isinstance(preset, Scenario) else SCENARIO_PRESETS[preset]
-
-    sim = build_sim("ics", ip, port)
+    sim = ICSSim(listen_ip=ip, listen_port=port)
     controller = ControllingSystem(sim)
 
-    scenario.apply_control(controller)   # PID + активация связанного отказа
+    if isinstance(preset, Scenario):
+        scenario = preset
+    elif preset is None:
+        scenario = select_for_telemetry(sim.read_telemetry())
+        print(f"Сценарий подобран по телеметрии стенда: {scenario.scenario_id}")
+    else:
+        scenario = SCENARIO_PRESETS[preset]
+
+    scenario.apply_control(controller)   # PID пресета (отказы уточняются по телеметрии)
     run(controller, sim, scenario)
 
 

@@ -1,7 +1,7 @@
 """Тесты приёмки по ТЗ (Этап 5): вердикты по пунктам, правило «нет данных = FAIL»,
 явная неприменимость, гейт допуска чекпоинта и сравнение с baseline'ами.
 
-Логика вердиктов — чистые функции и тестируется без torch и без X-Plane; сквозные прогоны
+Логика вердиктов — чистые функции и тестируется без torch и без стенда; сквозные прогоны
 используют скриптованный бэкенд из `test_ppo` (импорт внутри тестов, чтобы модуль не
 пропускался целиком, когда torch недоступен).
 """
@@ -282,15 +282,14 @@ def test_report_shows_failures_and_baseline_comparison():
 
 
 # --------------------------------------------------------------------------- #
-# Сквозные прогоны на скриптованном бэкенде
+# Сквозные прогоны на скриптованном стенде
 # --------------------------------------------------------------------------- #
 
 def _scripted_env(window=4):
-    pytest.importorskip("torch")     # ScriptedBackend живёт в модуле с torch-зависимостью
-    from test_ppo import ScriptedBackend
+    from fakes import kinematic_sim
     from ismpu.control.system import ControllingSystem
     from ismpu.envs.rollout_env import RolloutEnv
-    sim = ScriptedBackend()
+    sim, _bench = kinematic_sim()
     ctrl = ControllingSystem(sim)
     return RolloutEnv(sim, ctrl, history_len=window, shield=None)
 

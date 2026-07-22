@@ -1,21 +1,27 @@
 """Генератор сценариев обучения (domain randomization).
 
-Сэмплирует `Scenario` из всего пространства признаков (§8 плана): состояние ВПП/μ,
-ветер с боковой составляющей, порывы и турбулентность, дождь/видимость/температура,
-отказы, шум датчиков и начальные условия касания. Параметр `difficulty ∈ [0, 1]`
-задаёт учебный план (curriculum): чем выше, тем тяжелее и вероятнее возмущения.
+Сэмплирует `Scenario` из пространства признаков: состояние ВПП, ветер с боковой составляющей,
+дождь/видимость/температура и отказы. Параметр `difficulty ∈ [0, 1]` задаёт учебный план
+(curriculum): чем выше, тем тяжелее и вероятнее возмущения.
 
-Детерминизм: весь случайный выбор идёт через seeded `numpy.random.Generator`, поэтому
-два генератора с одним seed дают идентичную последовательность (воспроизводимость,
-Этап 5). `battery()` — фиксированный приёмочный набор (штат + отказы + погода).
+**Чем это стало после перехода на стенд.** Раньше сгенерированный сценарий *устанавливался* в
+симулятор. Стендом распоряжается Заказчик, поэтому теперь сценарий описывает условия, в которых
+эпизод, как ожидается, проходит: он задаёт, каким пресетом стартовать и с чем сравнивать
+фактическую погоду при подборе (`envs.scenario.select_scenario`). Условия на стенде выставляет
+оператор — сгенерированный набор говорит, какие именно надо выставить, и служит планом прогонов
+и приёмочной батареей.
+
+Детерминизм: весь случайный выбор идёт через seeded `numpy.random.Generator`, поэтому два
+генератора с одним seed дают идентичную последовательность. `battery()` — фиксированный
+приёмочный набор (штат + отказы + погода).
 """
 
 import numpy as np
 
 from ismpu.control.failures import FailureMode
 from ismpu.config.scenarios import SCENARIOS
-from ismpu.envs.weather import WeatherState, RunwayCondition, FrictionProfile, WEATHER_PRESETS
-from ismpu.envs.scenario import Scenario, TouchdownSetup, SensorNoise
+from ismpu.envs.weather import WeatherState, RunwayCondition, WEATHER_PRESETS
+from ismpu.envs.scenario import Scenario
 
 
 # Пресеты классических коэффициентов под конкретный отказ (иначе — "default").
@@ -60,15 +66,13 @@ class ScenarioGenerator:
 
         weather = self._sample_weather(d)
         failures = self._sample_failures(d)
-        touchdown = self._sample_touchdown(d)
-        noise = self._sample_noise(d)
         preset = _PRESET_BY_FAILURE.get(failures[0], "default") if failures else "default"
 
         scenario_id = f"gen-{self.seed}-{self._counter:04d}"
         scenario_seed = int(self.rng.integers(0, 2 ** 31 - 1))
         self._counter += 1
         return Scenario(scenario_id=scenario_id, seed=scenario_seed, control=SCENARIOS[preset],
-                        weather=weather, failures=failures, touchdown=touchdown, sensor_noise=noise)
+                        weather=weather, failures=failures)
 
     def battery(self) -> list[Scenario]:
         """Фиксированный приёмочный набор (детерминированный, без RNG)."""
@@ -83,10 +87,9 @@ class ScenarioGenerator:
         add("wet", "default", WEATHER_PRESETS["wet"])
         add("puddly", "default", WEATHER_PRESETS["puddly"])
         add("icy", "default", WEATHER_PRESETS["icy"])
+        add("snowy", "default", WEATHER_PRESETS["snowy"])
         add("crosswind", "default", WEATHER_PRESETS["crosswind"])
-        add("gusty_crosswind", "default", WEATHER_PRESETS["gusty_crosswind"])
         add("low_visibility", "default", WEATHER_PRESETS["low_visibility"])
-        add("variable_friction", "default", WEATHER_PRESETS["variable_friction"])
         # Отказы
         add("nws_fail", "nws_fail", WEATHER_PRESETS["clear_dry"], (FailureMode.NWS_FAIL,))
         add("left_reverse_fail", "left_reverse_fail", WEATHER_PRESETS["wet"], (FailureMode.REVERSE_LEFT_FAIL,))
@@ -124,32 +127,20 @@ class ScenarioGenerator:
     def _sample_weather(self, d: float) -> WeatherState:
         condition = self._sample_condition(d)
 
-        # С ростом сложности — вероятность переменного сцепления по длине ВПП.
-        if self.rng.random() < 0.2 * d:
-            friction_kw = dict(friction_profile=FrictionProfile([
-                (0.0, RunwayCondition.DRY.value),
-                (float(self.rng.uniform(400.0, 800.0)), condition.value),
-                (float(self.rng.uniform(1000.0, 1400.0)), min(15.0, condition.value + 3.0)),
-            ]))
-        else:
-            friction_kw = dict(runway_friction=condition.value)
-
         crosswind = float(self.rng.uniform(-1.0, 1.0) * (3.0 + 20.0 * d))
         headwind = float(self.rng.uniform(-3.0, 10.0))
-        gust = float(self.rng.uniform(0.0, 12.0 * d))
-        turbulence = float(self.rng.uniform(0.0, 7.0 * d))
-        variability = float(self.rng.uniform(0.0, 0.8 * d))
 
         wet = condition in (RunwayCondition.WET, RunwayCondition.PUDDLY)
         rain = float(self.rng.uniform(0.3, 1.0)) if wet else float(self.rng.uniform(0.0, 0.2 * d))
-        visibility = float(np.clip(16000.0 * (1.0 - 0.9 * d * self.rng.random()) - 6000.0 * rain, 300.0, 16000.0))
+        visibility = float(np.clip(16000.0 * (1.0 - 0.9 * d * self.rng.random()) - 6000.0 * rain,
+                                   300.0, 16000.0))
 
         cold = condition in (RunwayCondition.SNOWY, RunwayCondition.ICY)
         temperature = float(self.rng.uniform(-15.0, -1.0)) if cold else float(self.rng.uniform(0.0, 25.0))
 
         return WeatherState.from_crosswind(
-            crosswind, headwind, gust_kts=gust, turbulence=turbulence, variability_pct=variability,
-            rain_pct=rain, visibility_m=visibility, temperature_c=temperature, **friction_kw,
+            crosswind, headwind, runway_friction=condition.value,
+            rain_pct=rain, visibility_m=visibility, temperature_c=temperature,
         )
 
     def _sample_failures(self, d: float) -> tuple:
@@ -165,20 +156,3 @@ class ScenarioGenerator:
                 if candidates:
                     failures.append(candidates[int(self.rng.integers(len(candidates)))])
         return tuple(failures)
-
-    def _sample_touchdown(self, d: float) -> TouchdownSetup:
-        return TouchdownSetup(
-            speed_knots=float(self.rng.uniform(130.0, 160.0)),
-            descent_rate_fpm=float(self.rng.uniform(100.0, 300.0)),
-            pitch_deg=float(self.rng.uniform(-1.0, 3.0)),
-            lateral_offset_m=float(self.rng.uniform(-1.0, 1.0) * (1.0 + 6.0 * d)),
-            heading_offset_deg=float(self.rng.uniform(-1.0, 1.0) * (1.0 + 6.0 * d)),
-        )
-
-    def _sample_noise(self, d: float) -> SensorNoise:
-        return SensorNoise(
-            pos_sigma_m=0.05 + 0.5 * d,
-            heading_sigma_deg=0.1 + 1.0 * d,
-            speed_sigma_ms=0.1 + 1.0 * d,
-            dropout_prob=0.02 * d,
-        )

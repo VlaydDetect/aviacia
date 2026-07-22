@@ -161,8 +161,7 @@ class IcsEngagement:
         """
         if inputs.telemetry_valid:
             # Стенд — авторитет. По обрыву связи держим прежнее подтверждение, а не сбрасываем.
-            # self._confirmed = bool(inputs.agent_is_active)
-            self._confirmed = False
+            self._confirmed = bool(inputs.agent_is_active)
         else:
             self._reset_dwell()
             if self.state is EngagementState.READY_DWELL:

@@ -5,8 +5,9 @@
 `LateralChannel` — удержание оси (руление + дифференциальное торможение).
 
 **Транспорта здесь нет.** Каналы получают телеметрию параметром и складывают команды в
-`ControlsState`; отправкой занимается бэкенд (`SimInterface.step`). Раньше `ControlsState`
-сам писал DataRef'ы X-Plane, из-за чего контур нельзя было запустить на стенде заказчика.
+`ControlsState`; отправкой и переводом в единицы ПИВ занимается стенд (`ICSSim.step`).
+Команды здесь **нормированные** ([0,1] тормоза, [-1,0] реверс, [-1,1] руль) — миллиметры хода
+педали и градусы РУД появляются только на границе транспорта.
 """
 
 from dataclasses import dataclass
@@ -65,7 +66,7 @@ class ControlsState:
         self.cmd_rev_l *= failures_state.reverse_left_eff
         self.cmd_rev_l *= failures_state.thrust_left_eff
         self.cmd_rev_r *= failures_state.reverse_right_eff
-        self.cmd_rev_r *= failures_state.thrust_left_eff
+        self.cmd_rev_r *= failures_state.thrust_right_eff
 
     def clamp_all(self, pids: dict[str, PIDController]):
         self.rudder_cmd = pids['runway_center_pid'].clamp(self.rudder_cmd)
@@ -77,7 +78,7 @@ class ControlsState:
         self.cmd_rev_r = pids['pid_rev_r'].clamp(self.cmd_rev_r)
 
     def neutralize(self):
-        """Обнуляет все органы управления. Отправку делает вызывающий через `SimInterface.step`.
+        """Обнуляет все органы управления. Отправку делает вызывающий через `ICSSim.step`.
 
         Нейтральная команда, а не молчание: если просто перестать слать, последнее отклонение
         останется приложенным до срабатывания сторожа на той стороне.
@@ -137,7 +138,8 @@ class LongitudinalChannel:
         # 2. Расчет реверса (Thrust Reversers) с учетом эксплуатационного лимита
         if current_speed_kts > 60.0:
             # Скорость безопасна для реверса
-            state.cmd_rev_l = self.w_lon * self.pid_rev_l.compute(error, dt)  # Инверсия знака для X-Plane
+            # PID реверса ограничен [-1, 0], поэтому его выход — уже готовая обратная тяга.
+            state.cmd_rev_l = self.w_lon * self.pid_rev_l.compute(error, dt)
             state.cmd_rev_r = self.w_lon * self.pid_rev_r.compute(error, dt)
         else:
             # Скорость ниже 60 узлов - принудительное отключение реверса.
@@ -179,13 +181,14 @@ class LateralChannel:
         print("[LateralChannel] Запуск латерального канала.")
 
     def _guidance(self, telemetry, heading, groundspeed_ms):
-        """Guidance по тому, что даёт бэкенд. → словарь guidance или None, если данных нет.
+        """Guidance по тому, что даёт стенд. → словарь guidance или None, если данных нет.
 
-        Стенд заказчика сообщает курс ВПП и боковое отклонение напрямую — тогда собственная
-        геодезия не нужна и, главное, не применима: координат торцов ВПП стенд не передаёт, и
-        считать от захардкоженного Шереметьево значило бы вести ВС по чужой осевой линии.
+        Стенд сообщает курс ВПП и боковое отклонение напрямую — тогда собственная геодезия не
+        нужна и, главное, не применима: координат торцов ВПП стенд не передаёт, и считать от
+        захардкоженного Шереметьево значило бы вести ВС по чужой осевой линии.
 
-        X-Plane этих полей не даёт → работает прежний геодезический путь, бит-в-бит как раньше.
+        Запасной геодезический путь (`config/runway.py`) остаётся на случай, когда стенд не
+        объявляет `RunwayHeadingValid`: тогда ось считается по конфигурации.
         """
         runway_heading = getattr(telemetry, "runway_heading_deg", None)
         lateral_deviation = getattr(telemetry, "lateral_deviation_m", None)

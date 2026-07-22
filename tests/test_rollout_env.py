@@ -7,7 +7,7 @@ from ismpu.config.constants import DT
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
 from ismpu.control.system import ControllingSystem
 from ismpu.control.channels import ControlsState
-from ismpu.envs.sim_interface import XPlaneBackend
+from ismpu.envs.ics_sim import ICSSim, Telemetry
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, FEATURE_NAMES, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, preset_action, REFERENCE_ACTION, ACTION_LOW, ACTION_HIGH
@@ -20,68 +20,8 @@ from ismpu.envs.rollout_env import RolloutEnv, heading_deviation_deg
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.agent import normalization as norm
-from ismpu.io.datarefs import (
-    LATITUDE, LONGITUDE, GROUNDSPEED, TRUE_PSI,
-    LEFT_BRAKE_RATIO, RIGHT_BRAKE_RATIO, THROTTLE_RATIO_L, THROTTLE_RATIO_R, YOKE_HEADING_RATIO,
-)
 
-_CONTROL_DREFS = {LEFT_BRAKE_RATIO, RIGHT_BRAKE_RATIO, THROTTLE_RATIO_L, THROTTLE_RATIO_R, YOKE_HEADING_RATIO}
-
-
-def _scripted_values(groundspeed=50.0):
-    return {
-        LATITUDE: {"value": RWY_START_LAT},
-        LONGITUDE: {"value": RWY_START_LON},
-        GROUNDSPEED: {"value": groundspeed},
-        TRUE_PSI: {"value": float(RWY_HEADING_TRUE)},
-    }
-
-
-def _telemetry(groundspeed=50.0):
-    """Кадр телеметрии, соответствующий `_scripted_values`.
-
-    Контур больше не читает коннектор сам — кадр подаётся параметром `control_step`.
-    """
-    from ismpu.envs.sim_interface import Telemetry
-    return Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=groundspeed,
-                     heading_true_deg=float(RWY_HEADING_TRUE))
-
-
-class FakeXPC:
-    """Мок X-Plane со скриптованной телеметрией; subscribe не перезатирает заданные значения."""
-
-    def __init__(self, values):
-        self.current_dref_values = dict(values)
-        self.sent = []
-
-    def sendDREF(self, dref, value):
-        self.sent.append((dref, value))
-
-    def sendCTRL(self, **kw):
-        pass
-
-    def sendPOSI(self, **kw):
-        pass
-
-    def sendCMND(self, *a):
-        pass
-
-    def pauseSIM(self, *a):
-        pass
-
-    def fix_all_systems(self):
-        pass
-
-    def subscribeDREFs(self, subs, timeout=5.0):
-        for dref, _ in subs:
-            self.current_dref_values.setdefault(dref, {"value": 0.0})
-
-    def getDREF(self, dref):
-        v = self.current_dref_values.get(dref)
-        return v["value"] if v else 0.0
-
-    def control_sends(self):
-        return [(d, v) for d, v in self.sent if d in _CONTROL_DREFS]
+from fakes import static_sim, make_ics_inputs, telemetry as _telemetry
 
 
 # --------------------------------------------------------------------------- #
@@ -93,34 +33,31 @@ def test_env_preset_action_parity_matches_classical_control_step():
     scenario = SCENARIO_PRESETS["default"]     # пресет default → preset_action == REFERENCE_ACTION
     n_steps = 6
 
-    # (A) чистая классика. Телеметрию читаем тем же бэкендом, что и среда, — иначе парити
+    # (A) чистая классика. Телеметрию читаем тем же стендом, что и среда, — иначе парити
     # проверяло бы заодно и совпадение двух разных способов собрать кадр.
-    fake_a = FakeXPC(_scripted_values())
-    sim_a = XPlaneBackend(xpc=fake_a, settle_s=0.0, reload_each_reset=False)
+    sim_a, conn_a = static_sim()
     ctrl_a = ControllingSystem(sim_a)
     scenario.apply_control(ctrl_a)
     for _ in range(n_steps):
         ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
-    classical = fake_a.control_sends()
+    classical = conn_a.commands()
 
     # (B) среда с действием = точные коэффициенты пресета (float64) без Shield
-    fake_b = FakeXPC(_scripted_values())
-    sim = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
-    ctrl_b = ControllingSystem(sim)
-    env = RolloutEnv(sim, ctrl_b, shield=None)
+    sim_b, conn_b = static_sim()
+    ctrl_b = ControllingSystem(sim_b)
+    env = RolloutEnv(sim_b, ctrl_b, shield=None)
     env.reset(scenario)
     action = preset_action(base_gains_from_pids(ctrl_b.pids))   # точная запись пресета
     for _ in range(n_steps):
         env.step(action)
-    via_env = fake_b.control_sends()
+    via_env = conn_b.commands()
 
-    assert len(classical) == 5 * n_steps
+    assert len(classical) == n_steps
     assert via_env == pytest.approx(classical)   # бит-в-бит совпадение команд
 
 
 def test_preset_action_leaves_scenario_gains_unchanged():
-    fake = FakeXPC(_scripted_values())
-    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
     preset = base_gains_from_pids(ctrl.pids)
 
@@ -140,8 +77,7 @@ def test_preset_action_leaves_scenario_gains_unchanged():
 # --------------------------------------------------------------------------- #
 
 def _ready_controller(preset="nws_fail"):
-    fake = FakeXPC(_scripted_values())
-    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS[preset].apply_control(ctrl)
     ctrl.control_step(DT, _telemetry(), send=True)   # заполнить state/PID-внутренности/traveled
     return ctrl
@@ -153,7 +89,6 @@ def test_observation_dim_and_names_consistent():
 
 
 def test_observation_in_normalized_range():
-    from ismpu.envs.sim_interface import Telemetry
     ctrl = _ready_controller()
     telem = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=50.0,
                       heading_true_deg=float(RWY_HEADING_TRUE), roll_deg=2.0, accel_long_g=-0.3)
@@ -164,7 +99,6 @@ def test_observation_in_normalized_range():
 
 
 def test_observation_invalid_telemetry_is_zeros():
-    from ismpu.envs.sim_interface import Telemetry
     ctrl = _ready_controller()
     telem = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
     obs = ObservationBuilder().build(telem, ctrl, SCENARIO_PRESETS["default"].weather)
@@ -225,8 +159,7 @@ def test_break_control_is_cleared_when_a_scenario_is_applied():
     """`break_control` взводится в конце КАЖДОГО нормального пробега (достигнута скорость
     руления). Без сброса при настройке сценария следующий эпизод завершался бы на первом такте —
     в обучении PPO это давало бы эпизоды длиной 1."""
-    fake = FakeXPC(_scripted_values())
-    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["default"].apply_control(ctrl)
 
     ctrl.state.break_control = True          # имитируем завершившийся эпизод
@@ -239,9 +172,8 @@ def test_break_control_is_cleared_when_a_scenario_is_applied():
 
 def test_env_reset_clears_a_latched_break_control():
     scenario = SCENARIO_PRESETS["default"]
-    fake = FakeXPC(_scripted_values())
-    sim = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)
-    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    sim, _conn = static_sim()
+    ctrl = ControllingSystem(sim)
     env = RolloutEnv(sim, ctrl, shield=None)
 
     env.reset(scenario)
@@ -258,25 +190,30 @@ def test_env_reset_clears_a_latched_break_control():
 # Прогрев: такты рукопожатия не должны попадать в эпизод
 # --------------------------------------------------------------------------- #
 
-class _WarmUpBackend(XPlaneBackend):
-    """Бэкенд, требующий N тактов прогрева перед включением (имитация стенда)."""
+class _WarmUpSim(ICSSim):
+    """Стенд, включающий управление только после N тактов прогрева.
 
-    def __init__(self, xpc, warm_ticks=5):
-        super().__init__(xpc=xpc, settle_s=0.0, reload_each_reset=False)
+    Само рукопожатие проверяется в `test_ics_sim.py`; здесь важно лишь то, что его такты не
+    считаются шагами эпизода.
+    """
+
+    def __init__(self, warm_ticks=5):
+        sim, conn = static_sim()
+        super().__init__(connector=conn, engagement=sim.engagement)
         self.warm_ticks = warm_ticks
         self.warm_frames = 0
-        self._engaged = False
+        self._forced_engaged = False
 
     @property
     def engaged(self):
-        return self._engaged
+        return self._forced_engaged
 
-    def warm_up(self, timeout_s=10.0):
-        while not self._engaged:
+    def warm_up(self, timeout_s=10.0, dt=None):
+        while not self._forced_engaged:
             self.step(ControlsState())
             self.warm_frames += 1
             if self.warm_frames >= self.warm_ticks:
-                self._engaged = True
+                self._forced_engaged = True
         return True
 
 
@@ -285,8 +222,7 @@ def test_warm_up_runs_before_the_episode_and_is_not_counted():
 
     Иначе они попали бы в `_steps`, в reward и в `EpisodeObjective`, который использует приёмка.
     """
-    fake = FakeXPC(_scripted_values())
-    sim = _WarmUpBackend(fake, warm_ticks=5)
+    sim = _WarmUpSim(warm_ticks=5)
     env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
 
     env.reset(SCENARIO_PRESETS["default"])
@@ -298,8 +234,7 @@ def test_warm_up_runs_before_the_episode_and_is_not_counted():
 
 
 def test_env_reports_engagement_state_in_info():
-    fake = FakeXPC(_scripted_values())
-    sim = _WarmUpBackend(fake, warm_ticks=2)
+    sim = _WarmUpSim(warm_ticks=2)
     env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
     env.reset(SCENARIO_PRESETS["default"])
 
@@ -316,10 +251,9 @@ def _telemetry_at(offset_m: float, heading_deg: float, *, runway_heading=None):
     """Телеметрия ВС на оси ВПП, смещённого вбок на `offset_m` и с заданным курсом.
 
     Курс ВПП, если задан, приходит «сырым» пакетом стенда (как на реальном стенде), а не отдельным
-    полем: его отдаёт property `Telemetry.runway_heading_deg`. Без него (X-Plane) — `ics_inputs=None`.
+    полем: его отдаёт property `Telemetry.runway_heading_deg`. Без пакета — `ics_inputs=None`.
     """
     from dataclasses import fields as _fields
-    from ismpu.envs.sim_interface import Telemetry
     from ismpu.io.ics_connector import ICSInputs
     t = RunwayTracker()
     brg = np.radians(RWY_HEADING_TRUE)
@@ -472,8 +406,7 @@ def test_heading_gate_uses_tz_threshold():
 # --- насыщение --------------------------------------------------------------- #
 
 def test_saturation_fraction_counts_commands_pegged_at_their_pid_bounds():
-    fake = FakeXPC(_scripted_values())
-    controller = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    controller = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["default"].apply_control(controller)
     pids = controller.pids
 
@@ -494,8 +427,7 @@ def test_zero_bound_is_not_counted_as_saturation():
     Иначе флаг насыщения поднимался бы на каждом такте, где ВС медленнее эталонной кривой,
     т.е. в начале почти любого пробега.
     """
-    fake = FakeXPC(_scripted_values())
-    controller = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    controller = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["default"].apply_control(controller)
     pids = controller.pids
 
@@ -571,9 +503,8 @@ def test_episode_objective_p95_rate_is_robust_to_a_single_spike():
 
 def test_env_reset_and_step_shapes_and_history():
     scenario = SCENARIO_PRESETS["default"]
-    fake = FakeXPC(_scripted_values())
-    sim = XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False)
-    ctrl = ControllingSystem(XPlaneBackend(xpc=fake, settle_s=0.0, reload_each_reset=False))
+    sim, _conn = static_sim()
+    ctrl = ControllingSystem(sim)
     env = RolloutEnv(sim, ctrl, history_len=3, shield=None)
 
     obs, info = env.reset(scenario)
@@ -593,15 +524,13 @@ def test_env_with_shield_at_preset_still_parity():
     scenario = SCENARIO_PRESETS["default"]
     n = 4
 
-    fake_a = FakeXPC(_scripted_values())
-    sim_a = XPlaneBackend(xpc=fake_a, settle_s=0.0, reload_each_reset=False)
+    sim_a, conn_a = static_sim()
     ctrl_a = ControllingSystem(sim_a)
     scenario.apply_control(ctrl_a)
     for _ in range(n):
         ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
 
-    fake_b = FakeXPC(_scripted_values())
-    sim_b = XPlaneBackend(xpc=fake_b, settle_s=0.0, reload_each_reset=False)
+    sim_b, conn_b = static_sim()
     ctrl_b = ControllingSystem(sim_b)
     env = RolloutEnv(sim_b, ctrl_b, shield=Shield())
     env.reset(scenario)
@@ -609,7 +538,7 @@ def test_env_with_shield_at_preset_still_parity():
     for _ in range(n):
         env.step(action)
 
-    assert fake_b.control_sends() == pytest.approx(fake_a.control_sends())
+    assert conn_b.commands() == pytest.approx(conn_a.commands())
 
 
 # --------------------------------------------------------------------------- #

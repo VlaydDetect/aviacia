@@ -20,7 +20,7 @@
 Метрики берутся из `envs/reward.EpisodeObjective` — то же определение, что и у reward PPO
 (единый objective, см. докстринг там).
 
-Офлайн-проверка без X-Plane: `smoke_evaluate(env, scenarios)` (ср. `smoke_train`/`smoke_pretrain`).
+Офлайн-проверка без стенда: `smoke_evaluate(env, scenarios)` (ср. `smoke_train`/`smoke_pretrain`).
 """
 
 from __future__ import annotations
@@ -249,10 +249,10 @@ def run_scenario(env, scenario, policy: Policy, *, max_steps: int = 4000,
                  replicas: int | None = None) -> dict:
     """Прогон сценария нужным числом реплик → **худшая** из них.
 
-    При стохастической погоде (турбулентность/порывы/изменчивость) X-Plane разыгрывает процесс
-    своим генератором, которым мы не управляем, поэтому один прогон ничего не доказывает:
-    отклонение может быть свойством регулятора, а может — одной удачной реализацией. Берётся
-    худшая реплика, а не средняя: ТЗ задаёт пределы как границы (см. `envs/reproducibility`).
+    При неспокойных условиях (ветер, осадки, скользкая полоса) процесс разыгрывает модель
+    стенда, которой мы не управляем, поэтому один прогон ничего не доказывает: отклонение может
+    быть свойством регулятора, а может — одной удачной реализацией. Берётся худшая реплика, а не
+    средняя: ТЗ задаёт пределы как границы (см. `envs/reproducibility`).
     """
     contract = contract_for(scenario)
     count = replicas if replicas is not None else contract.min_replicas
@@ -444,18 +444,22 @@ def write_report(comparison: dict, out_dir: str, *, admission: dict | None = Non
 
 def smoke_evaluate(env, scenarios, *, policies: list[Policy] | None = None,
                    max_steps: int = 200, log=None) -> dict:
-    """Офлайн-приёмка на поданной среде (без X-Plane) — для тестов/отладки."""
+    """Офлайн-приёмка на поданной среде (без стенда) — для тестов/отладки."""
     policies = policies or [DefaultGainsPolicy(), PresetPolicy()]
     return compare_policies(env, scenarios, policies, max_steps=max_steps, log=log)
 
 
 def main(*, sft_checkpoint: str | None = "checkpoints/npgs_sft.pt",
          ppo_checkpoint: str | None = "checkpoints/npgs_final.pt",
-         out_dir: str = "runs/evaluation") -> dict:
-    """Полная приёмка на X-Plane: приёмочный набор × 4 политики → отчёт + гейт допуска."""
+         out_dir: str = "runs/evaluation",
+         ip: str = "127.0.0.1", port: int = 3030) -> dict:
+    """Полная приёмка на стенде: приёмочный набор × 4 политики → отчёт + гейт допуска.
+
+    Условия каждого сценария выставляет оператор стенда; здесь набор задаёт, что именно надо
+    выставить и в каком порядке (`ScenarioGenerator.battery`).
+    """
     from ismpu.control.system import ControllingSystem
-    from ismpu.io.xplane_connector import XPlaneConnectX
-    from ismpu.envs.sim_interface import XPlaneBackend
+    from ismpu.envs.ics_sim import ICSSim
     from ismpu.envs.rollout_env import RolloutEnv
     from ismpu.envs.scenario_generator import ScenarioGenerator
     from ismpu.agent.shield import Shield
@@ -463,10 +467,7 @@ def main(*, sft_checkpoint: str | None = "checkpoints/npgs_sft.pt",
 
     silence_control_console()
 
-    # Телеметрия и команды идут через SimInterface; контуру коннектор нужен только для прямой
-    # отправки в классическом цикле, здесь он работает через среду (send=False).
-    xpc = XPlaneConnectX()
-    sim = XPlaneBackend(xpc=xpc)
+    sim = ICSSim(listen_ip=ip, listen_port=port)
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, shield=Shield())
 

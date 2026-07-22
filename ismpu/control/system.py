@@ -3,9 +3,9 @@
 `ControllingSystem` на каждом такте вызывает продольный и латеральный каналы, применяет
 деградацию отказов и отправляет команды.
 
-**Единственная зависимость от симулятора — `SimInterface`.** Контур не знает, работает он против
-X-Plane или против стенда заказчика: и телеметрия, и отправка идут через абстракцию. Раньше здесь
-был `XPlaneConnectX`, из-за чего базовый контур нельзя было проверить на стенде.
+**Транспорта здесь нет.** Контур получает объект стенда (`envs.ics_sim.ICSSim`) и общается с ним
+только через `read_telemetry`/`step`; ни JSON, ни UDP, ни единиц ICD он не знает — их переводит
+`ICSSim`.
 """
 
 from typing import Optional
@@ -20,11 +20,11 @@ from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_E
 
 
 class ControllingSystem:
-    """Оркестратор классического контура поверх `SimInterface`.
+    """Оркестратор классического контура поверх стенда (`envs.ics_sim.ICSSim`).
 
-    Простейший цикл (одинаковый для X-Plane и для стенда):
+    Простейший цикл:
 
-        sim = ICSBackend(...)            # или XPlaneBackend(...)
+        sim = ICSSim(listen_port=3030)
         controller = ControllingSystem(sim)
         scenario.apply_control(controller)
         while not controller.control_step(DT):
@@ -87,6 +87,27 @@ class ControllingSystem:
     def apply_failure(self, mode: FailureMode):
         self.failures.activate(mode)
 
+    def sync_failures(self, telemetry) -> None:
+        """Привести модель отказов к тому, что сообщает борт (`ICSInputs.Fault*`).
+
+        Отказы читаются, а не задаются: их источник — стенд. Пресет сценария выставляет лишь
+        стартовое предположение, а фактическая конфигурация может отличаться и меняться посреди
+        пробега, поэтому состояние пересобирается каждый такт.
+
+        При невалидной телеметрии состояние **сохраняется**: единичный потерянный пакет не
+        означает, что отказавший орган починился, а «починка» на такт вернула бы рулю авторитет,
+        которого у него нет.
+
+        Кадр без пакета стенда (синтетическая телеметрия в тестах и офлайн-разборах) не трогает
+        отказы вовсе: пустой `faults` там означает «сообщать некому», а не «всё исправно», и
+        приравнять одно к другому значило бы молча снимать отказ пресета.
+        """
+        if telemetry is None or not telemetry.valid:
+            return
+        if getattr(telemetry, "ics_inputs", None) is None:
+            return
+        self.failures.sync(telemetry.faults)
+
     def control_step(self, dt: float, telemetry=None, send: bool = True) -> bool:
         """Такт управления. → True, если пробег окончен (или телеметрия невалидна).
 
@@ -100,6 +121,7 @@ class ControllingSystem:
         if telemetry is None:
             telemetry = self.last_telemetry if self.last_telemetry is not None else self._read()
         self.last_telemetry = telemetry
+        self.sync_failures(telemetry)
 
         self.longitudinal_channel.calc_commands(dt, self.state, telemetry)
         self.lateral_channel.calc_commands(dt, self.state, telemetry)
@@ -120,7 +142,7 @@ class ControllingSystem:
 
         Вызывается, когда контур объявил достижение скорости руления. Без этого стенд остаётся
         в режиме пробега, хотя ВС уже рулит. Разрешающее условие (обжатие стоек) проверяет сам
-        бэкенд; на X-Plane метод — no-op.
+        автомат включения (`io/ics_engagement.py`).
         """
         return self._require_sim().request_taxi()
 
@@ -130,8 +152,8 @@ class ControllingSystem:
     def _require_sim(self):
         if self.sim is None:
             raise RuntimeError(
-                "контуру не задан SimInterface: без него он не может ни прочитать телеметрию, ни "
-                "отправить команды. Передайте бэкенд в ControllingSystem(sim=...) либо подавайте "
+                "контуру не задан стенд: без него он не может ни прочитать телеметрию, ни "
+                "отправить команды. Передайте ICSSim в ControllingSystem(sim=...) либо подавайте "
                 "кадр параметром и используйте send=False.")
         return self.sim
 

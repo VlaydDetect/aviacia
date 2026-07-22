@@ -2,8 +2,12 @@
 
 Собирает один кадр из телеметрии (`Telemetry`), состояния классического контура
 (`ControllingSystem`: guidance, эталонная скорость, последние команды, внутреннее
-состояние PID×5) и погоды сценария. Плюс **зарезервированные слоты обсервера** (§12,
-Этап 7) — сейчас заполняются нулями через `ObserverEstimate`.
+состояние PID×5) и **фактической погоды со стенда** (`Telemetry.weather`, т.е. `ICSInputs`).
+Плюс **зарезервированные слоты обсервера** (§12, Этап 7) — сейчас заполняются нулями через
+`ObserverEstimate`.
+
+Погода берётся из телеметрии, а не из сценария: на стенде условия задаёт Заказчик, и признак,
+собранный из «ожидаемой» погоды сценария, разошёлся бы с тем, что ВС реально испытывает.
 
 Нормировка — фиксированными константами из `agent.normalization` (единый контракт
 train↔deploy). Порядок признаков задан `FEATURE_NAMES`; `build(...)` возвращает
@@ -24,7 +28,7 @@ from ismpu.config.regulators import REGULATOR_ORDER
 from ismpu.utils.converts import Converts
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
-from ismpu.envs.weather import decompose_wind
+from ismpu.envs.weather import WeatherState, decompose_wind
 
 _G = 9.80665  # ускорение свободного падения (перегрузка g → м/с²)
 
@@ -68,8 +72,12 @@ class ObservationBuilder:
         self.runway_length_m = runway_length_m or tracker.haversine_distance(
             RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
 
-    def build(self, telemetry, controller, weather, observer: ObserverEstimate | None = None) -> np.ndarray:
+    def build(self, telemetry, controller, weather=None,
+              observer: ObserverEstimate | None = None) -> np.ndarray:
         """Собирает нормированный кадр. При невалидной телеметрии — нулевой вектор.
+
+        `weather=None` (обычный путь) — условия берутся из самой телеметрии стенда. Явный
+        аргумент нужен только офлайн, когда пакета стенда нет (тесты, разбор логов).
 
         Коэффициенты PID кодируются как **абсолютные** в лог-норме gain-пространства
         (`gain_space.gain_norm_scalar`) — это «прошлые коэффициенты» (последний выход сети),
@@ -77,6 +85,9 @@ class ObservationBuilder:
         if not telemetry.valid or None in (telemetry.lat, telemetry.lon,
                                            telemetry.heading_true_deg, telemetry.groundspeed_ms):
             return np.zeros(OBS_DIM, dtype=np.float32)
+
+        if weather is None:
+            weather = getattr(telemetry, "weather", None) or WeatherState()
 
         feats: dict[str, float] = {}
 
@@ -127,8 +138,7 @@ class ObservationBuilder:
         # --- Погода ---
         wind_ms = weather.wind_speed_kts * Converts.KTS_TO_MS
         cross, head = decompose_wind(wind_ms, weather.wind_dir_from_degt, telemetry.heading_true_deg)
-        friction = (weather.friction_profile.at(lon_ch.traveled_distance_m)
-                    if weather.friction_profile else weather.runway_friction)
+        friction = weather.runway_friction
         feats["wind_along"] = clip_unit(linear(head, WIND_SCALE))
         feats["wind_cross"] = clip_unit(linear(cross, WIND_SCALE))
         feats["friction"] = clip_unit(linear(friction, FRICTION_SCALE))

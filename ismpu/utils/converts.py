@@ -12,7 +12,7 @@ class Converts:
     FT_TO_M = 0.3048
 
     SM_TO_M = 1609.344       # статутная миля → метры
-    M_TO_SM = 1.0 / 1609.344  # метры → статутные мили (видимость X-Plane)
+    M_TO_SM = 1.0 / 1609.344  # метры → статутные мили
 
     @staticmethod
     def dms_to_float(degrees, minutes, seconds, direction='N'):

@@ -4,43 +4,48 @@
 входы, которые мы контролируем сидом, и источники случайности, которые нам **не принадлежат** —
 и назвать вторые поимённо, вместо того чтобы считать прогон воспроизводимым по умолчанию.
 
-Наш случай ровно такой. `ScenarioGenerator` детерминирован по сиду, но **X-Plane — нет**:
-собственные турбулентность, порывы (shear) и пространственная изменчивость ветра симулятор
-разыгрывает сам, своим генератором, которым мы не управляем. Значит, при ненулевой болтанке
-одинаковый сид **не даёт** одинаковую траекторию, и приёмочный прогон такого сценария в одну
-реплику ничего не доказывает: измеренное отклонение может быть как свойством регулятора, так и
-одной удачной или неудачной реализацией турбулентности.
+Наш случай ровно такой, и после перехода на стенд — в ещё большей степени. Пресеты и порядок
+сценариев детерминированы, но **среду разыгрывает стенд**: ветер, осадки и состояние ВПП
+выставляет Заказчик, реализацию порывов и сноса считает его модель, а повторить эпизод
+бит-в-бит мы не можем даже теоретически — у нас нет ни телепорта, ни сида его генератора.
+Значит, при неспокойных условиях один прогон ничего не доказывает: измеренное отклонение может
+быть как свойством регулятора, так и одной удачной (или неудачной) реализацией.
 
-Отсюда правило: `replica_validation_required = True`, когда в погоде есть стохастика, и
-приёмка обязана прогнать сценарий `min_replicas` раз и смотреть на худшую реплику, а не на
-среднюю (ТЗ формулирует пределы как границы, а не как средние).
+Отсюда правило: `replica_validation_required = True`, когда условия неспокойные, и приёмка
+обязана прогнать сценарий `min_replicas` раз и смотреть на худшую реплику, а не на среднюю
+(ТЗ формулирует пределы как границы, а не как средние).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 
-XPLANE_NATIVE_TURBULENCE = "xplane_native_turbulence"
-XPLANE_NATIVE_GUST = "xplane_native_wind_shear"
-XPLANE_WIND_VARIABILITY = "xplane_wind_variability"
+BENCH_WIND = "bench_wind_realization"
+BENCH_PRECIPITATION = "bench_precipitation"
+BENCH_LOW_FRICTION = "bench_low_friction"
+
+WIND_STOCHASTIC_KTS = 1.0
+"""Ветер слабее узла считаем штилем: он не порождает разброса, за которым стоило бы гнать реплики."""
 
 DEFAULT_MIN_REPLICAS = 3
-"""Сколько реплик требовать при стохастической погоде. Три — минимум, на котором «худшая из
+"""Сколько реплик требовать при неспокойных условиях. Три — минимум, на котором «худшая из
 реплик» отличается от «единственной попытки»; это порог отчётности, а не статистика."""
 
 
 def stochastic_sources(weather) -> tuple[str, ...]:
-    """Источники случайности на стороне X-Plane, активные при данной погоде.
+    """Источники случайности на стороне стенда, активные при данных условиях.
 
-    Мы задаём их **интенсивность**, но не реализацию: сам процесс разыгрывает симулятор.
+    Мы задаём (точнее — просим Заказчика выставить) их **интенсивность**, но не реализацию:
+    сам процесс разыгрывает модель стенда.
     """
     sources: list[str] = []
-    if getattr(weather, "turbulence", 0.0) > 0.0:
-        sources.append(XPLANE_NATIVE_TURBULENCE)
-    if getattr(weather, "gust_kts", 0.0) > 0.0:
-        sources.append(XPLANE_NATIVE_GUST)
-    if getattr(weather, "variability_pct", 0.0) > 0.0:
-        sources.append(XPLANE_WIND_VARIABILITY)
+    if abs(getattr(weather, "wind_speed_kts", 0.0)) >= WIND_STOCHASTIC_KTS:
+        sources.append(BENCH_WIND)
+    if getattr(weather, "rain_pct", 0.0) > 0.0:
+        sources.append(BENCH_PRECIPITATION)
+    if getattr(weather, "runway_friction", 0.0) > 0.0:
+        # Скользкая полоса — срыв сцепления, а он по своей природе разыгрывается, а не считается.
+        sources.append(BENCH_LOW_FRICTION)
     return tuple(sources)
 
 
@@ -69,8 +74,7 @@ def contract_for(scenario, *, min_replicas: int = DEFAULT_MIN_REPLICAS) -> Repro
 
     deterministic = {
         "scenario_seed": getattr(scenario, "seed", None),
-        "touchdown": _as_dict(getattr(scenario, "touchdown", None)),
-        "sensor_noise": _as_dict(getattr(scenario, "sensor_noise", None)),
+        "expected_weather": _as_dict(weather),
         "failures": [f.name for f in (getattr(scenario, "failures", ()) or ())],
         "control_preset": getattr(getattr(scenario, "control", None), "name", None),
     }

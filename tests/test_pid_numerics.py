@@ -12,11 +12,10 @@ import pytest
 from ismpu.config.constants import DT
 from ismpu.control.pid import PIDController
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.sim_interface import XPlaneBackend
 from ismpu.control.failures import FailureMode
 from ismpu.envs.scenario import SCENARIO_PRESETS
 
-from test_rollout_env import FakeXPC, _scripted_values, _telemetry
+from fakes import static_sim, telemetry as _telemetry
 
 
 def _legacy_reference(errors, *, kp, ki, kd, dt, aw, decay, tf, lo, hi):
@@ -70,13 +69,13 @@ def test_control_step_is_unchanged_when_tracking_is_off():
     """`_track_applied` вызывается безусловно, но обязан быть no-op без `tracking_tau_s`."""
     telem = _telemetry()
 
-    ctrl = ControllingSystem(XPlaneBackend(xpc=FakeXPC(_scripted_values()), settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
     for _ in range(5):
         ctrl.control_step(DT, telem, send=True)
     integrals_with_hook = {name: p.integral for name, p in ctrl.pids.items()}
 
-    ctrl2 = ControllingSystem(XPlaneBackend(xpc=FakeXPC(_scripted_values()), settle_s=0.0, reload_each_reset=False))
+    ctrl2 = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl2)
     for _ in range(5):
         # тот же цикл, но без хука трекинга
@@ -131,13 +130,13 @@ def test_tracking_does_nothing_when_the_command_is_applied_as_computed():
 def test_tracking_through_control_step_under_a_real_failure():
     """Сквозная проверка: NWS-отказ обнуляет руль, интегратор курсового PID не должен копить."""
     def run(tau):
-        ctrl = ControllingSystem(XPlaneBackend(xpc=FakeXPC(_scripted_values(groundspeed=50.0)), settle_s=0.0, reload_each_reset=False))
+        ctrl = ControllingSystem(static_sim(groundspeed_ms=50.0)[0])
         SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
         ctrl.apply_failure(FailureMode.NWS_FAIL)          # steering_eff = 0
         pid = ctrl.pids["runway_center_pid"]
         pid.tracking_tau_s = tau
         pid.ki = max(pid.ki, 0.2)                          # чтобы интеграл вообще был заметен
-        telem = _telemetry(groundspeed=50.0)
+        telem = _telemetry(50.0)
         for _ in range(30):
             if ctrl.control_step(DT, telem, send=True):
                 break

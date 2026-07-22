@@ -1,15 +1,19 @@
 """Цикл обучения NPGS через PPO с domain randomization (план §11, Этап 4).
 
-Собирает тренировочный стек: коннектор X-Plane за бэкендом `XPlaneBackend`, классический контур
-`ControllingSystem` (телеметрию получает параметром от среды, коннектор ему нужен только для
-прямой отправки в классическом цикле), `RolloutEnv` со Shield в inference-пути и NPGS.
-Учебный план (curriculum) поднимает `difficulty` от 0 к 1 по ходу обучения через
-`ScenarioGenerator`. Чекпоинты и CSV-лог по каждому терму — в `checkpoint_dir`.
+Собирает тренировочный стек: стенд (`ICSSim`), классический контур `ControllingSystem`,
+`RolloutEnv` со Shield в inference-пути и NPGS. Учебный план (curriculum) поднимает
+`difficulty` от 0 к 1 по ходу обучения через `ScenarioGenerator`. Чекпоинты и CSV-лог по
+каждому терму — в `checkpoint_dir`.
 
-Запуск реального обучения (нужен X-Plane 12 на 127.0.0.1:49000):
+Запуск реального обучения (нужен работающий стенд на порту 3030):
     python -m ismpu.runtime.train
 
-Оффлайн-валидация цикла PPO без X-Plane — `smoke_train(env, provider, ...)`
+**Границы эпизода задаёт стенд.** Сценарий из curriculum говорит, какими коэффициентами
+стартовать; условия (погода, отказы, расстановка) выставляет Заказчик и сообщает телеметрией,
+поэтому смена сценария между апдейтами — это смена пресета, а не переконфигурация среды.
+Прогон набора условий согласуется с оператором стенда (см. `ScenarioGenerator.battery`).
+
+Оффлайн-валидация цикла PPO без стенда — `smoke_train(env, provider, ...)`
 (среду подаёт вызывающий; используется в тестах).
 """
 
@@ -89,18 +93,17 @@ class CSVLogger:
 
 
 # --------------------------------------------------------------------------- #
-# X-Plane training stack
+# Тренировочный стек на стенде
 # --------------------------------------------------------------------------- #
 
-def build_xplane_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 49000):
-    """Строит (env, npgs, trainer) на общем коннекторе X-Plane. Требует запущенный X-Plane.
+def build_ics_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 3030):
+    """Строит (env, npgs, trainer) поверх стенда. Требует работающий стенд.
 
     С `cfg.init_from` — грузит SFT-подогретые веса (тёплый старт; конфиг/нормировка берутся
     из чекпоинта). При `ppo.lambda_anchor > 0` замороженная SFT-копия ставится как
     `trainer.sft_reference` (L_anchor — не забывать пресеты)."""
-    from ismpu.io.xplane_connector import XPlaneConnectX
     from ismpu.control.system import ControllingSystem
-    from ismpu.envs.sim_interface import XPlaneBackend
+    from ismpu.envs.ics_sim import ICSSim
     from ismpu.envs.rollout_env import RolloutEnv
 
     # Контракт обучаемого слоя проверяется ДО того, как потрачен прогон: рассинхронизация
@@ -109,8 +112,7 @@ def build_xplane_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 4900
 
     net = NPGS.load(cfg.init_from) if cfg.init_from else NPGS(cfg.npgs)
 
-    xpc = XPlaneConnectX(ip=ip, port=port)
-    sim = XPlaneBackend(xpc=xpc)
+    sim = ICSSim(listen_ip=ip, listen_port=port)
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=net.cfg.window, shield=Shield())
 
@@ -123,15 +125,15 @@ def build_xplane_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 4900
     return env, net, trainer
 
 
-def train(cfg: TrainConfig | None = None, ip: str = "127.0.0.1", port: int = 49000) -> PPOTrainer:
-    """Полный цикл обучения на X-Plane с curriculum, логом и чекпоинтами."""
+def train(cfg: TrainConfig | None = None, ip: str = "127.0.0.1", port: int = 3030) -> PPOTrainer:
+    """Полный цикл обучения на стенде с curriculum, логом и чекпоинтами."""
     from ismpu.envs.scenario_generator import ScenarioGenerator
 
     cfg = cfg or TrainConfig()
     if cfg.silence_console:
         silence_control_console()
 
-    env, net, trainer = build_xplane_stack(cfg, ip=ip, port=port)
+    env, net, trainer = build_ics_stack(cfg, ip=ip, port=port)
     generator = ScenarioGenerator(seed=cfg.seed)
     provider = make_curriculum_provider(generator, trainer, cfg.total_updates, cfg.curriculum_ramp)
 
@@ -159,7 +161,7 @@ def train(cfg: TrainConfig | None = None, ip: str = "127.0.0.1", port: int = 490
 
 def smoke_train(env, scenario_provider, *, npgs: NPGS | None = None,
                 ppo: PPOConfig | None = None, updates: int = 2) -> PPOTrainer:
-    """Оффлайн-прогон цикла PPO на поданной среде (без X-Plane) — для тестов/отладки."""
+    """Оффлайн-прогон цикла PPO на поданной среде (без стенда) — для тестов/отладки."""
     net = npgs or NPGS(NPGSConfig(window=env.history_len))
     trainer = PPOTrainer(net, ppo or PPOConfig(rollout_len=64, num_minibatches=4,
                                                update_epochs=2, device="cpu"),

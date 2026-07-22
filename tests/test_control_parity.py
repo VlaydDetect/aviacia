@@ -1,9 +1,9 @@
 """Тесты паритета после выноса контура из main.ipynb в пакет ismpu.
 
-Полный паритет траектории требует запущенного X-Plane (проверяется вручную).
-Здесь проверяются детерминированные компоненты и сквозная связность контура на
-мок-коннекторе: численные значения PID, геодезия трекера, эталонная скорость и
-один такт `control_step` без симулятора.
+Полный паритет траектории требует работающего стенда (проверяется вручную). Здесь
+проверяются детерминированные компоненты и сквозная связность контура на фейковом
+стенде: численные значения PID, геодезия трекера, эталонная скорость и один такт
+`control_step`.
 """
 
 import math
@@ -17,7 +17,8 @@ from ismpu.control.trajectory import ReferenceTrajectory, VelocityLaw
 from ismpu.control.system import ControllingSystem
 from ismpu.config.scenarios import DEFAULT
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
-from ismpu.io.datarefs import LATITUDE, LONGITUDE, GROUNDSPEED, TRUE_PSI
+
+from fakes import static_sim, telemetry, decode_outputs
 
 
 # --------------------------------------------------------------------------- #
@@ -110,129 +111,75 @@ def test_equally_slow_law_endpoints():
 
 
 # --------------------------------------------------------------------------- #
-# Сквозная связность контура на мок-коннекторе (без X-Plane)
+# Сквозная связность контура на фейковом стенде
 # --------------------------------------------------------------------------- #
 
-class MockXPC:
-    """Фейковый коннектор: отдаёт заданную телеметрию, пишет команды в self.sent."""
-
-    def __init__(self, values: dict):
-        self.current_dref_values = {k: {"value": v} for k, v in values.items()}
-        self.sent = []
-
-    def sendDREF(self, dref, value):
-        self.sent.append((dref, value))
-
-    def pauseSIM(self, *a):
-        pass
-
-    def sendCMND(self, *a):
-        pass
-
-
-def _nominal_values(groundspeed=50.0):
-    return {
-        LATITUDE: RWY_START_LAT,
-        LONGITUDE: RWY_START_LON,
-        GROUNDSPEED: groundspeed,
-        TRUE_PSI: RWY_HEADING_TRUE,
-    }
-
-
-def _backend(mock):
-    """Бэкенд поверх мок-коннектора: контур зависит только от SimInterface."""
-    from ismpu.envs.sim_interface import XPlaneBackend
-    return XPlaneBackend(xpc=mock, settle_s=0.0, reload_each_reset=False)
-
-
-def _telemetry(values: dict):
-    """Кадр телеметрии из набора значений DataRef.
-
-    Контур больше не читает коннектор сам — кадр подаётся параметром `control_step`, поэтому
-    тесты собирают его так же, как это делает бэкенд.
-    """
-    from ismpu.envs.sim_interface import Telemetry
-    return Telemetry(
-        lat=values.get(LATITUDE), lon=values.get(LONGITUDE),
-        groundspeed_ms=values.get(GROUNDSPEED), heading_true_deg=values.get(TRUE_PSI),
-        valid=None not in (values.get(LATITUDE), values.get(LONGITUDE),
-                           values.get(GROUNDSPEED), values.get(TRUE_PSI)),
-    )
-
-
 def test_control_step_emits_five_bounded_commands():
-    values = _nominal_values(groundspeed=50.0)
-    mock = MockXPC(values)
-    controller = ControllingSystem(_backend(mock))
+    sim, conn = static_sim(groundspeed_ms=50.0)
+    controller = ControllingSystem(sim)
     DEFAULT.apply(controller)
 
-    stop = controller.control_step(0.05, _telemetry(values))
+    stop = controller.control_step(0.05, telemetry(50.0))
 
     assert stop is False
-    assert len(mock.sent) == 5
-    sent = dict(mock.sent)
-    for _, val in mock.sent:
-        assert math.isfinite(val)
-    from ismpu.io.datarefs import (
-        LEFT_BRAKE_RATIO, RIGHT_BRAKE_RATIO, THROTTLE_RATIO_L, THROTTLE_RATIO_R, YOKE_HEADING_RATIO,
-    )
-    assert 0.0 <= sent[LEFT_BRAKE_RATIO] <= 1.0
-    assert 0.0 <= sent[RIGHT_BRAKE_RATIO] <= 1.0
-    assert -1.0 <= sent[THROTTLE_RATIO_L] <= 0.0
-    assert -1.0 <= sent[THROTTLE_RATIO_R] <= 0.0
-    assert -1.0 <= sent[YOKE_HEADING_RATIO] <= 1.0
+    assert len(conn.sent_outputs) == 1
+    brake_l, brake_r, rev_l, rev_r, rudder = decode_outputs(conn.sent_outputs[-1])
+    for value in (brake_l, brake_r, rev_l, rev_r, rudder):
+        assert math.isfinite(value)
+    assert 0.0 <= brake_l <= 1.0
+    assert 0.0 <= brake_r <= 1.0
+    assert -1.0 <= rev_l <= 0.0
+    assert -1.0 <= rev_r <= 0.0
+    assert -1.0 <= rudder <= 1.0
 
 
 def test_nws_fail_preset_injects_failure():
     """NWS_FAIL активирует отказ руления: steering_eff→0, руль обнуляется на выходе."""
     from ismpu.config.scenarios import NWS_FAIL
-    from ismpu.io.datarefs import YOKE_HEADING_RATIO
 
-    values = _nominal_values(groundspeed=50.0)
-    mock = MockXPC(values)
-    controller = ControllingSystem(_backend(mock))
+    sim, conn = static_sim(groundspeed_ms=50.0)
+    controller = ControllingSystem(sim)
     NWS_FAIL.apply(controller)
 
     assert controller.failures.state.steering_eff == 0.0  # отказ активирован
-    controller.control_step(0.05, _telemetry(values))
+    controller.control_step(0.05, telemetry(50.0))
     # apply_failures обнулил руль перед отправкой (удержание — дифф. торможением/тягой)
-    assert dict(mock.sent)[YOKE_HEADING_RATIO] == pytest.approx(0.0)
+    assert decode_outputs(conn.sent_outputs[-1])[4] == pytest.approx(0.0)
 
 
 def test_default_preset_leaves_all_actuators_healthy():
     from ismpu.config.scenarios import DEFAULT
 
-    controller = ControllingSystem(_backend(MockXPC(_nominal_values())))
+    controller = ControllingSystem(static_sim()[0])
     DEFAULT.apply(controller)
 
     assert controller.failures.state.steering_eff == 1.0  # отказ не активирован
 
 
 def test_control_step_stops_and_sends_nothing_on_missing_telemetry():
-    values = _nominal_values()
-    values[GROUNDSPEED] = None  # выпадение телеметрии
-    mock = MockXPC(values)
-    controller = ControllingSystem(_backend(mock))
+    from ismpu.envs.ics_sim import Telemetry
+
+    sim, conn = static_sim()
+    controller = ControllingSystem(sim)
     DEFAULT.apply(controller)
 
-    stop = controller.control_step(0.05, _telemetry(values))
+    dropped = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=None,
+                        heading_true_deg=float(RWY_HEADING_TRUE))
+    stop = controller.control_step(0.05, dropped)
 
     assert stop is True
-    assert mock.sent == []
+    assert conn.sent_outputs == []
 
 
 def test_control_step_stops_on_invalid_frame_even_with_numeric_fields():
-    """Бэкенд стенда при обрыве связи отдаёт НУЛИ с valid=False, а не None.
+    """Стенд при обрыве связи отдаёт НУЛИ с valid=False, а не None.
 
     Проверка «поле is None» пропустила бы groundspeed = 0.0 дальше, где он тут же выглядел бы
     как «достигнута скорость руления», и эпизод молча засчитался бы пройденным.
     """
-    from ismpu.envs.sim_interface import Telemetry
+    from ismpu.envs.ics_sim import Telemetry
 
-    mock = MockXPC(_nominal_values())
-    controller = ControllingSystem(_backend(mock))
+    controller = ControllingSystem(static_sim()[0])
     DEFAULT.apply(controller)
-    dropped = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
 
-    assert controller.control_step(0.05, dropped) is True
-    assert mock.sent == []
+    assert controller.control_step(0.05, Telemetry.invalid()) is True

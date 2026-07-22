@@ -17,16 +17,14 @@ from ismpu.runtime.pretrain import smoke_pretrain
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.sim_interface import XPlaneBackend
 
-from test_ppo import ScriptedBackend, FakeXPC   # переиспользуем скриптованный бэкенд
+from test_ppo import scripted_env               # переиспользуем кинематический стенд
+from fakes import static_sim
 from ismpu.envs.rollout_env import RolloutEnv
 
 
 def _make_env(window=6):
-    sim = ScriptedBackend()
-    ctrl = ControllingSystem(sim)
-    return RolloutEnv(sim, ctrl, history_len=window, shield=None)
+    return scripted_env(window=window, shield=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -34,7 +32,7 @@ def _make_env(window=6):
 # --------------------------------------------------------------------------- #
 
 def test_target_z_inverts_to_preset_gains():
-    ctrl = ControllingSystem(XPlaneBackend(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False))
+    ctrl = ControllingSystem(static_sim()[0])
     SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
     preset = base_gains_from_pids(ctrl.pids)
 
@@ -63,7 +61,7 @@ def test_capture_scenario_produces_constant_target():
     # цель постоянна на прогон
     assert np.allclose(ds.target_z, ds.target_z[0])
     # и равна NWS-пресету
-    ctrl = ControllingSystem(XPlaneBackend(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False)); SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+    ctrl = ControllingSystem(static_sim()[0]); SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
     assert np.allclose(ds.target_z[0], target_z_from_gains(base_gains_from_pids(ctrl.pids)))
 
 
@@ -101,7 +99,7 @@ def test_sft_learns_to_distinguish_scenarios_not_copy_input():
 
     from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS
     def preset_vec(name):
-        c = ControllingSystem(XPlaneBackend(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False)); SCENARIO_PRESETS[name].apply_control(c)
+        c = ControllingSystem(static_sim()[0]); SCENARIO_PRESETS[name].apply_control(c)
         p = base_gains_from_pids(c.pids)
         return np.array([p[r][k] for r in REGULATOR_ORDER for k in GAIN_KEYS])
 

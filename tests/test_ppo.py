@@ -1,5 +1,5 @@
 """Тесты PPO-тренера (Этап 4, §11): GAE, компоненты loss, сквозной прогон обучения
-на скриптованной среде (без X-Plane), обновление параметров, детерминизм.
+на скриптованной среде (без стенда), обновление параметров, детерминизм.
 
 torch — опционален; без него тесты пропускаются.
 """
@@ -11,12 +11,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from ismpu.config.constants import DT
-from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
-from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
-from ismpu.io.datarefs import LATITUDE, LONGITUDE, GROUNDSPEED, TRUE_PSI
-from ismpu.envs.sim_interface import XPlaneBackend
 from ismpu.envs.rollout_env import RolloutEnv
 from ismpu.envs.scenario import SCENARIO_PRESETS
 from ismpu.agent.shield import Shield
@@ -24,75 +19,22 @@ from ismpu.agent.gain_scheduler import NPGS, NPGSConfig, POLICY_DIM
 from ismpu.agent.ppo import PPOTrainer, PPOConfig, RolloutBuffer
 from ismpu.runtime.train import smoke_train
 
+from fakes import kinematic_sim
+
 
 # --------------------------------------------------------------------------- #
-# Скриптованный бэкенд: кинематический пробег по оси, без X-Plane
+# Скриптованный стенд: кинематический пробег по оси (см. fakes.KinematicBench)
 # --------------------------------------------------------------------------- #
 
-class FakeXPC:
-    def __init__(self):
-        self.current_dref_values = {}
-
-    def sendDREF(self, dref, value): pass
-    def sendCTRL(self, **kw): pass
-    def sendPOSI(self, **kw): pass
-    def sendCMND(self, *a): pass
-    def pauseSIM(self, *a): pass
-
-    def subscribeDREFs(self, subs, timeout=5.0):
-        for dref, _ in subs:
-            self.current_dref_values.setdefault(dref, {"value": 0.0})
-
-    def getDREF(self, dref):
-        v = self.current_dref_values.get(dref)
-        return v["value"] if v else 0.0
-
-
-class ScriptedBackend(XPlaneBackend):
-    """Мини-симулятор: замедление ~ команде тормоза/реверса, ход вдоль осевой ВПП."""
-
-    def __init__(self):
-        super().__init__(xpc=FakeXPC(), settle_s=0.0, reload_each_reset=False)
-        self.tracker = RunwayTracker()
-        self._reset_state(0.0)
-
-    def _reset_state(self, lateral):
-        self.speed, self.along, self.xte = 60.0, 0.0, float(lateral)
-        self._write()
-
-    def _write(self):
-        brg = math.radians(RWY_HEADING_TRUE)
-        lat, lon = self.tracker.destination(RWY_START_LAT, RWY_START_LON, brg, self.along)
-        if self.xte:
-            side = math.radians(RWY_HEADING_TRUE + (90.0 if self.xte > 0 else -90.0))
-            lat, lon = self.tracker.destination(lat, lon, side, abs(self.xte))
-        cur = self.xpc.current_dref_values
-        cur[LATITUDE] = {"value": lat}
-        cur[LONGITUDE] = {"value": lon}
-        cur[GROUNDSPEED] = {"value": self.speed}
-        cur[TRUE_PSI] = {"value": float(RWY_HEADING_TRUE)}
-
-    def reset(self, scenario):
-        lateral = scenario.touchdown.lateral_offset_m if scenario.touchdown else 0.0
-        self._reset_state(lateral)
-        self._ensure_subscribed()
-        return self.read_telemetry()
-
-    def step(self, command):
-        brake = 0.5 * (command.cmd_brake_l + command.cmd_brake_r)
-        rev = -0.5 * (command.cmd_rev_l + command.cmd_rev_r)
-        decel = 1.0 + 6.0 * brake + 4.0 * rev
-        self.speed = max(0.0, self.speed - decel * DT)
-        self.along += self.speed * DT
-        self.xte += -command.rudder_cmd * 0.05
-        self._write()
-        return self.read_telemetry()
+def scripted_env(window=6, shield=True, lateral=0.0):
+    """Среда на кинематической модели стенда — общая фикстура для PPO и SFT-тестов."""
+    sim, _bench = kinematic_sim(lateral=lateral)
+    ctrl = ControllingSystem(sim)
+    return RolloutEnv(sim, ctrl, history_len=window, shield=Shield() if shield else None)
 
 
 def _make_env(window=6, shield=True):
-    sim = ScriptedBackend()
-    ctrl = ControllingSystem(sim)
-    return RolloutEnv(sim, ctrl, history_len=window, shield=Shield() if shield else None)
+    return scripted_env(window=window, shield=shield)
 
 
 def _provider():
