@@ -134,7 +134,12 @@ def test_controls_state_has_real_dataclass_fields():
     from dataclasses import fields
     names = [f.name for f in fields(ControlsState)]
     assert names == ["break_control", "rudder_cmd",
-                     "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r"]
+                     "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r",
+                     # воздушный участок
+                     "cmd_elevator", "cmd_aileron",
+                     "cmd_throttle_l_rate", "cmd_throttle_r_rate", "cmd_throttle_norm",
+                     # отчётные показатели качества (не команды)
+                     "quality_lateral", "quality_heading", "quality_speed"]
 
     a, b = ControlsState(), ControlsState()
     assert a == b                      # одинаковые команды — равны
@@ -149,10 +154,11 @@ def test_controls_state_values_live_in_the_instance_from_construction():
     Без аннотаций они были бы атрибутами КЛАССА, а `vars()` нового экземпляра — пустым:
     значение читалось бы из общего состояния до первой записи в экземпляр.
     """
+    from dataclasses import fields
     own = vars(ControlsState())
-    assert set(own) == {"break_control", "rudder_cmd",
-                        "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r"}
+    assert set(own) == {f.name for f in fields(ControlsState)}
     assert own["cmd_rev_l"] == 0.0
+    assert own["cmd_elevator"] == 0.0
 
 
 def test_break_control_is_cleared_when_a_scenario_is_applied():

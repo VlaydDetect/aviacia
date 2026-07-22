@@ -50,6 +50,11 @@ class Scenario:
         """
         return self.control.apply(controller)
 
+    @property
+    def matrix_code(self) -> str:
+        """Шифр матрицы прогонов, если сценарий заведён под неё («Б.3.1»), иначе пустая строка."""
+        return self.control.matrix_code
+
     @classmethod
     def from_preset(cls, name: str, *, weather: WeatherState | None = None,
                     failures: tuple | None = None,
@@ -88,6 +93,45 @@ class Scenario:
 # Готовые к запуску пресеты: те же имена, что в config.scenarios.SCENARIOS,
 # но уже с условиями, под которые пресет калибровался.
 SCENARIO_PRESETS: dict[str, Scenario] = {name: Scenario.from_preset(name) for name in SCENARIOS}
+
+
+def resolve_preset(key: str) -> Scenario:
+    """Сценарий по имени пресета **или** по шифру матрицы прогонов («Б.3.1», «б.3.1», «a_1_1»).
+
+    Шифр — это то, чем оперирует таблица Заказчика и исполнитель за пультом стенда; требовать от
+    него мысленного перевода в имя переменной значит напрашиваться на запуск не того прогона.
+    Регистр и раскладка («Б» кириллическая, «A» латинская) не различаются: в шифрах матрицы
+    буквы кириллические, и промах по раскладке иначе выглядел бы как несуществующий пресет.
+    """
+    from ismpu.config.run_matrix import CASE_BY_CODE
+
+    if key in SCENARIO_PRESETS:
+        return SCENARIO_PRESETS[key]
+
+    normalized = key.strip().upper().replace("A", "А").replace("B", "Б")
+    for code, case in CASE_BY_CODE.items():
+        if code.upper() == normalized and case.preset in SCENARIO_PRESETS:
+            return SCENARIO_PRESETS[case.preset]
+
+    known = ", ".join(sorted(SCENARIO_PRESETS))
+    raise KeyError(f"неизвестный пресет или шифр матрицы: {key!r}. Известны: {known}")
+
+
+def matrix_battery(segment: str | None = None) -> tuple[Scenario, ...]:
+    """Сценарии матрицы прогонов в порядке таблицы. → кортеж `Scenario`.
+
+    Порядок не косметика: матрица предписывает идти сверху вниз, потому что внутри шифра условия
+    усложняются, а настройка предыдущего прогона служит начальным приближением следующего.
+
+    Шифры захода (`segment="approach"`) сюда попадают только если под них заведён наземный
+    пресет: воздушные коэффициенты живут отдельно (`config/approach.py`) и сценарием пробега не
+    описываются.
+    """
+    from ismpu.config.run_matrix import RUN_MATRIX
+
+    return tuple(SCENARIO_PRESETS[c.preset] for c in RUN_MATRIX
+                 if c.preset in SCENARIO_PRESETS
+                 and (segment is None or c.segment == segment))
 
 
 # --------------------------------------------------------------------------- #

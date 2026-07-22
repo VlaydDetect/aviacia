@@ -21,7 +21,7 @@ terminated, truncated, info)`.
 """
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -84,13 +84,14 @@ def heading_deviation_deg(telemetry) -> float:
 
 
 def _snapshot_command(state: ControlsState) -> ControlsState:
-    snap = ControlsState()
-    snap.cmd_brake_l = state.cmd_brake_l
-    snap.cmd_brake_r = state.cmd_brake_r
-    snap.cmd_rev_l = state.cmd_rev_l
-    snap.cmd_rev_r = state.cmd_rev_r
-    snap.rudder_cmd = state.rudder_cmd
-    return snap
+    """Копия команды такта — для расчёта джерка на следующем такте.
+
+    Копируется структура целиком (`replace`), а не перечисленные поля: список полей уже вырос
+    воздушным участком, и ручное перечисление означало бы, что новое поле навсегда остаётся
+    нулём в «предыдущей команде». Разность тогда равнялась бы всей величине команды на каждом
+    такте — постоянный ложный штраф, который PPO добросовестно минимизировал бы.
+    """
+    return replace(state)
 
 
 class RolloutEnv:
@@ -171,7 +172,12 @@ class RolloutEnv:
         self._history.append(obs)
         reward, components, guidance = self._reward(post, command, shield_report)
 
-        # 6) Завершение. Пробег окончен → передаём управление в руление (ControlMode 3 → 4).
+        # 6) Завершение. Пробег окончен → отмечаем переход в руление в автомате включения.
+        # В отличие от поставочного цикла (`ControllingSystem.hand_over_to_taxi`) кадр с новым
+        # режимом отсюда НЕ передаётся, и это намеренно: эпизод здесь закрывается, следующий
+        # `reset` всё равно сбрасывает автомат и выводит режим заново из телеметрии стенда, а
+        # вставка лишних отправок внутрь `step` сломала бы учёт «один шаг — один кадр», на
+        # котором держатся парити классики, джерк и эпизодный objective.
         if break_control:
             self.sim.request_taxi()
 

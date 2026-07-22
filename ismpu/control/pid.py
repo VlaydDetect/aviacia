@@ -130,7 +130,12 @@ class PIDController:
         if self._prev_deriv_input is not None:
             raw_derivative = (deriv_input - self._prev_deriv_input) / dt
             alpha = self._filter_alpha(dt)
-            self.filtered_derivative = alpha * raw_derivative + (1.0 - alpha) * self.filtered_derivative
+            # Инкрементная форма, а не `alpha*raw + (1-alpha)*filtered`. Алгебраически это одно
+            # и то же, но в плавающей точке формы расходятся на ~1e-16, и на 400 тактах прогона
+            # 118 из них давали разные биты с реализацией второго участника НИР. Воздушный
+            # контур перенесён от него вместе с коэффициентами — совпадение должно быть точным,
+            # иначе «тот же PID» превращается в «почти тот же».
+            self.filtered_derivative += alpha * (raw_derivative - self.filtered_derivative)
             derivative = self.filtered_derivative
         else:
             self.filtered_derivative = 0.0

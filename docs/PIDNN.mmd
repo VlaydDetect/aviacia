@@ -44,9 +44,9 @@ flowchart LR
 
         Dynamics["Динамика ЛА\nКолёса, аэродинамика,\nреверс, тормоза, ветер"]:::sim
 
-        Sensors["Телеметрия\nV, a, ψ, r,\nCross Track Error,\nHeading Error"]:::sim
+        Sensors["Телеметрия\nV, a, ψ, r, H, ILS,\nCross Track Error,\nHeading Error,\nпогода и отказы"]:::sim
 
-        Actuators["Исполнительные механизмы\nРеверс\nТормоза\nРуление\nЗакрылки"]:::sim
+        Actuators["Исполнительные механизмы\nРуль высоты, элероны, РУД\nРеверс, тормоза, руление"]:::sim
 
         Actuators --> Dynamics
         Dynamics --> Sensors
@@ -123,18 +123,18 @@ flowchart LR
             R3["αp αi αd\nПравый реверс"]:::nn
         end
 
-        subgraph FlapHead["Flap Head"]
+        subgraph WeightsHead["Weights Head"]
             direction TB
 
             F1["Dense"]:::nn
 
-            F2["αp αi αd\nЗакрылки"]:::nn
+            F2["w_lon, w_lat\nВеса влияния каналов"]:::nn
         end
 
         A2 --> HeadingHead
         A2 --> BrakeHead
         A2 --> ReverseHead
-        A2 --> FlapHead
+        A2 --> WeightsHead
     end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -167,19 +167,34 @@ flowchart LR
     subgraph ClassicalControl["5. Классическое управление"]
         direction TB
 
-        RefSpeed["Генератор V_ref(x)"]:::pid
+        Segment["Супервизор участков\nAPPROACH → ROLLOUT → TAXI\n(только вперёд)"]:::pid
 
-        Runway["Геометрия ВПП\nОсь ВПП"]:::pid
+        subgraph Airborne["5a. Воздушный участок (статические PID)"]
+            direction TB
+            PIDRoll["PID Крена\nлокалайзер → крен → элероны"]:::pid
+            PIDPitch["PID Тангажа\nглиссада → V_y → руль высоты (g)\nвыравнивание = фаза уставки"]:::pid
+            PIDSpeed["PID Скорости\nIAS → темп РУД"]:::pid
+            Envelope["Огибающая МС-21\nVAPP / VSR1 / VFE / alpha\n(только предупреждения)"]:::pid
+        end
 
-        PIDSteer["PID Руления"]:::pid
+        subgraph Ground["5b. Пробег и руление (коэффициенты от NPGS)"]
+            direction TB
+            RefSpeed["Генератор V_ref(x)"]:::pid
 
-        PIDBrakeL["PID Тормоз Л"]:::pid
-        PIDBrakeR["PID Тормоз П"]:::pid
+            Runway["Геометрия ВПП\nОсь ВПП"]:::pid
 
-        PIDRevL["PID Реверс Л"]:::pid
-        PIDRevR["PID Реверс П"]:::pid
+            PIDSteer["PID Руления"]:::pid
 
-        PIDFlaps["PID Закрылков"]:::pid
+            PIDBrakeL["PID Тормоз Л"]:::pid
+            PIDBrakeR["PID Тормоз П"]:::pid
+
+            PIDRevL["PID Реверс Л"]:::pid
+            PIDRevR["PID Реверс П"]:::pid
+        end
+
+        Segment --> Airborne
+        Segment --> Ground
+        Airborne -->|"обжатие основной стойки"| Ground
     end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -248,7 +263,7 @@ flowchart LR
     HeadingHead --> Bounds
     BrakeHead --> Bounds
     ReverseHead --> Bounds
-    FlapHead --> Bounds
+    WeightsHead --> Bounds
 
     SafeSet --> PIDSteer
 
@@ -258,7 +273,16 @@ flowchart LR
     SafeSet --> PIDRevL
     SafeSet --> PIDRevR
 
-    SafeSet --> PIDFlaps
+    Sensors --> Segment
+
+    Sensors --> PIDRoll
+    Sensors --> PIDPitch
+    Sensors --> PIDSpeed
+    Sensors --> Envelope
+
+    PIDRoll --> Actuators
+    PIDPitch --> Actuators
+    PIDSpeed --> Actuators
 
     Sensors --> RefSpeed
     Sensors --> Runway
@@ -278,8 +302,6 @@ flowchart LR
 
     PIDRevL --> Actuators
     PIDRevR --> Actuators
-
-    PIDFlaps --> Actuators
 
     Sensors --> Critic
 

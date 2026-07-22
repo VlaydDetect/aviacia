@@ -4,11 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An autonomous landing-rollout controller for an aircraft (A330-class) running against the **customer's
-test bench (стенд)** over the ПИВ/ICS protocol. On touchdown it holds the runway centerline and
-decelerates from ~200 kts to taxi speed along a reference velocity curve, while modeling and
-compensating for equipment failures (engine out, reverser fail, nose-wheel-steering fail, etc.).
-Code comments and console output are in Russian.
+An autonomous landing controller for an aircraft (A330-class / МС-21) running against the **customer's
+test bench (стенд)** over the ПИВ/ICS protocol. It controls the **whole flight interval**: ILS approach
+from 400+ ft, flare, touchdown, then centerline hold and deceleration from ~200 kts to taxi speed along a
+reference velocity curve, while modeling and compensating for equipment failures (engine out, reverser
+fail, nose-wheel-steering fail, etc.). Code comments and console output are in Russian.
+
+The airborne segment (`ismpu/control/approach.py`) is a port of the second НИР participant's
+bench-validated ILS controller — see "Flight segments" below. It runs on **static** PID presets; the
+neural layer (NPGS/PPO/Shield) applies to the **rollout only**.
 
 This is the R&D project **ИСМПУ** (shifr `Интеграл-КБО-МС-ГосНИИАС-ИСМПУ-2026`, due 2026-07-28). The
 work is moving from the current classical-PID prototype toward a **hybrid neural controller**: the
@@ -40,15 +44,31 @@ Read these before making architectural changes — they define the target design
   and the observer seams. **This is the source of truth for where the project is going**. It predates the
   X-Plane removal in places; where it says "X-Plane", read "bench", and where it describes setting up the
   environment, see the note above.
-- **[`PIDNN.mmd`](PIDNN.mmd)** — Mermaid diagram of the full architecture (scenario selection, bench,
+- **[`docs/PIDNN.mmd`](docs/PIDNN.mmd)** — Mermaid diagram of the full architecture (scenario selection, bench,
   PINN observer, NPGS multi-head actor, Shield, classical control, PPO loop, deployment). Data-flow reference.
-- **[`ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf`](ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf)** — the customer's
+- **[`docs/ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf`](docs/ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf)** — the customer's
   technical spec (ТЗ). Section 5 holds the hard acceptance numbers that become reward gates and eval
   criteria: centerline ±3 m on rollout / ±1 m taxi, heading ±5° under NWS or thrust/reverse fault down to
   <30 kts, μ/crosswind/aquaplaning diagnostics, and delivery as an `.exe` over the agreed UDP protocol (ПИВ).
-- **[`ICSInterface.cs`](ICSInterface.cs)** — the bench's own `ICSInputs`/`ICSOutputs` struct definitions with
+- **[`docs/ICSInterface.cs`](docs/ICSInterface.cs)** — the bench's own `ICSInputs`/`ICSOutputs` struct definitions with
   units in the doc-comments. The authoritative field list, but an **incomplete slice**: it omits
-  `AgentIsActive`, which the bench does process. Verify against the running bench, not this file.
+  `AgentIsActive`, which the bench does process. Verify against the running bench, not this file. It does
+  settle one thing: `ICSOutputs` carries exactly **14 command fields**, which is what fixes the
+  `ControlValidMask` bit layout (below).
+- **[`docs/Входы_САУ.xlsx`](docs/Входы_САУ.xlsx)** — the customer's table of **command** signals: units and
+  limits for each `ICSOutputs` field, plus the indication list (which `Mode*` flag means what). This is the
+  authority for the outgoing side, and it is not the same as the ICD: `ICSInterface.cs` documents units only
+  for `ICSInputs`, so anything derived for the outputs from input units was derived from the wrong scale.
+  Pinned as data in `tests/test_icd_units.py`.
+- **[`docs/Матрица_прогонов_ПИД_ИСМПУ.xlsx`](docs/Матрица_прогонов_ПИД_ИСМПУ.xlsx)** — the run matrix for
+  tuning the classical PIDs: 22 failure/mode codes × condition catalogue = 280 runs (156 approach + 124
+  ground). Machine-readable in `ismpu/config/run_matrix.py`, pinned by `tests/test_run_matrix.py`.
+- **`roman_aviacia_ics/`** (untracked) — the second НИР participant's ICS toolkit against the same bench.
+  It is no longer just a cross-check: `ismpu/control/approach.py`, `ismpu/config/approach.py` and
+  `ismpu/config/envelope.py` are ports of `tools/ics_pid_controller.py`, `config/ics_clear_weather_pid.json`
+  and `tools/ics_flight_envelope.py`, and `tests/test_approach_channel.py` runs **both implementations on
+  the same frames and asserts they agree to 1e-12**. That parity test skips if the directory is absent.
+  Its `README.md` is the record of what has actually been confirmed on the live bench.
 
 ## Environment & running
 
@@ -59,11 +79,15 @@ Read these before making architectural changes — they define the target design
 - Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell). **The `.venv` is the real
   environment** — bare `python` on PATH is a separate 3.14 without torch/pytest. Run tests and training via
   `.venv\Scripts\python.exe` (or the activated venv).
-- **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`). Listens for the bench
-  on `127.0.0.1:3030`; the bench's own address is taken from the first incoming packet, so it is not
-  configured. The 20 Hz loop runs until taxi speed or `KeyboardInterrupt`, which resets all controls.
+- **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`). Listens on
+  `0.0.0.0:3030` (**not** `127.0.0.1` — the bench may be on another machine); the bench's own address is
+  taken from the first incoming packet, so it is not configured. The 20 Hz loop **picks the flight segment
+  from the first frame**: above 400 ft with the gear off the ground it arms the airborne handshake and
+  flies the approach; on the runway it runs the rollout as before. It ends at taxi speed or
+  `KeyboardInterrupt`, which neutralizes the controls and then releases the channels (`ControlValidMask=0`).
   `main()` with no argument **picks the preset by telemetry** (`select_for_telemetry`); pass a name
-  (`main("nws_fail")`) to force one — see `ismpu.envs.scenario.SCENARIO_PRESETS`.
+  (`main("nws_fail")`) to force one — see `ismpu.envs.scenario.SCENARIO_PRESETS`. Presets describe the
+  **rollout**; the airborne segment is the same static config for every scenario.
 - **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (needs the bench). Captures
   classical rollouts of the non-draft presets and behavior-clones the NPGS toward their coefficients →
   `checkpoints/npgs_sft.pt`. Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)`
@@ -75,30 +99,42 @@ Read these before making architectural changes — they define the target design
   with a scripted bench (see `tests/fakes.py`, `tests/test_ppo.py`).
 - **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). Run under the
   venv (has pytest + torch). Bench-free — PID numerics, tracker geodesy, reference-speed curves, one full
-  `control_step` through a fake bench, plus the NPGS/PPO layer (network shapes/identity, GAE, loss terms,
-  end-to-end PPO on a scripted bench). torch-dependent tests are guarded by `pytest.importorskip("torch")`.
-  **`tests/fakes.py` is the shared fake bench** — use `make_ics_inputs` / `static_sim` / `kinematic_sim`
-  rather than hand-rolling another mock.
+  `control_step` through a fake bench, the airborne channel (incl. the 1e-12 parity run against the
+  colleague's implementation), the whole approach→touchdown→rollout→taxi chain, plus the NPGS/PPO layer
+  (network shapes/identity, GAE, loss terms, end-to-end PPO on a scripted bench). torch-dependent tests are
+  guarded by `pytest.importorskip("torch")`.
+  **`tests/fakes.py` is the shared fake bench** — use `make_ics_inputs` / `airborne_inputs` / `static_sim` /
+  `kinematic_sim` / `flight_sim` rather than hand-rolling another mock. `ScriptedFlightBench` plays a
+  **scripted** descent and touchdown that ignores the commands: it validates the segment/handshake plumbing,
+  not aerodynamics — modelling the airframe's response would mean testing an invention.
 - **Known snag:** `PIDController.compute` (and channel status lines) call `cprint` unconditionally every tick.
   Fine for one manual run, but at 20 Hz × 5 regulators it floods the console and throttles training —
   `train.py` calls `silence_control_console()` to no-op those `cprint`s during training. Consider gating the
   `cprint` in `pid.py`/`channels.py` behind the logger instead.
 - `main.py` and `env.py` at the repo root are **superseded, untracked experiments** — ignore them; the
   package is the source of truth. They can be deleted.
-- `roman_aviacia_ics/` (untracked) is the second НИР participant's ICS toolkit — probes, dashboards and an
-  airborne PID against the same bench. Useful as a cross-check on protocol details; not part of this package.
+- `roman_aviacia_ics/` (untracked) is the second НИР participant's ICS toolkit — probes, dashboards and the
+  airborne PID against the same bench. **The airborne segment of this package is a port of it**, and
+  `tests/test_approach_channel.py` keeps the two numerically identical. Keep it checked out next to the repo;
+  without it that parity test skips and the port loses its only external check.
 
 ## Package layout
 
 - `ismpu/io/` — transport: `ics_connector.py` (`ICSInputs`/`ICSOutputs`/`ICSBenchConnector`),
   `ics_engagement.py` (the engagement state machine).
 - `ismpu/control/` — the classical loop: `pid.py`, `runway_tracker.py`, `trajectory.py`, `channels.py`
-  (`ControlsState` + the two channels), `system.py` (`ControllingSystem`), `failures.py`.
+  (`ControlsState` + the two ground channels), `approach.py` (`ApproachChannel` — the airborne law),
+  `flight.py` (`FlightSegment` + the transitions), `system.py` (`ControllingSystem` — the segment
+  supervisor), `failures.py`.
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — the **fallback** when the bench doesn't publish runway
-  data), `constants.py`, `scenarios.py` (PID presets per scenario + the conditions each was calibrated for;
-  `ScenarioConfig.draft` flags uncalibrated), `ics.py` (ICD constants: units, actuator limits, valid-mask bits,
-  engagement timings, flight phases), `regulators.py` (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` —
-  neutral, breaks a shield↔gain_space cycle), `requirements.py` (the ТЗ acceptance thresholds).
+  data), `constants.py`, `scenarios.py` (rollout PID presets per scenario + the conditions each was
+  calibrated for; `ScenarioConfig.draft` flags uncalibrated), `run_matrix.py` (the customer's run matrix as
+  data), `approach.py` (`ApproachConfig` + `APPROACH_PRESETS` — the static
+  airborne settings and the three airborne PID specs), `envelope.py` (МС-21 approach limits: VAPP/VSR1/VFE,
+  alpha protection, touchdown limits, roll limit by radio altitude), `ics.py` (ICD constants: units,
+  actuator limits, valid-mask bits, engagement timings, flight phases), `regulators.py`
+  (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` — neutral, breaks a shield↔gain_space cycle),
+  `requirements.py` (the ТЗ acceptance thresholds).
 - `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `train.py` (PPO loop + `smoke_train`,
   `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start), `evaluate.py` (ТЗ acceptance +
   baselines + admission gate). `deploy.py` comes in Phase 6.
@@ -124,30 +160,73 @@ UDP JSON bridge to the customer's bench on port 3030 — the only I/O layer and 
 - `ResilientSender` swallows `WSAECONNRESET` (10054), which Windows raises on a UDP socket when the receiver's
   port is closed. Dropping the control loop over that is wrong, and so is silence — hence the error counter
   and the rate-limited log.
-- **All ICD constants live in `config/ics.py`**, not inline: brake pedal travel (0–36.73 mm), throttle angle
-  (−26.5…55.0°), tiller/rudder limits, `ControlValid` mask bits, engagement dwell/frames, `FlightPhase`.
-  Several are flagged **ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ** — the mask bit layout (only bit 0 = ELEVATOR is confirmed),
-  `TILLER_MAX_DEG=70`, `RUDDER_MAX_DEG=30`. They set command scale, so they gate real-bench validation.
-- `ROLLOUT_CONTROL_MASK` declares only the channels the rollout loop actually drives (rudder, tiller, wheel
-  brakes, reverse, throttle). Declaring a channel you don't produce means taking responsibility for an
-  actuator you aren't driving.
+- **All ICD constants live in `config/ics.py`**, not inline. **Input** units come from `ICSInterface.cs`;
+  **command** units and limits come from `docs/Входы_САУ.xlsx` — a distinction that matters, because the
+  header file documents no units at all for `ICSOutputs`, and everything previously derived for the
+  outgoing side was derived from the scale the actuator *reports* on rather than the one it is *commanded*
+  on. What the customer's table settled:
+  - **Tiller is a travel, not an angle**: `NoseWheelTillerCmd` is ±65 **mm**. We had `TILLER_MAX_DEG = 70` —
+    wrong dimension and wrong number (70° is A330 nose-wheel travel, a handbook figure in the wrong slot).
+  - **Rollout steers with the rudder pedal post** (`RudderPedalCmd`, ±75 mm, "используется на пробеге"); the
+    tiller is a **taxi** organ ("используется на рулении"). We drove the tiller for the whole rollout and
+    never emitted the pedal post at all.
+  - **Brake command travel is 0–45 mm**, while the 0–36.73 mm in the ICD is the *feedback* scale. Commanding
+    on the feedback scale under-delivers ~18 % of the travel.
+  - **Thrust is commanded by rate only** (±8 °/s). There is no absolute throttle position in the command
+    list, which finally settles the reverse question: reverse magnitude is the same rate driving the lever
+    into the negative sector, with `ReverseXCmd` (Off/Arm/Deploy) working the doors. `ICSSim` therefore runs
+    a small position loop against the measured `LeftThrottleAngle`.
+  - `AileronCmd` ±25°, `RudderCmd` ±30° — the latter had been an assumption, now confirmed.
+  Still flagged **ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ**: whether the bench honours the mask at all, the `1 → 3` handover,
+  and whether the `Mode*` flags are inputs or reporting.
+- **`ControlValidMask` is one bit per `ICSOutputs` command field, in declaration order** — 14 fields, 14 bits,
+  `ALL = 16383`. This replaced an earlier layout that merged the left/right pairs into single bits and so
+  diverged from the bench from bit 3 onward, putting our declared rollout channels on the wrong actuators.
+  Two independent observations pin it: bit 0 = `ElevatorCmd`, and mask **31** = the first five fields, which
+  is exactly what the colleague's confirmed airborne run declares ("elevator, aileron, rudder, and the two
+  throttle rate commands").
+- `ROLLOUT_CONTROL_MASK` / `TAXI_CONTROL_MASK` / `AIRBORNE_CONTROL_MASK` declare only the channels each
+  segment actually drives. Declaring a channel you don't produce means taking responsibility for an
+  actuator you aren't driving — `ICSSim._to_outputs` therefore picks the mask **by `ControlMode`**, not once
+  for the whole flight, and rollout vs taxi differ (pedal post vs tiller).
+- `ICSOutputs.ControlValidMask` defaults to **0**. It used to default to 1, so every packet built without an
+  explicit mask — including a shutdown packet — declared the elevator with value 0.0.
 
 ### Engagement (`ismpu/io/ics_engagement.py`)
 
-The bench accepts our commands **only** after a correct handshake, and **the bench decides** whether we are
-engaged — it confirms with `ICSInputs.AgentIsActive = 1`. Our side must not replicate the bench's
-preconditions to *decide* we're engaged (that was a real bug); we only drive the **stimulus** and read the
-confirmation. Until then `ControlValidMask = 0` and no actuator commands are emitted.
+The bench accepts our commands **only** after a correct handshake. Engagement is the conjunction of two
+things, and conflating them is a bug in either direction:
 
-- Ground engagement from standstill: hold `ControlMode = Off` + `ModeAIReady = 1` for the dwell, then flip to
-  `Taxi` (the `0 → 4` edge). Adoption of a rollout already in progress (`FlightPhase = LandRun`): emit
-  `ControlMode = Rollout`. Handover rollout→taxi is `3 → 4` (`request_taxi`).
+    engaged = confirmed (bench's AgentIsActive)  AND  stimulus_complete (we finished asking)
+
+`AgentIsActive` is the bench's signal and we must not compute it ourselves (that was a real bug). But it is
+**not** proof the bench took our commands — it goes to 1 as soon as the operator enables ICS in IOS, before
+any handshake ("The simulator does not apply control commands just because UDP telemetry reports
+AgentIsActive=1"). With `engaged = confirmed` alone, `warm_up` returned instantly on any bench with ICS
+already enabled, having transmitted zero handshake frames. Until both hold, `ControlValidMask = 0` and no
+actuator commands are emitted.
+
+- **Airborne engagement** (`RadioAltitude > 400 ft`, gear off the ground): hold `ControlMode = Off` +
+  `ModeAIReady = 1` for **2.2 s**, then flip to `Approach` (the `0 → 1` edge). The whole approach, flare
+  included, stays in `Approach` — changing `ControlMode` in flight disengages the bench's own autopilot.
+- **Ground engagement** from standstill: same dwell (2.0 s per the ICD), then `Taxi` (the `0 → 4` edge).
+  Adoption of a rollout already in progress (`FlightPhase = LandRun`): emit `ControlMode = Rollout`.
+- **Handovers:** approach→rollout is `1 → 3` at first main-gear weight-on-wheels — **not in the ICD**, an
+  assumption flagged for the bench developer; rollout→taxi is `3 → 4` (`request_taxi`), and
+  `ControllingSystem.hand_over_to_taxi` now actually **transmits** frames in the new mode, since the bench
+  switches on the edge in a received packet.
+- A missing radio altitude is "the bench didn't say", not "zero feet" — it never arms the airborne path.
+- Below `TERMINAL_RADIO_ALTITUDE_FT` (80 ft) a loss of `AgentIsActive` does **not** drop the approach: seconds
+  from the ground, releasing the controls is worse than finishing on the last data. The window only *holds* a
+  confirmation already received; it never creates one.
 - The dwell requires **both** elapsed time and `ENGAGE_MIN_READY_FRAMES` frames actually sent
   (`on_frame_sent`). Time alone would let two polls 3 s apart satisfy "2 seconds of readiness" without
   transmitting anything.
 - `ICSSim.warm_up` drives the stimulus at 20 Hz until the bench confirms, and **raises** `TimeoutError` with a
   named reason (`blocking_reason`) rather than proceeding — otherwise acceptance would count a run the bench
-  never accepted.
+  never accepted. `ICSSim.deactivate` is the opposite: `ControlValidMask = 0` + `ControlMode = Off`, repeated,
+  which is the only way to say "we no longer drive any actuator" (zeroed commands under a declared mask are
+  still commands — a zero throttle in flight means *idle*).
 
 ## Sim object (`ismpu/envs/ics_sim.py`)
 
@@ -169,10 +248,49 @@ because it maps `ControlsState` → `ICSOutputs` and back — more than transpor
 - `Telemetry.valid` must be checked **before** any field: on a receive timeout the frame is zeros, not `None`,
   and `groundspeed_ms = 0.0` is indistinguishable from "taxi speed reached".
 
+## Flight segments (`ismpu/control/flight.py`, `system.py`)
+
+`ControllingSystem` is a segment supervisor: `APPROACH → ROLLOUT → TAXI`, **forward only**. A bounce briefly
+un-compresses the gear, and a machine without the latch would hand the aircraft back to the airborne law —
+idle throttle, brakes spun up, trying to recapture a glideslope from the runway.
+
+- **The default segment is `ROLLOUT`.** It only becomes `APPROACH` when the bench *explicitly* says the
+  aircraft is airborne (bench packet present, no main gear compressed, valid radio altitude above 400 ft).
+  A frame with no bench packet — the synthetic `Telemetry` used across the ground tests and `RolloutEnv` —
+  means "nothing to judge by", not "airborne". `ControllingSystem.begin_flight(telemetry)` is what opts in;
+  `RolloutEnv` never calls it, so the whole neural/training path is untouched.
+- **Touchdown = any main gear** (`LeftGearWeightOnWheels or RightGearWeightOnWheels`), or `FlightPhase =
+  LandRun`. The nose gear compresses later; waiting for it would skip the start of the rollout.
+- The touchdown check runs **before** the airborne law on that tick, so the touchdown tick is already
+  computed by the ground channels rather than sent as one last approach command.
+- The airborne law hands over an aircraft that may still be **crabbing**: there is no de-crab/align contour
+  (the rudder is identically zero in the air). The ground contour must accept that as its initial condition.
+- **A frame with no bench packet does not decide the segment.** The first `read_telemetry` can time out, and
+  since the machine is forward-only, calling that "rollout" would be an irreversible mistake — meanwhile the
+  engagement automaton decides from *later* frames and goes to `Approach`, so the mask would say airborne
+  while the ground channels computed the command. `begin_flight` defers and re-decides on the first usable
+  frame (`_settle_segment`); a decision made on a real frame is never revised.
+
+### Aborting the approach
+
+The reference implementation's *runner* carried three abort conditions that are just as much a part of the
+port as the control law — porting the law alone leaves the aircraft flying on inapplicable data:
+
+- **Non-landing flap configuration** → `ApproachRefused` from `begin_flight`, before any frame goes out.
+  `detect_landing_flaps` silently falls back to the configured guess, and then the whole law (IAS setpoint to
+  VAPP, alpha limits) runs on FLAPS 3 tables while the envelope monitor stays silent — it compares against
+  the same inapplicable thresholds. We block only "not a landing configuration at all"; unlike the reference
+  we don't require a *specific* one, or a normal FULL landing would be refused under a FLAPS 3 config.
+- **Loss of ILS validity** → abort, outside the terminal window. The law reads `LocDeviation`/`GSDeviation`
+  unconditionally (so does the reference — the check belongs in the loop above it), and a zero deviation with
+  the valid flag cleared is indistinguishable from "dead on the centreline".
+- **Loss of `AgentIsActive` mid-run** → the loop stops. Otherwise it passes silently: the mask goes to 0, the
+  controller keeps computing and printing, and the run is scored as a success with zero actuator authority.
+
 ## Control architecture (`ismpu/control/`)
 
-The loop runs at 20 Hz (`DT = 0.05`). `ControllingSystem.control_step(dt)` syncs failures from telemetry,
-calls two channels, applies failure degradation, then sends commands:
+The loop runs at 20 Hz (`DT = 0.05`). On the ground `ControllingSystem.control_step(dt)` syncs failures from
+telemetry, calls two channels, applies failure degradation, then sends commands:
 
 - **`LongitudinalChannel`** — speed control. Integrates traveled distance, looks up the target speed on
   a `ReferenceTrajectory` (default `GAUSS_BELL` decay curve; `EQUALLY_SLOW` = constant deceleration is
@@ -189,13 +307,42 @@ calls two channels, applies failure degradation, then sends commands:
   commands: **differential braking** (`steering_brake_gain`) and **asymmetric thrust** (`steering_rev_gain`,
   only above 60 kts). The mixing runs *after* the longitudinal channel sets brake/reverse, so ordering matters.
 
-`ControlsState` is the shared per-tick command struct (brakes, reversers, rudder) in **normalized** units —
-millimetres and degrees appear only at the transport boundary (`ICSSim._to_outputs`). `break_control=True`
-signals the loop to stop (target speed reached or missing telemetry). Hard output bounds are applied
-**last**: `control_step` calls `ControlsState.clamp_all(pids)` after both channels, re-clamping every
-command to its PID's `[min_out, max_out]` *after* the differential mixes. `control_exception` sends a
-**neutral command**, not silence: going quiet leaves the last deflection applied until the bench's watchdog
-fires.
+### `ApproachChannel` — the airborne law (`ismpu/control/approach.py`)
+
+A port of the colleague's bench-validated `ClearWeatherILSController`, kept numerically identical (same
+gains, same signs, same order of operations); only the framing changed. Three loops: localizer ddm → "dots"
+→ intercept → roll target → aileron; glideslope → vertical speed → pitch target → `ElevatorCmd`; IAS →
+throttle *rate*, integrated into an absolute setpoint. Things not to "improve":
+
+- **Units are the bench's, not SI.** This is the one deliberate exception to the `Telemetry` SI boundary: the
+  law's gains are dimensional (deg per fpm, fpm per dot) and calibrated on the bench in knots/feet/fpm, so
+  converting would mean re-deriving every coefficient. The channel therefore reads the raw packet
+  (`Telemetry.ics_inputs`) and refuses to compute without one.
+- **Flare is a phase of the setpoint profile, not a separate law.** The same pitch PID, the same integral,
+  the same ±0.5 g bounds. No flare-only feed-forward, no command floor, no direct elevator override — those
+  are what create the discontinuity at roundout. The entry vertical-speed reference is *fixed*
+  (`flare_initial_vs_fpm`), not the measured sink rate, and the trigger latches.
+- **Sign conventions** (localizer +1, glideslope −1, negative roll gains, elevator +1) each encode bench
+  wiring. `roll_pid.kp = -7` is not a typo, and the tuned value differs 7× from the class defaults.
+- The three airborne PIDs live on the channel, **not** in `ControllingSystem.pids` — that dict defines the
+  NPGS gain space, and adding to it would silently redefine `ACTION_DIM` and invalidate every checkpoint.
+- The envelope monitor (`config/envelope.py`) only *reports* (`ApproachResult.envelope_warnings`). It never
+  alters the command; a limiter hiding inside the law would be an undocumented protection.
+
+`ControlsState` is the shared per-tick command struct for the **whole flight**: rollout commands in
+**normalized** units (brakes, reversers, rudder — millimetres and degrees appear only at the transport
+boundary, `ICSSim._to_outputs`), airborne commands in **ICD units** (`cmd_elevator` in g, `cmd_aileron` in
+degrees, throttle rate in deg/s, throttle position 0…1), plus the three ТЗ 5.1.5 quality figures. Which
+fields are actually *declared* to the bench is decided by the mask, not by the struct. The `cmd_` prefix is
+load-bearing: `config/regulators.py` builds `FORBIDDEN_DIRECT_OUTPUTS` from it, so a differently-named
+command field would silently drop out of the ТЗ contract. `break_control=True` signals the loop to stop
+(target speed reached or missing telemetry). Hard output bounds are applied **last** on the ground:
+`clamp_all(pids)` re-clamps every command to its PID's `[min_out, max_out]` *after* the differential mixes;
+airborne commands are bounded by their own regulators and are not in `clamp_all`. `apply_failures` likewise
+degrades only the ground actuators — the airframe's response to a failure in the air is the bench's to model,
+and multiplying the ailerons here would model it a second time. `control_exception` sends a neutral command
+**and then releases the channels** (`ICSSim.deactivate`): going quiet leaves the last deflection applied
+until the bench's watchdog fires, and zeroed commands under a live mask are still commands.
 
 ### Failures (`FailureMode` / `FailureManager` / `FailureState`)
 
@@ -250,6 +397,31 @@ telemetry.
   `WeatherState.from_crosswind`) convert to/from crosswind+headwind relative to the runway heading.
 - `WEATHER_PRESETS` (clear_dry / wet / puddly / icy / snowy / crosswind / low_visibility) describe the
   conditions the control presets were calibrated for, and are what scenario selection matches against.
+
+## Run matrix (`ismpu/config/run_matrix.py`)
+
+The customer's tuning matrix as data: **22 codes ("шифр") × a condition catalogue = 280 runs**. One code =
+**one set of coefficients** — that's how the matrix is meant to be worked ("коэффициенты предыдущего
+прогона — начальное приближение следующего"), so presets are per code, not per row.
+
+- Every code has a draft preset in `config/scenarios.py` (ground) and, for the approach codes, in
+  `config/approach.py::APPROACH_PRESETS`. All are `draft=True`, seeded from the nearest **calibrated**
+  parent rather than from zeros — that is the matrix's own method — with the gain dicts copied so tuning a
+  draft can't silently mutate its parent.
+- **Drafts are never picked automatically.** `select_scenario` excludes them; running one is a deliberate
+  act. `resolve_preset` accepts the matrix code directly (`main("Б.2.2")`), in either alphabet, because
+  that's what the operator at the bench console is holding — and it prints the run title, a draft warning,
+  and which other codes are indistinguishable from it.
+- **The matrix distinguishes finer than the ICD can report.** `FaultNWS` is one byte, so Б.2.1 (stuck
+  neutral), Б.2.2 (stuck at +5°) and Б.2.3 (limited range) all arrive identically; likewise Б.3.1/Б.3.2 on
+  the reverser. `MatrixCase.bench_faults` says what telemetry will actually show and `ambiguous_with` names
+  the collisions — those presets can only be chosen **by name**, and a test asserts the ambiguity claims
+  are backed by identical fault sets rather than by a comment.
+- **SFT covers the ground codes only.** The label in SFT *is* the preset's coefficients, so a draft would
+  train the net toward a known-wrong answer: `build_scenarios` drops drafts and says which it dropped.
+  `PretrainRunConfig.presets` snaps off one code at a time (the matrix gets tuned incrementally), and
+  `include_drafts=True` is possible but shouts. Approach codes never enter SFT — the net schedules rollout
+  gains, and there is no label for the airborne segment.
 
 ## Scenarios (`ismpu/envs/scenario.py`, `scenario_generator.py`)
 

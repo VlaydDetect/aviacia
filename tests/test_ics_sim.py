@@ -1,6 +1,7 @@
 """Тесты стенда (`ICSSim`), подбора сценария и генератора — без реального стенда."""
 
 import math
+from dataclasses import fields
 
 import pytest
 
@@ -8,10 +9,11 @@ from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.ics_sim import ICSSim, Telemetry
-from ismpu.io.ics_connector import ControlModeState, ReverseEngineType
+from ismpu.io.ics_connector import ControlModeState, ReverseEngineType, ICSOutputs
 from ismpu.config.ics import (
-    FlightPhase, ControlValid, ROLLOUT_CONTROL_MASK,
-    BRAKE_PEDAL_MAX_MM, THROTTLE_ANGLE_MIN_DEG, TILLER_MAX_DEG, RUDDER_MAX_DEG,
+    FlightPhase, ControlValid, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK,
+    BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
+    TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
 )
 from ismpu.envs.scenario import (
     Scenario, SCENARIO_PRESETS, select_scenario, select_for_telemetry, weather_distance,
@@ -155,30 +157,100 @@ def test_step_converts_commands_to_icd_units():
     assert out.ControlValidMask == int(ROLLOUT_CONTROL_MASK)
     assert out.ControlValidMask != 0
 
-    # Тормоза — ход педали в мм, а не нормированные [0, 1].
-    assert out.BrakeLeftCmd == pytest.approx(BRAKE_PEDAL_MAX_MM)
-    assert out.BrakeRightCmd == pytest.approx(BRAKE_PEDAL_MAX_MM * 0.5)
+    # Тормоза — ход КОМАНДЫ педали в мм (45 мм), а не нормированные [0, 1] и не 36.73 мм
+    # обратной связи.
+    assert out.BrakeLeftCmd == pytest.approx(BRAKE_CMD_MAX_MM)
+    assert out.BrakeRightCmd == pytest.approx(BRAKE_CMD_MAX_MM * 0.5)
 
-    # Путевое управление — в градусах, и передняя стойка задействована.
+    # Путевое управление на пробеге: руль направления (град) + педальный пост (мм).
+    # Тиллер — орган руления, на пробеге не выдаётся.
     assert out.RudderCmd == pytest.approx(RUDDER_MAX_DEG)
-    assert out.NoseWheelTillerCmd == pytest.approx(TILLER_MAX_DEG)
+    assert out.RudderPedalCmd == pytest.approx(RUDDER_PEDAL_MAX_MM)
+    assert out.NoseWheelTillerCmd == 0.0
 
-    # Реверс: величина — отрицательным углом РУД, створки — отдельным сигналом.
-    assert out.ThrottleLeft == pytest.approx(THROTTLE_ANGLE_MIN_DEG)
-    assert out.ThrottleRight == pytest.approx(0.0)
+    # Реверс: величина — СКОРОСТЬЮ перемещения РУД (единственный документированный канал
+    # управления тягой), створки — отдельным сигналом. Абсолютное положение не выдаётся.
+    assert out.ThrottleLeftRate == pytest.approx(-THROTTLE_RATE_MAX_DEG_S)   # выпуск реверса
+    assert out.ThrottleRightRate == pytest.approx(0.0)                        # уже на малом газу
+    assert out.ThrottleLeft == 0.0 and out.ThrottleRight == 0.0
     assert out.ReverseLeftCmd == ReverseEngineType.Deploy
     assert out.ReverseRightCmd == ReverseEngineType.Off
+
+
+def test_taxi_steers_with_the_tiller_not_the_rudder():
+    """Разделение органов из таблицы Заказчика: тиллер — на рулении, педальный пост — на пробеге.
+
+    На скорости пробега отклонять тиллер нельзя, на скорости руления руль направления
+    бесполезен, поэтому один и тот же нормированный `rudder_cmd` уходит в разные поля.
+    """
+    sim, conn = engaged_sim()
+    sim.request_taxi()
+    cmd = ControlsState()
+    cmd.rudder_cmd = 1.0
+    sim.step(cmd)
+    out = conn.sent_outputs[-1]
+
+    assert out.ControlMode is ControlModeState.Taxi
+    assert out.ControlValidMask == int(TAXI_CONTROL_MASK)
+    assert out.NoseWheelTillerCmd == pytest.approx(TILLER_MAX_MM)
+    assert out.RudderCmd == 0.0 and out.RudderPedalCmd == 0.0
 
 
 def test_declared_mask_covers_only_channels_we_actually_drive():
     """Заявить канал, который не формируешь, — взять ответственность за неуправляемый орган."""
     assert ControlValid.RUDDER in ROLLOUT_CONTROL_MASK
-    assert ControlValid.WHEEL_BRAKES in ROLLOUT_CONTROL_MASK
-    assert ControlValid.NOSE_WHEEL_TILLER in ROLLOUT_CONTROL_MASK
-    assert ControlValid.REVERSE in ROLLOUT_CONTROL_MASK
+    assert ControlValid.RUDDER_PEDAL in ROLLOUT_CONTROL_MASK
+    assert ControlValid.BRAKE_LEFT in ROLLOUT_CONTROL_MASK
+    assert ControlValid.BRAKE_RIGHT in ROLLOUT_CONTROL_MASK
+    assert ControlValid.THROTTLE_LEFT_RATE in ROLLOUT_CONTROL_MASK
+    assert ControlValid.REVERSE_LEFT in ROLLOUT_CONTROL_MASK
+    assert ControlValid.REVERSE_RIGHT in ROLLOUT_CONTROL_MASK
+    # Тиллер — орган руления, на пробеге его не заявляем и не выдаём.
+    assert ControlValid.NOSE_WHEEL_TILLER not in ROLLOUT_CONTROL_MASK
+    assert ControlValid.NOSE_WHEEL_TILLER in TAXI_CONTROL_MASK
+    assert ControlValid.RUDDER_PEDAL not in TAXI_CONTROL_MASK
+    # Абсолютного положения РУД в перечне управляющих сигналов Заказчика нет вовсе.
+    assert ControlValid.THROTTLE_LEFT not in ROLLOUT_CONTROL_MASK
+    assert ControlValid.THROTTLE_LEFT not in TAXI_CONTROL_MASK
     assert ControlValid.ELEVATOR not in ROLLOUT_CONTROL_MASK   # продольные органы не наши
     assert ControlValid.AILERON not in ROLLOUT_CONTROL_MASK
     assert ControlValid.AIRBRAKE not in ROLLOUT_CONTROL_MASK
+
+
+def test_airborne_mask_is_the_value_confirmed_on_the_bench():
+    """31 — единственная маска, с которой заход реально прошёл на стенде.
+
+    Проверяется само число, а не набор имён: имена — наша интерпретация раскладки, а стендом
+    подтверждено именно значение.
+    """
+    assert int(AIRBORNE_CONTROL_MASK) == 31
+    assert ControlValid.ELEVATOR in AIRBORNE_CONTROL_MASK
+    assert ControlValid.AILERON in AIRBORNE_CONTROL_MASK
+    assert ControlValid.RUDDER in AIRBORNE_CONTROL_MASK
+    assert ControlValid.THROTTLE_LEFT_RATE in AIRBORNE_CONTROL_MASK
+    assert ControlValid.THROTTLE_RIGHT_RATE in AIRBORNE_CONTROL_MASK
+    # Колёсные органы в воздухе не заявляются, даже если структура их несёт.
+    assert ControlValid.BRAKE_LEFT not in AIRBORNE_CONTROL_MASK
+    assert ControlValid.NOSE_WHEEL_TILLER not in AIRBORNE_CONTROL_MASK
+
+
+def test_mask_layout_matches_the_command_field_count():
+    """Один бит на одно командное поле `ICSOutputs` — иначе заявка попадает не в тот канал.
+
+    Раскладка выведена из двух наблюдений стенда (бит 0 = руль высоты, маска 31 = первые пять
+    полей) плюс совпадения числа полей с `CONTROL_COMMAND_COUNT = 14` у второго участника НИР.
+    """
+    from ismpu.config.ics import CONTROL_COMMAND_COUNT, ALL_CONTROL_MASK
+
+    assert len(ControlValid) == CONTROL_COMMAND_COUNT == 14
+    assert ALL_CONTROL_MASK == 16383
+    # Порядок битов = порядок командных полей в структуре, до флагов режимов.
+    command_fields = [f.name for f in fields(ICSOutputs)][2:2 + CONTROL_COMMAND_COUNT]
+    assert command_fields == [
+        "ElevatorCmd", "AileronCmd", "RudderCmd", "ThrottleLeftRate", "ThrottleRightRate",
+        "ThrottleLeft", "ThrottleRight", "NoseWheelTillerCmd", "RudderPedalCmd",
+        "BrakeLeftCmd", "BrakeRightCmd", "AirbrakeCmd", "ReverseLeftCmd", "ReverseRightCmd",
+    ]
 
 
 def test_active_failures_come_from_telemetry():
@@ -298,10 +370,16 @@ def test_plain_loop_reads_telemetry_once_per_tick():
     assert reads["n"] < 2 * ticks
 
 
-def test_control_exception_sends_a_neutral_command_not_silence():
-    """Замолчать нельзя: последнее отклонение осталось бы приложенным до сторожа на той стороне."""
+def test_control_exception_sends_a_neutral_command_then_releases_the_channels(monkeypatch):
+    """Замолчать нельзя: последнее отклонение осталось бы приложенным до сторожа на той стороне.
+
+    Но и одной нейтрали мало: нулевая команда с заявленной маской — это по-прежнему команда
+    (в воздухе нулевой РУД означает «малый газ»). Поэтому за нейтралью идёт снятие заявки
+    каналов, и последним, что видит стенд, оказывается `ControlValidMask = 0` + `Off`.
+    """
     from ismpu.config.constants import DT
 
+    monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
     sim, conn = engaged_sim(GroundSpeed=100.0)
     controller = ControllingSystem(sim)
     SCENARIO_PRESETS["default"].apply_control(controller)
@@ -310,11 +388,17 @@ def test_control_exception_sends_a_neutral_command_not_silence():
     sent_before = len(conn.sent_outputs)
     controller.control_exception()
 
-    assert len(conn.sent_outputs) == sent_before + 1     # нейтральная команда отправлена
-    out = conn.sent_outputs[-1]
-    assert out.BrakeLeftCmd == 0.0 and out.BrakeRightCmd == 0.0
-    assert out.RudderCmd == 0.0 and out.NoseWheelTillerCmd == 0.0
+    assert len(conn.sent_outputs) > sent_before          # молчания нет
+    neutral = conn.sent_outputs[sent_before]
+    assert neutral.BrakeLeftCmd == 0.0 and neutral.BrakeRightCmd == 0.0
+    assert neutral.RudderCmd == 0.0 and neutral.NoseWheelTillerCmd == 0.0
+
+    released = conn.sent_outputs[-1]
+    assert released.ControlValidMask == 0
+    assert released.ControlMode is ControlModeState.Off
+    assert released.ModeAIReady == 0
     assert controller.state.break_control is True
+    assert sim.engaged is False
 
 
 def test_lateral_channel_uses_runway_geometry_from_telemetry():
@@ -384,13 +468,14 @@ def test_cold_ground_start_engages_only_after_the_bench_confirms(monkeypatch):
     # И состоялся переход 0 → 4 — тот самый стимул, по которому стенд нас включил.
     assert any(o.ControlMode == ControlModeState.Taxi for o in warmup)
 
-    # После подтверждения реальная команда несёт полную маску и ControlMode = Taxi.
+    # После подтверждения реальная команда несёт маску руления (наземное включение с нуля ведёт
+    # именно в Taxi) и ControlMode = Taxi.
     cmd = ControlsState()
     cmd.cmd_brake_l = 0.5
     sim.step(cmd)
     last = conn.sent_outputs[-1]
     assert last.ControlMode == ControlModeState.Taxi
-    assert last.ControlValidMask == int(ROLLOUT_CONTROL_MASK)
+    assert last.ControlValidMask == int(TAXI_CONTROL_MASK)
 
 
 def test_warm_up_paces_itself_and_does_not_flood_the_bench(monkeypatch):

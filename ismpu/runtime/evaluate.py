@@ -36,6 +36,7 @@ from ismpu.config.requirements import (
     XTE_ROLLOUT_MAX_M, XTE_TAXI_MAX_M, XTE_NWS_FAIL_MAX_M,
     HEADING_FAULT_MAX_DEG, HEADING_HOLD_UNTIL_KTS,
 )
+from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.control.failures import FailureMode
 from ismpu.envs.action import preset_action, REFERENCE_ACTION
 from ismpu.envs.reward import TAXI_PHASE_KTS
@@ -452,7 +453,7 @@ def smoke_evaluate(env, scenarios, *, policies: list[Policy] | None = None,
 def main(*, sft_checkpoint: str | None = "checkpoints/npgs_sft.pt",
          ppo_checkpoint: str | None = "checkpoints/npgs_final.pt",
          out_dir: str = "runs/evaluation",
-         ip: str = "127.0.0.1", port: int = 3030) -> dict:
+         ip: str = LISTEN_IP_ANY, port: int = 3030) -> dict:
     """Полная приёмка на стенде: приёмочный набор × 4 политики → отчёт + гейт допуска.
 
     Условия каждого сценария выставляет оператор стенда; здесь набор задаёт, что именно надо

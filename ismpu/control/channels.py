@@ -28,15 +28,20 @@ ROLLOUT_STARTED_KTS = HEADING_HOLD_UNTIL_KTS
 
 @dataclass
 class ControlsState:
-    """Разделяемая по тактам структура команд.
+    """Разделяемая по тактам структура команд — и наземных, и воздушных.
 
     Аннотации типов обязательны: без них `@dataclass` не видит ни одного поля, и тогда
     (а) `__eq__` сравнивает пустой набор — любые два экземпляра равны независимо от команд,
     (б) значения живут как атрибуты класса до первой записи в экземпляр.
+
+    Структура одна на весь полёт, а заполняется по участкам: на заходе пишет
+    `control/approach.py`, на пробеге — каналы ниже. Разделять её на две значило бы дублировать
+    и `rudder_cmd`, и всю обвязку отправки; вместо этого какие поля **заявлены** стенду решает
+    маска (`ICSSim._to_outputs` по текущему `ControlMode`).
     """
     break_control: bool = False
 
-    # commands
+    # --- пробег: нормированные команды ([0,1] тормоза, [-1,0] реверс, [-1,1] руль) --- #
     rudder_cmd: float = 0.0
 
     cmd_brake_l: float = 0.0
@@ -44,6 +49,27 @@ class ControlsState:
 
     cmd_rev_l: float = 0.0
     cmd_rev_r: float = 0.0
+
+    # --- воздушный участок: единицы ICD --- #
+    # Префикс `cmd_` не косметика: по нему `config/regulators.py` собирает
+    # `FORBIDDEN_DIRECT_OUTPUTS` — список команд, которые обучаемый слой не выдаёт никогда.
+    # Поле, названное иначе, молча выпало бы из контракта ТЗ.
+    cmd_elevator: float = 0.0
+    """`ElevatorCmd` — продольная команда в **g** (нормальная перегрузка), а не в градусах руля:
+    так поле задокументировано в датапуле стенда."""
+    cmd_aileron: float = 0.0
+    """`AileronCmd` — градусы."""
+    cmd_throttle_l_rate: float = 0.0
+    cmd_throttle_r_rate: float = 0.0
+    """Темп перекладки РУД, град/с (типичный диапазон -8…+8)."""
+    cmd_throttle_norm: float = 0.0
+    """Абсолютное положение РУД, 0…1. Дублирует темп намеренно: некоторые сборки стенда
+    игнорируют маску валидности, и оба канала должны вести к одной уставке, а не спорить."""
+
+    # --- поля качества (`ICSOutputs.Quality*`, ТЗ 5.1.5) --- #
+    quality_lateral: float = 0.0
+    quality_heading: float = 0.0
+    quality_speed: float = 0.0
 
     def reset(self):
         """Сброс к нейтральным командам — новый эпизод начинается с чистого состояния.
@@ -56,8 +82,28 @@ class ControlsState:
         self.rudder_cmd = 0.0
         self.cmd_brake_l = self.cmd_brake_r = 0.0
         self.cmd_rev_l = self.cmd_rev_r = 0.0
+        self.neutralize_airborne()
+        self.quality_lateral = self.quality_heading = self.quality_speed = 0.0
+
+    def neutralize_airborne(self):
+        """Обнулить только воздушные команды.
+
+        Нужно, когда воздушный канал не может считать закон (нет пакета стенда): оставить
+        прошлое отклонение элеронов приложенным нельзя, а придумывать новое — не по чему.
+        """
+        self.cmd_elevator = 0.0
+        self.cmd_aileron = 0.0
+        self.cmd_throttle_l_rate = self.cmd_throttle_r_rate = 0.0
+        self.cmd_throttle_norm = 0.0
 
     def apply_failures(self, failures_state: FailureState):
+        """Деградация команд по эффективности актуаторов — **только наземные органы**.
+
+        Воздушные команды не трогаются: модель отказов описывает потерю авторитета органов
+        пробега (руление носовой стойкой, тормоза, реверс), а поведение планера при отказе на
+        заходе моделирует сам стенд. Домножать здесь ещё и элероны значило бы моделировать
+        аэродинамику второй раз, поверх стендовой.
+        """
         self.rudder_cmd *= failures_state.steering_eff
 
         self.cmd_brake_l *= failures_state.brake_left_eff
@@ -69,6 +115,11 @@ class ControlsState:
         self.cmd_rev_r *= failures_state.thrust_right_eff
 
     def clamp_all(self, pids: dict[str, PIDController]):
+        """Финальные пределы наземных команд — после дифференциального микса.
+
+        Воздушные команды сюда не входят: их зажимают собственные регуляторы захода
+        (`control/approach.py`), которых нет в `pids`, и второго микса поверх них нет.
+        """
         self.rudder_cmd = pids['runway_center_pid'].clamp(self.rudder_cmd)
 
         self.cmd_brake_l = pids['pid_brake_l'].clamp(self.cmd_brake_l)
@@ -81,11 +132,14 @@ class ControlsState:
         """Обнуляет все органы управления. Отправку делает вызывающий через `ICSSim.step`.
 
         Нейтральная команда, а не молчание: если просто перестать слать, последнее отклонение
-        останется приложенным до срабатывания сторожа на той стороне.
+        останется приложенным до срабатывания сторожа на той стороне. В воздухе одной нейтрали
+        мало — там вместе с ней снимается заявка каналов (`ICSSim.deactivate`), иначе нулевое
+        положение РУД было бы командой «малый газ», а не отказом от управления.
         """
         self.cmd_brake_l = self.cmd_brake_r = 0.0
         self.cmd_rev_l = self.cmd_rev_r = 0.0
         self.rudder_cmd = 0.0
+        self.neutralize_airborne()
 
 
 class LongitudinalChannel:
@@ -148,6 +202,9 @@ class LongitudinalChannel:
             # Сбрасываем интеграторы, чтобы PID не копил ошибку, пока отключен.
             self.pid_rev_l.reset()
             self.pid_rev_r.reset()
+
+        # Показатель выдерживания скорости (ТЗ 5.1.5) — в узлах, как его ждёт стенд.
+        state.quality_speed = abs(current_speed_kts - ref_speed_kts)
 
         cprint(
             f"[LongitudinalChannel] Dist: {self.traveled_distance_m:4.0f}m | V_cur: {current_speed_kts:3.0f}; V_ref: {ref_speed_kts:3.0f} | "
@@ -216,6 +273,13 @@ class LateralChannel:
             return
 
         error = guidance["heading_error_deg"]
+        # Показатели выдерживания (ТЗ 5.1.5): боковое уклонение в **метрах** от осевой и ошибка
+        # курса в градусах. На пробеге их обязан заполнять именно этот канал — иначе на стенд
+        # уходили бы замороженные величины момента касания (в точках курсового маяка!), а при
+        # старте с полосы — постоянные нули, то есть «идеальное выдерживание» при любом сносе.
+        state.quality_lateral = abs(guidance["xte"])
+        state.quality_heading = abs(error)
+
         # w_lat — вес влияния латерального канала (=1 у классики); масштабирует руль и дифф. микс.
         state.rudder_cmd = self.w_lat * self.pid.compute(error, dt)
 

@@ -239,6 +239,7 @@ def test_our_own_dwell_does_not_engage_without_the_bench():
 def test_confirmation_latches_through_a_dropped_packet():
     """Единичный потерянный пакет не должен «выключать» нас на такт."""
     eng = _engine()
+    eng.request_rollout()                                        # стимул доведён
     eng.step(_ready(agent_is_active=1))
     assert eng.engaged is True
     eng.step(_ready(agent_is_active=0, telemetry_valid=False))   # таймаут приёма
@@ -248,10 +249,32 @@ def test_confirmation_latches_through_a_dropped_packet():
 def test_confirmation_clears_when_the_bench_deactivates():
     """Валидный кадр с AgentIsActive = 0 — стенд снял активацию, значит и мы больше не включены."""
     eng = _engine()
+    eng.request_rollout()
     eng.step(_ready(agent_is_active=1))
     assert eng.engaged is True
     eng.step(_ready(agent_is_active=0))
     assert eng.engaged is False
+
+
+def test_bench_activity_alone_does_not_engage_before_the_stimulus_is_complete():
+    """Обратная сторона: `AgentIsActive` появляется, как только оператор включил ICS в IOS.
+
+    Если считать включением его одного, `warm_up` возвращался бы мгновенно — не отправив ни
+    одного кадра рукопожатия, — и дальше мы «управляли» бы в пустоту с полной маской. Поэтому
+    нужны оба слагаемых: признак стенда И доведённый до конца наш стимул.
+    """
+    clock = _Clock()
+    eng = _engine(clock)
+
+    eng.step(_ready(agent_is_active=1))          # стенд активен с самого начала
+    assert eng.confirmed is True
+    assert eng.stimulus_complete is False
+    assert eng.engaged is False                  # выдержка ещё даже не набрана
+    assert eng.control_mode is ControlModeState.Off   # фронт 0 → 4 ещё не сделан
+
+    _pump(eng, clock, _ready(agent_is_active=1), ticks=TICKS_FOR_DWELL + 5)
+    assert eng.stimulus_complete is True
+    assert eng.engaged is True
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,7 @@
 Два класса:
 
 * `Telemetry` — телеметрия в **СИ**. Стенд шлёт узлы, футы, футы/мин и градусы/с (см.
-  `ICSInterface.cs`), контур и наблюдение работают в СИ; граница пересчёта проходит ровно
+  `docs/ICSInterface.cs`), контур и наблюдение работают в СИ; граница пересчёта проходит ровно
   здесь и больше нигде.
 * `ICSSim` — обмен со стендом: `read_telemetry` / `step(ControlsState)` плюс рукопожатие
   (`io/ics_engagement.py`), без которого стенд команды не исполняет.
@@ -25,12 +25,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ismpu.io.ics_connector import (
-    ICSBenchConnector, ICSInputs, ICSOutputs, ControlModeState, ReverseEngineType,
+    ICSBenchConnector, ICSInputs, ICSOutputs, ControlModeState, ReverseEngineType, LISTEN_IP_ANY,
 )
 from ismpu.io.ics_engagement import IcsEngagement, EngagementInputs
 from ismpu.config.ics import (
-    BRAKE_PEDAL_MAX_MM, THROTTLE_ANGLE_MIN_DEG, TILLER_MAX_DEG, RUDDER_MAX_DEG,
-    ROLLOUT_CONTROL_MASK,
+    BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
+    REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
+    AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK,
 )
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
@@ -39,6 +40,22 @@ from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState
 
 logger = logging.getLogger(__name__)
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _throttle_rate(reverse_level: float, actual_angle_deg: float) -> float:
+    """Желаемый уровень реверса [-1, 0] → скорость перемещения РУД (°/с).
+
+    Тягой (в том числе обратной) командуют **скоростью**: абсолютного положения в перечне
+    управляющих сигналов Заказчика нет. Поэтому уровень превращается в целевой угол, а на стенд
+    уходит скорость, которой фактический угол к этой цели ведут.
+    """
+    target = -reverse_level * THROTTLE_ANGLE_MIN_DEG        # [-1,0] → [−26.5°, 0°]
+    rate = REVERSE_THROTTLE_GAIN_PER_S * (target - actual_angle_deg)
+    return _clamp(rate, -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
 
 
 @dataclass
@@ -118,6 +135,54 @@ class Telemetry:
     def ias_ms(self) -> Optional[float]:
         """Приборная скорость (kt → м/с). Отсечки реверса заданы по ней, а не по путевой."""
         return self.ics_inputs.IndicatedAirspeed * Converts.KTS_TO_MS if self.ics_inputs else None
+
+    @property
+    def radio_altitude_ft(self) -> Optional[float]:
+        """Радиовысота **в футах** — единицы стенда.
+
+        Порог воздушного включения (400 футов) и терминальное окно (80 футов) заданы в футах,
+        и сверять их с пересчитанным `agl_m` значило бы гонять величину туда-обратно ради
+        сравнения с константой, которая всё равно записана в футах.
+        """
+        i = self.ics_inputs
+        return i.RadioAltitude if (i is not None and i.RadioAltitudeValid) else None
+
+    @property
+    def ils_valid(self) -> Optional[bool]:
+        """Объявлены ли валидными **оба** канала ILS (курсовой и глиссадный).
+
+        `None` — пакета стенда нет, судить не по чему. Проверять обязательно: сам закон захода
+        читает `LocDeviation`/`GSDeviation` безусловно, и при снятой валидности нулевое отклонение
+        неотличимо от «идеально на оси» — контур будет уверенно вести ВС по несуществующей
+        глиссаде.
+        """
+        i = self.ics_inputs
+        if i is None:
+            return None
+        return bool(i.LocDeviationValid and i.GSDeviationValid)
+
+    @property
+    def landing_flaps(self):
+        """Посадочная конфигурация механизации; `None` — положение не посадочное.
+
+        `None` здесь — это запрет на воздушное управление, а не повод подставить предположение:
+        весь воздушный закон (уставка скорости к VAPP, пределы угла атаки, мониторинг огибающей)
+        считается по таблицам посадочной конфигурации и на чистом крыле неприменим.
+        """
+        from ismpu.config.envelope import measured_landing_flaps
+        i = self.ics_inputs
+        return measured_landing_flaps(i.FlapsAngle) if i is not None else None
+
+    @property
+    def main_gear_contact(self) -> bool:
+        """Касание: обжата **любая основная** стойка.
+
+        Носовая не участвует — она обжимается позже основных, и ждать её значило бы пропустить
+        начало пробега. Признак подтверждён на стенде коллегой как точка окончания воздушного
+        участка.
+        """
+        i = self.ics_inputs
+        return bool(i is not None and (i.LeftGearWeightOnWheels or i.RightGearWeightOnWheels))
 
     @property
     def runway_heading_deg(self) -> Optional[float]:
@@ -213,7 +278,7 @@ class ICSSim:
     """
 
     def __init__(self, connector: Optional[ICSBenchConnector] = None,
-                 listen_ip: str = "127.0.0.1", listen_port: int = 3030, timeout: float = 1.0,
+                 listen_ip: str = LISTEN_IP_ANY, listen_port: int = 3030, timeout: float = 1.0,
                  engagement: Optional[IcsEngagement] = None):
         self.connector = connector if connector is not None else ICSBenchConnector(listen_ip, listen_port)
         self.timeout = timeout
@@ -325,6 +390,7 @@ class ICSSim:
             flight_phase=telemetry.flight_phase,
             agent_is_active=1 if telemetry.agent_is_active else 0,
             telemetry_valid=telemetry.valid,
+            radio_altitude_ft=telemetry.radio_altitude_ft,
         )
 
     @property
@@ -332,23 +398,42 @@ class ICSSim:
         """На стенде отказы приходят телеметрией, а не инжектируются нами."""
         return set(self._last_telemetry.faults) if self._last_telemetry else set()
 
+    def deactivate(self, frames: int = 10, dt: float = DT) -> None:
+        """Снять управление: пустая маска и `ControlMode = Off` несколько кадров подряд.
+
+        Не «замолчать» и не «выдать нули»: молчание оставляет последнее отклонение приложенным
+        до сторожа стенда, а нули с заявленной маской — это по-прежнему команда (нулевое
+        положение РУД в воздухе означает «малый газ», а не «управляй сам»). Пустая маска —
+        единственный способ сказать «мы больше не отвечаем ни за один орган».
+
+        Повтор нужен потому, что транспорт — UDP: одиночный пакет деактивации может потеряться,
+        и тогда стенд останется ждать команд от того, кто уже вышел.
+        """
+        self.engagement.reset()
+        packet = ICSOutputs(ControlValidMask=0, ControlMode=ControlModeState.Off, ModeAIReady=0)
+        for i in range(max(1, frames)):
+            self.connector.send_outputs(packet)
+            if i + 1 < frames:
+                time.sleep(dt)
+
     def _to_outputs(self, command: ControlsState) -> ICSOutputs:
-        """`ControlsState` (нормированные) → `ICSOutputs` (единицы ICD).
+        """`ControlsState` → `ICSOutputs` (единицы ICD), **по текущему участку полёта**.
 
         Три вещи, без которых стенд команду не исполнит:
 
-        * `ControlValidMask` — какие каналы мы вообще заявляем. Пустая маска бессмысленна:
-          команда без заявленных каналов ничего не значит.
+        * `ControlValidMask` — какие каналы мы заявляем. Маска **зависит от режима**: в воздухе
+          мы ведём руль высоты, элероны и РУД, на пробеге — тормоза, реверс и тиллер. Одна маска
+          на весь полёт означала бы либо заявку колёсных тормозов в воздухе, либо руля высоты на
+          пробеге — в обоих случаях ответственность за орган, который мы не формируем.
         * `ControlMode` и `ModeAIReady` — состояние рукопожатия, а не константы (см.
           `io/ics_engagement.py`). До включения команды органов не выдаются вовсе.
         * Единицы: тормоза в миллиметрах хода педали, руль и тиллер в градусах, реверс — углом
           РУД. Нормированные значения здесь дали бы ~1/37 от задуманного торможения.
         """
         out = ICSOutputs()
-        out.ControlMode = self.engagement.control_mode
+        mode = self.engagement.control_mode
+        out.ControlMode = mode
         out.ModeAIReady = self.engagement.mode_ai_ready
-        out.ModeRollout = 1 if out.ControlMode is ControlModeState.Rollout else 0
-        out.ModeTaxi = 1 if out.ControlMode is ControlModeState.Taxi else 0
 
         if not self.engagement.engaged:
             # Рукопожатие не завершено: заявлять каналы нельзя, иначе мы возьмём на себя
@@ -356,22 +441,88 @@ class ICSSim:
             out.ControlValidMask = 0
             return out
 
-        out.ControlValidMask = int(ROLLOUT_CONTROL_MASK)
+        if mode is ControlModeState.Approach:
+            self._fill_airborne(out, command)
+        else:
+            self._fill_ground(out, command)   # выбирает маску пробега или руления по режиму
 
-        # Тормоза: [0, 1] → ход педали в мм.
-        out.BrakeLeftCmd = command.cmd_brake_l * BRAKE_PEDAL_MAX_MM
-        out.BrakeRightCmd = command.cmd_brake_r * BRAKE_PEDAL_MAX_MM
+        # Показатели качества выдерживания (ТЗ 5.1.5) — это отчёт, а не команда, и заявления
+        # каналов не требуют.
+        out.QualityLateralError = command.quality_lateral
+        out.QualityHeadingError = command.quality_heading
+        out.QualitySpeedError = command.quality_speed
+        return out
 
-        # Путевое управление: руль направления и передняя стойка — оба в градусах.
+    @staticmethod
+    def _fill_airborne(out: ICSOutputs, command: ControlsState) -> None:
+        """Воздушный участок: перегрузка, элероны и скорости РУД.
+
+        Флаги фаз (`ModeFlare*`, `ModeAlign*`, `ModeRollout*`) остаются нулевыми весь заход:
+        выравнивание у нас — фаза профиля уставки, а объявление её стенду **меняет его
+        собственный продольный закон** (проверено коллегой на стенде). `ModeSpeed`/`ModeThrust`
+        держатся единицами — ими мы и управляем.
+        """
+        out.ControlValidMask = int(AIRBORNE_CONTROL_MASK)
+        out.ElevatorCmd = command.cmd_elevator                      # g
+        out.AileronCmd = _clamp(command.cmd_aileron, -AILERON_MAX_DEG, AILERON_MAX_DEG)
         out.RudderCmd = command.rudder_cmd * RUDDER_MAX_DEG
-        out.NoseWheelTillerCmd = command.rudder_cmd * TILLER_MAX_DEG
+        out.ThrottleLeftRate = _clamp(command.cmd_throttle_l_rate,
+                                      -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
+        out.ThrottleRightRate = _clamp(command.cmd_throttle_r_rate,
+                                       -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
+        # Абсолютное положение маской не заявлено и в перечне команд Заказчика отсутствует —
+        # но передаётся, потому что часть сборок стенда маску игнорирует, и тогда положение
+        # должно совпадать с тем, куда ведёт скорость, а не спорить с ней. На таком прогоне
+        # заход коллеги и был подтверждён.
+        out.ThrottleLeft = command.cmd_throttle_norm
+        out.ThrottleRight = command.cmd_throttle_norm
+        out.ModeSpeed = 1
+        out.ModeThrust = 1
 
-        # Реверс: команда [-1, 0] → отрицательный угол РУД (обратная тяга). Створки реверса —
-        # отдельный сигнал: угол задаёт величину, `ReverseXCmd` — состояние механизации.
-        out.ThrottleLeft = -command.cmd_rev_l * THROTTLE_ANGLE_MIN_DEG
-        out.ThrottleRight = -command.cmd_rev_r * THROTTLE_ANGLE_MIN_DEG
+    def _fill_ground(self, out: ICSOutputs, command: ControlsState) -> None:
+        """Пробег и руление: тормоза, путевое управление, реверс.
+
+        Путевой орган **зависит от режима**: на пробеге это педальный пост (±75 мм) вместе с
+        аэродинамическим рулём, на рулении — тиллер (±65 мм). Так их и разделяет таблица
+        управляющих сигналов Заказчика, и это не формальность: на скорости пробега тиллер
+        отклонять нельзя, а на скорости руления руль направления бесполезен.
+        """
+        taxi = out.ControlMode is ControlModeState.Taxi
+        out.ControlValidMask = int(TAXI_CONTROL_MASK if taxi else ROLLOUT_CONTROL_MASK)
+        out.ModeRollout = 1 if out.ControlMode is ControlModeState.Rollout else 0
+        out.ModeTaxi = 1 if taxi else 0
+
+        # Тормоза: [0, 1] → ход КОМАНДЫ педали в мм (45 мм, не 36.73 — то шкала обратной связи).
+        out.BrakeLeftCmd = command.cmd_brake_l * BRAKE_CMD_MAX_MM
+        out.BrakeRightCmd = command.cmd_brake_r * BRAKE_CMD_MAX_MM
+
+        if taxi:
+            out.NoseWheelTillerCmd = command.rudder_cmd * TILLER_MAX_MM
+        else:
+            out.RudderCmd = command.rudder_cmd * RUDDER_MAX_DEG
+            out.RudderPedalCmd = command.rudder_cmd * RUDDER_PEDAL_MAX_MM
+
+        # Реверс: команда [-1, 0] — это желаемый уровень обратной тяги. Задаётся он **скоростью**
+        # перемещения РУД (единственный документированный канал управления тягой), а не записью
+        # абсолютного угла: позиционный контур ведёт фактический РУД к цели, `ReverseXCmd`
+        # открывает створки.
+        angle_l = self._throttle_angle(left=True)
+        angle_r = self._throttle_angle(left=False)
+        out.ThrottleLeftRate = _throttle_rate(command.cmd_rev_l, angle_l)
+        out.ThrottleRightRate = _throttle_rate(command.cmd_rev_r, angle_r)
         out.ReverseLeftCmd = (ReverseEngineType.Deploy if command.cmd_rev_l < 0
                               else ReverseEngineType.Off)
         out.ReverseRightCmd = (ReverseEngineType.Deploy if command.cmd_rev_r < 0
                                else ReverseEngineType.Off)
-        return out
+
+    def _throttle_angle(self, *, left: bool) -> float:
+        """Фактический угол РУД из последнего кадра стенда; 0 при отсутствии кадра.
+
+        Обратная связь позиционного контура. Без кадра нулевой угол означает «малый газ» — это
+        безопасное предположение: контур в худшем случае даст полную скорость на выпуск реверса,
+        которую стенд всё равно отработает физически.
+        """
+        i = getattr(self._last_telemetry, "ics_inputs", None)
+        if i is None:
+            return 0.0
+        return i.LeftThrottleAngle if left else i.RightThrottleAngle

@@ -14,7 +14,7 @@
 черновых ячеек ноутбука и требуют калибровки/валидации.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ismpu.control.pid import PIDController
@@ -43,6 +43,12 @@ class ScenarioConfig:
     steering_rev_gain: float = 0.0
     law: VelocityLaw = VelocityLaw.GAUSS_BELL
     draft: bool = False  # True = черновой пресет, требует калибровки
+    approach: str = "default"
+    """Имя пресета воздушного участка (`config.approach.APPROACH_PRESETS`). Отдельным полем, а не
+    частью этого набора: воздушные коэффициенты статические и в пространство коэффициентов NPGS
+    не входят, поэтому смешивать их с пятью регуляторами пробега нельзя."""
+    matrix_code: str = ""
+    """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
     def build_pids(self) -> dict[str, PIDController]:
         """Создаёт свежий набор из 5 регуляторов (по имени аргументов setup())."""
@@ -55,7 +61,14 @@ class ScenarioConfig:
         )
 
     def apply(self, controller: "ControllingSystem") -> "ControllingSystem":
-        """Настраивает контур под сценарий и активирует связанный отказ (если задан)."""
+        """Настраивает контур под сценарий и активирует связанный отказ (если задан).
+
+        Настраиваются **оба** участка: пять регуляторов пробега из этого набора и воздушный
+        пресет по имени. Иначе сценарий, заведённый под сквозной прогон с отказом двигателя на
+        глиссаде, менял бы только пробег — то есть ровно не тот участок, где отказ вводится.
+        """
+        from ismpu.config.approach import APPROACH_PRESETS
+
         controller.setup(
             self.build_pids(),
             lookahead_min=self.lookahead_min,
@@ -65,6 +78,7 @@ class ScenarioConfig:
             steering_rev_gain=self.steering_rev_gain,
             law=self.law,
         )
+        controller.setup_approach(APPROACH_PRESETS[self.approach])
         if self.failure is not FailureMode.NONE:
             controller.apply_failure(self.failure)
         return controller
@@ -181,6 +195,131 @@ ICY_RWY = ScenarioConfig(
     lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
 )
 
+# --------------------------------------------------------------------------- #
+# Черновые пресеты под матрицу прогонов (лист Б: ВПП и руление)
+# --------------------------------------------------------------------------- #
+#
+# Один шифр матрицы = один набор коэффициентов: внутри шифра прогоны идут от простого к сложному,
+# и настройка переносится с предыдущего на следующий (см. `config/run_matrix.py`). Поэтому пресет
+# заводится на шифр, а не на строку таблицы.
+#
+# Каждый черновик наследуется от **ближайшего откалиброванного** пресета, а не от нулей: начинать
+# настройку от работающего набора — ровно то, что предписывает методика матрицы. Пометка
+# `draft=True` при этом говорит правду: под конкретный отказ коэффициенты ещё не считались, и
+# автоматический подбор по телеметрии такие пресеты не берёт.
+
+def _matrix_draft(base: ScenarioConfig, name: str, code: str, *,
+                  failure: FailureMode | None = None,
+                  approach: str = "default", **overrides) -> ScenarioConfig:
+    """Черновик под шифр матрицы на базе откалиброванного пресета.
+
+    Словари коэффициентов копируются: `ScenarioConfig` заморожен, но сами словари — нет, и
+    общий словарь на два пресета означал бы, что настройка одного молча меняет другой.
+    """
+    spec = dict(
+        name=name, matrix_code=code, draft=True, approach=approach,
+        failure=base.failure if failure is None else failure,
+        runway_center=dict(base.runway_center), brake_l=dict(base.brake_l),
+        brake_r=dict(base.brake_r), rev_l=dict(base.rev_l), rev_r=dict(base.rev_r),
+    )
+    spec.update(overrides)
+    return replace(base, **spec)
+
+
+B_1_1_ROLLOUT = _matrix_draft(DEFAULT, "b_1_1_rollout", "Б.1.1")
+"""Штатный пробег от касания до полной остановки. Критерий — ось ВПП ± 3 м (ТЗ 5.1.3.1)."""
+
+B_1_2_TAXI = _matrix_draft(
+    DEFAULT, "b_1_2_taxi", "Б.1.2",
+    lookahead_min=5.0, lookahead_gain=1.2, xte_gain=3.0)
+"""Руление по прямому участку. Допуск втрое жёстче пробега (± 1 м), а скорости втрое ниже,
+поэтому упреждение укорочено, а реакция на боковое смещение усилена — это отправная точка
+настройки, а не результат."""
+
+B_2_1_NWS_STUCK_NEUTRAL = _matrix_draft(NWS_FAIL, "b_2_1_nws_stuck_neutral", "Б.2.1")
+"""Заедание носовой стойки в нейтрали. Ближайший откалиброванный родитель — `nws_fail`:
+у него удержание оси уже перенесено на дифференциальное торможение и асимметричную тягу."""
+
+B_2_2_NWS_STUCK_OFFSET = _matrix_draft(
+    NWS_FAIL, "b_2_2_nws_stuck_offset", "Б.2.2",
+    steering_brake_gain=0.9, steering_rev_gain=0.6)
+"""Заедание с уводом (+5°). Хуже нейтрали: стойка не просто бездействует, а постоянно тянет с
+полосы, и парировать это приходится тормозами и тягой непрерывно, а не эпизодически."""
+
+B_2_3_NWS_LIMITED = _matrix_draft(NWS_FAIL, "b_2_3_nws_limited", "Б.2.3")
+"""Ограничение диапазона до ± 3°. Смешанное управление: стойка ещё живая, но её авторитета не
+хватает. Заводится от `nws_fail`, хотя по смыслу лежит между ним и штатным пробегом."""
+
+B_3_1_REVERSE_LEFT_FAIL = _matrix_draft(LEFT_REVERSE_FAIL, "b_3_1_reverse_left_fail", "Б.3.1")
+"""Отказ реверса левого двигателя."""
+
+B_3_2_REVERSE_ASYMMETRIC = _matrix_draft(LEFT_REVERSE_FAIL, "b_3_2_reverse_asymmetric", "Б.3.2")
+"""Несимметричное включение реверса (левый с задержкой 3 с). По телеметрии неотличим от Б.3.1 —
+выбирается только по имени."""
+
+B_3_3_RESIDUAL_THRUST = _matrix_draft(
+    LEFT_REVERSE_FAIL, "b_3_3_residual_thrust", "Б.3.3",
+    failure=FailureMode.THRUST_LEFT_DEGRADED)
+"""Остаточная прямая тяга ~30 % на левом. Отличается от отказа реверса знаком возмущения: не
+«нечем тормозить слева», а «слева подталкивает вперёд»."""
+
+B_4_1_THROUGH = _matrix_draft(DEFAULT, "b_4_1_through", "Б.4.1", approach="a_1_2_flare")
+"""Сквозной прогон без отказов: глиссада → касание → пробег. Критерий добавляет то, чего нет ни
+у одного участка по отдельности — отсутствие скачка управляющих воздействий на стыке."""
+
+B_4_2_THROUGH_ENGINE_OUT = _matrix_draft(
+    LEFT_REVERSE_FAIL, "b_4_2_through_engine_out", "Б.4.2",
+    approach="a_4_1_engine_out_high")
+"""Сквозной, худший случай: отказ левого двигателя на глиссаде + отказ его реверса на пробеге."""
+
+
+# --------------------------------------------------------------------------- #
+# Черновые пресеты под лист А матрицы (заход и посадка)
+# --------------------------------------------------------------------------- #
+#
+# Настраивается там воздушный контур (`config/approach.py`), а не пять регуляторов пробега.
+# Но запускать прогон всё равно нужно чем-то целым, поэтому шифр захода получает сценарий:
+# наземная часть — штатная (после касания прогон обычный), воздушная — своя.
+#
+# В SFT они не идут: обучаемый слой планирует коэффициенты пробега, а не захода, и метки для
+# воздушного участка у него попросту нет.
+
+_APPROACH_MATRIX = (
+    ("a_1_1_track", "А.1.1", FailureMode.NONE),
+    ("a_1_2_flare", "А.1.2", FailureMode.NONE),
+    ("a_2_1_gear_left_up", "А.2.1", FailureMode.GEAR_CONFIG),
+    ("a_2_2_gear_nose_up", "А.2.2", FailureMode.GEAR_CONFIG),
+    ("a_2_3_gear_partial", "А.2.3", FailureMode.GEAR_CONFIG),
+    ("a_3_1_stab_nose_down_high", "А.3.1", FailureMode.NONE),
+    ("a_3_2_stab_nose_up_high", "А.3.2", FailureMode.NONE),
+    ("a_3_3_stab_nose_down_low", "А.3.3", FailureMode.NONE),
+    ("a_3_4_stab_nose_up_low", "А.3.4", FailureMode.NONE),
+    ("a_4_1_engine_out_high", "А.4.1", FailureMode.ENGINE_OUT_LEFT),
+    ("a_4_2_engine_partial", "А.4.2", FailureMode.THRUST_LEFT_DEGRADED),
+    ("a_4_3_engine_out_low", "А.4.3", FailureMode.ENGINE_OUT_LEFT),
+)
+"""Отказ указан тот, каким он **придёт в телеметрии**. Заклинение стабилизатора (А.3.x) остаётся
+`NONE`: `FaultLeftStab`/`FaultRightStab` в ICD есть, но нашей модели отказов такой режим не
+описывает — он меняет балансировку планера, а не эффективность нашего органа, и парируется тем же
+контуром тангажа."""
+
+APPROACH_MATRIX_DRAFTS = tuple(
+    _matrix_draft(DEFAULT, name, code, failure=failure, approach=name)
+    for name, code, failure in _APPROACH_MATRIX
+)
+
+MATRIX_DRAFTS = (
+    *APPROACH_MATRIX_DRAFTS,
+    B_1_1_ROLLOUT, B_1_2_TAXI,
+    B_2_1_NWS_STUCK_NEUTRAL, B_2_2_NWS_STUCK_OFFSET, B_2_3_NWS_LIMITED,
+    B_3_1_REVERSE_LEFT_FAIL, B_3_2_REVERSE_ASYMMETRIC, B_3_3_RESIDUAL_THRUST,
+    B_4_1_THROUGH, B_4_2_THROUGH_ENGINE_OUT,
+)
+
 SCENARIOS = {
-    s.name: s for s in (DEFAULT, NWS_FAIL, LEFT_REVERSE_FAIL, RIGHT_REVERSE_FAIL, RIGHT_WIND, FWD_WIND, WET_RWY, PUDDLY_RWY, ICY_RWY)
+    s.name: s for s in (
+        DEFAULT, NWS_FAIL, LEFT_REVERSE_FAIL, RIGHT_REVERSE_FAIL,
+        RIGHT_WIND, FWD_WIND, WET_RWY, PUDDLY_RWY, ICY_RWY,
+        *MATRIX_DRAFTS,
+    )
 }

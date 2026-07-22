@@ -24,6 +24,7 @@ import os
 from dataclasses import dataclass, field
 
 from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
+from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.agent.ppo import PPOTrainer, PPOConfig
 from ismpu.agent.shield import Shield
 from ismpu.config.regulators import validate_action_contract
@@ -96,7 +97,7 @@ class CSVLogger:
 # Тренировочный стек на стенде
 # --------------------------------------------------------------------------- #
 
-def build_ics_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 3030):
+def build_ics_stack(cfg: TrainConfig, ip: str = LISTEN_IP_ANY, port: int = 3030):
     """Строит (env, npgs, trainer) поверх стенда. Требует работающий стенд.
 
     С `cfg.init_from` — грузит SFT-подогретые веса (тёплый старт; конфиг/нормировка берутся
@@ -125,7 +126,7 @@ def build_ics_stack(cfg: TrainConfig, ip: str = "127.0.0.1", port: int = 3030):
     return env, net, trainer
 
 
-def train(cfg: TrainConfig | None = None, ip: str = "127.0.0.1", port: int = 3030) -> PPOTrainer:
+def train(cfg: TrainConfig | None = None, ip: str = LISTEN_IP_ANY, port: int = 3030) -> PPOTrainer:
     """Полный цикл обучения на стенде с curriculum, логом и чекпоинтами."""
     from ismpu.envs.scenario_generator import ScenarioGenerator
 

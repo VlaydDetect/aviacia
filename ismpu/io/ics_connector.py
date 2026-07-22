@@ -20,6 +20,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+LISTEN_IP_ANY = "0.0.0.0"
+"""Адрес прослушивания по умолчанию. Именно `0.0.0.0`, а не `127.0.0.1`: стенд может стоять на
+другой машине, и тогда петлевой адрес не принял бы от него ни одного пакета. Локальный запуск
+`0.0.0.0` покрывает тоже."""
+
 
 class GearState(IntEnum):
     NoneState = 0
@@ -194,7 +199,10 @@ class ICSInputs:
 
 @dataclass
 class ICSOutputs:
-    ControlValidMask: int = 1
+    ControlValidMask: int = 0
+    """По умолчанию **не заявлен ни один канал**. Прежняя единица означала, что каждый пакет,
+    собранный без явной маски (в том числе пакет деактивации), заявлял руль высоты со значением
+    0.0 — то есть выдавал команду там, где мы намеревались молчать."""
     ControlMode: ControlModeState = ControlModeState.Off
     ElevatorCmd: float = 0.0
     AileronCmd: float = 0.0
@@ -335,29 +343,25 @@ class ICSBenchConnector:
 
 
 def main():
-    connector = ICSBenchConnector(listen_ip="127.0.0.1", listen_port=3030)
+    """Диагностический приём телеметрии. Управление отсюда **не выдаётся**.
 
+    Прежняя версия гнала `ElevatorCmd = 200.0` в цикле без пауз. В единицах ICD это 200 g —
+    команда вне физического смысла, да ещё и с неограниченным темпом отправки. Для проверки
+    авторитета органов есть отдельные инструменты; точка входа транспорта должна только читать.
+    """
+    connector = ICSBenchConnector(listen_ip=LISTEN_IP_ANY, listen_port=3030)
     print("Интерфейс ICS запущен. Ожидание данных от стенда...")
-
-    connector.receive_inputs(timeout=2.0)
-
-    outputs = ICSOutputs(
-        ControlValidMask=1,
-        ControlMode=ControlModeState.Approach,
-        ModeAIReady=1
-    )
-
     try:
-        deadline = time.time() + 0.2
-        while time.time() < deadline:
-            connector.send_outputs(outputs)
-
         while True:
-            outputs.ElevatorCmd = 200.0
-
-            # 4. Отправляем управление обратно на стенд
-            connector.send_outputs(outputs)
-
+            inputs = connector.receive_inputs(timeout=2.0)
+            if inputs is None:
+                print("[ICS] телеметрии нет")
+                continue
+            print(f"[ICS] active={inputs.AgentIsActive} phase={inputs.FlightPhase} "
+                  f"ra={inputs.RadioAltitude:.1f} ias={inputs.IndicatedAirspeed:.1f} "
+                  f"gs={inputs.GroundSpeed:.1f} wow="
+                  f"{inputs.NoseGearWeightOnWheels}/{inputs.LeftGearWeightOnWheels}/"
+                  f"{inputs.RightGearWeightOnWheels}")
     except KeyboardInterrupt:
         print("\nИнтерфейс остановлен пользователем.")
     finally:
