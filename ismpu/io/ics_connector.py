@@ -194,7 +194,7 @@ class ICSInputs:
 
 @dataclass
 class ICSOutputs:
-    ControlValidMask: int = 0
+    ControlValidMask: int = 1
     ControlMode: ControlModeState = ControlModeState.Off
     ElevatorCmd: float = 0.0
     AileronCmd: float = 0.0

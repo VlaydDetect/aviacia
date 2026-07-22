@@ -18,6 +18,11 @@ from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import ReferenceTrajectory
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.failures import FailureState
+from ismpu.config.requirements import HEADING_HOLD_UNTIL_KTS
+
+ROLLOUT_STARTED_KTS = HEADING_HOLD_UNTIL_KTS
+"""Порог, выше которого считаем, что пробег начался. Та же граница (30 узлов), на которой ТЗ
+5.1.3.3 снимает требование по удержанию курса, — ниже неё режим уже руление, а не пробег."""
 
 
 @dataclass
@@ -96,6 +101,13 @@ class LongitudinalChannel:
 
         self.traveled_distance_m = 0.0
         self.w_lon = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
+        self.rollout_started = False
+        """Защёлка «пробег действительно начался».
+
+        Без неё условие «скорость руления достигнута» тривиально истинно у неподвижного ВС
+        (0 м/с ≤ 5.14 м/с), и контур завершался бы на первом же такте — в частности, до того как
+        успевает пройти двухсекундное рукопожатие со стендом. При касании на 140 узлах защёлка
+        ставится на первом такте, поэтому поведение классики не меняется."""
 
         print("[LongitudinalChannel] Запуск продольного канала.")
 
@@ -140,7 +152,12 @@ class LongitudinalChannel:
             f"Brk_L: {state.cmd_brake_l:.2f}; Brk_R: {state.cmd_brake_r:.2f} | "
             f"Rev_L: {state.cmd_rev_l:.2f}; Rev_R: {state.cmd_rev_r:.2f}", "green")
 
-        if current_speed_ms <= self.trajectory.v_target_ms:
+        if current_speed_kts >= ROLLOUT_STARTED_KTS:
+            self.rollout_started = True
+
+        # Пробег нельзя объявить оконченным, пока он не начался: иначе неподвижное ВС на земле
+        # завершает эпизод на первом такте (см. `rollout_started`).
+        if self.rollout_started and current_speed_ms <= self.trajectory.v_target_ms:
             print("[LongitudinalChannel] Посадочная дистанция пройдена. Скорость руления достигнута.")
             state.cmd_brake_l = state.cmd_brake_r = 0.1
             state.cmd_rev_l = state.cmd_rev_r = 0.0

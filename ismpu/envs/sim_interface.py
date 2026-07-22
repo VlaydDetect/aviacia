@@ -47,7 +47,7 @@ from ismpu.io.datarefs import (
 
 logger = logging.getLogger(__name__)
 from ismpu.utils.converts import Converts
-from ismpu.config.constants import FREQ
+from ismpu.config.constants import FREQ, DT
 from ismpu.config.runway import (
     RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE, ELEVATION_MSL, ELEVATION_AIRCRAFT,
 )
@@ -68,6 +68,14 @@ class Telemetry:
 
     `None` — поле недоступно у бэкенда. Проверять надо `valid` **до** полей: бэкенд стенда при
     таймауте отдаёт нули, а не `None`.
+
+    **Стенд-специфичные сигналы не дублируются.** Обжатие стоек, фаза полёта, геометрия ВПП,
+    отказы и `AgentIsActive` — это разные поля одного «сырого» пакета `ICSInputs`. Пересказывать
+    их в отдельные поля `Telemetry` значит заводить второй источник истины и рисковать
+    рассинхроном (именно так раньше обжатие стоек считалось нашей, а не стендовой, логикой).
+    Поэтому пакет прикладывается целиком (`ics_inputs`), а сами сигналы выводятся из него через
+    property. У X-Plane `ics_inputs is None` → все они отдают None/пустое, и работает
+    геодезический путь.
     """
     lat: float
     lon: float
@@ -89,25 +97,97 @@ class Telemetry:
     wind_speed_ms: Optional[float] = None
     wind_dir_from_deg: Optional[float] = None
 
-    # --- сигналы, которые даёт стенд (на X-Plane частью отсутствуют) ---
-    ias_ms: Optional[float] = None
-    """Приборная скорость. Отсечки реверса заданы по ней, а не по путевой."""
-    runway_heading_deg: Optional[float] = None
-    runway_length_m: Optional[float] = None
-    runway_width_m: Optional[float] = None
-    lateral_deviation_m: Optional[float] = None
-    """Боковое отклонение от оси, измеренное стендом. Позволяет не считать геодезию самим."""
-    weight_on_wheels: Optional[bool] = None
-    """Обжатие ВСЕХ стоек. Условие включения управления на земле."""
-    flight_phase: Optional[int] = None
-    """Фаза полёта по `config.ics.FlightPhase` — по ней распознаётся уже идущий пробег."""
-    faults: frozenset = frozenset()
-    """Отказы, о которых сообщает борт. На стенде они приходят телеметрией, а не инжектируются
-    нами, поэтому источник истины здесь, а не в `FailureManager`."""
-    runway_condition: Optional[float] = None
-    """Состояние ВПП в нашей шкале сцепления (`envs.weather.RunwayCondition`)."""
+    # «Сырой» пакет стенда — единственный источник стенд-специфичных сигналов ниже (None у X-Plane).
+    ics_inputs: Optional[ICSInputs] = None
 
     valid: bool = True   # False — телеметрия отсутствует (напр. таймаут стенда)
+
+    @classmethod
+    def from_ics(cls, inp: ICSInputs) -> "Telemetry":
+        """`ICSInputs` → `Telemetry`: базовые поля в СИ + «сырой» пакет для стенд-property.
+
+        Стенд отдаёт узлы, футы, футы/мин и градусы/с. Пропущенный здесь перевод — не косметика:
+        путевая скорость в узлах, положенная в поле м/с, даёт ошибку в 1.94 раза, и продольный
+        канал прочитает 140 узлов как 272 и немедленно даст полное торможение.
+        """
+        return cls(
+            lat=inp.Latitude,
+            lon=inp.Longitude,
+            groundspeed_ms=inp.GroundSpeed * Converts.KTS_TO_MS,        # kt → м/с
+            heading_true_deg=inp.TrueHeading,
+            pitch_deg=inp.PitchAngle,
+            roll_deg=inp.RollAngle,
+            elevation_m=inp.BaroAltitude * Converts.FT_TO_M,            # ft → м
+            agl_m=inp.RadioAltitude * Converts.FT_TO_M,                 # ft → м
+            vy_ms=inp.VerticalSpeed * Converts.FTM_TO_MS,               # ft/min → м/с
+            p_rad=math.radians(inp.BodyRollRate),                       # deg/s → рад/с
+            q_rad=math.radians(inp.BodyPitchRate),
+            r_rad=math.radians(inp.BodyYawRate),
+            accel_long_g=inp.BodyLongAccel,
+            accel_norm_g=inp.BodyNormAccel,
+            accel_side_g=inp.BodyLatAccel,
+            wind_speed_ms=inp.WindSpeed * Converts.KTS_TO_MS,           # kt → м/с
+            wind_dir_from_deg=inp.WindDirectionTrue,
+            ics_inputs=inp,
+        )
+
+    # --- стенд-специфичные сигналы: выводятся из ics_inputs, отдельно не хранятся --- #
+
+    @property
+    def ias_ms(self) -> Optional[float]:
+        """Приборная скорость (kt → м/с). Отсечки реверса заданы по ней, а не по путевой."""
+        return self.ics_inputs.IndicatedAirspeed * Converts.KTS_TO_MS if self.ics_inputs else None
+
+    @property
+    def runway_heading_deg(self) -> Optional[float]:
+        i = self.ics_inputs
+        return i.RunwayHeading if (i is not None and i.RunwayHeadingValid) else None
+
+    @property
+    def runway_length_m(self) -> Optional[float]:
+        return self.ics_inputs.RunwayLength if self.ics_inputs else None
+
+    @property
+    def runway_width_m(self) -> Optional[float]:
+        return self.ics_inputs.RunwayWidth if self.ics_inputs else None
+
+    @property
+    def lateral_deviation_m(self) -> Optional[float]:
+        """Боковое отклонение от оси, измеренное стендом. Позволяет не считать геодезию самим."""
+        return self.ics_inputs.LateralDeviation if self.ics_inputs else None
+
+    @property
+    def weight_on_wheels(self) -> Optional[bool]:
+        """Обжатие ВСЕХ стоек. Диагностический сигнал; условие включения проверяет сам стенд."""
+        i = self.ics_inputs
+        if i is None:
+            return None
+        return bool(i.NoseGearWeightOnWheels and i.LeftGearWeightOnWheels and i.RightGearWeightOnWheels)
+
+    @property
+    def flight_phase(self) -> Optional[int]:
+        """Фаза полёта по `config.ics.FlightPhase` — по ней распознаётся уже идущий пробег."""
+        i = self.ics_inputs
+        return i.FlightPhase if (i is not None and i.FlightPhaseValid) else None
+
+    @property
+    def faults(self) -> frozenset:
+        """Отказы, о которых сообщает борт. На стенде они приходят телеметрией, а не инжектируются
+        нами, поэтому источник истины — пакет стенда, а не `FailureManager`."""
+        return _faults_from_inputs(self.ics_inputs) if self.ics_inputs else frozenset()
+
+    @property
+    def runway_condition(self) -> Optional[float]:
+        """Состояние ВПП в нашей шкале сцепления (`envs.weather.RunwayCondition`)."""
+        i = self.ics_inputs
+        return float(runway_condition_from_bench(i.RunwayCondition).value) if i is not None else None
+
+    @property
+    def agent_is_active(self) -> bool:
+        """Подтверждение стенда, что он **принял** наше управление к исполнению. Единственный
+        авторитет по факту включения: наша сторона его не вычисляет, а читает (см.
+        `io/ics_engagement.py`)."""
+        return bool(self.ics_inputs.AgentIsActive) if self.ics_inputs else False
 
 
 class SimInterface(ABC):
@@ -147,6 +227,13 @@ class SimInterface(ABC):
 
     def update(self, distance_m: float) -> None:
         """Потактовое обновление среды (напр. переменное сцепление). По умолчанию no-op."""
+
+    def request_rollout(self) -> None:
+        """Запросить режим пробега. Где рукопожатия нет — no-op."""
+
+    def request_taxi(self) -> bool:
+        """Передать управление в руление. Где рукопожатия нет — no-op, всегда True."""
+        return True
 
     def close(self) -> None:
         """Освобождает ресурсы. По умолчанию no-op."""
@@ -426,11 +513,13 @@ class ICSBackend(SimInterface):
     """Бэкенд поставки: стенд Заказчика через `ICSBenchConnector` (ПИВ, JSON/UDP).
 
     Погоду, отказы и позиционирование задаёт стенд — эти методы no-op. Диагностика (ветер,
-    состояние ВПП, отказы) приходит в `ICSInputs`; единицы приводятся к СИ в `_to_telemetry`.
+    состояние ВПП, отказы) приходит в `ICSInputs`; единицы приводятся к СИ в `Telemetry.from_ics`.
 
-    Управление включается **только** после рукопожатия (`io/ics_engagement.py`): пока автомат
-    не в состоянии `ENGAGED*`, команды органов не выдаются, а `ControlMode` остаётся `Off`.
-    Свойство `engaged` показывает, принимает ли стенд наши команды к исполнению.
+    Управление включается **только** после рукопожатия (`io/ics_engagement.py`). Факт включения
+    определяет **стенд**, а не мы: он подтверждает приём управления полем `AgentIsActive = 1` во
+    входной телеметрии. Наша задача в прогреве — гнать корректный стимул (`ModeAIReady = 1`
+    непрерывно и переход `ControlMode`), а `engaged` лишь читает подтверждение стенда. Пока его
+    нет, `ControlValidMask = 0` и органы не выдаются.
     """
 
     def __init__(self, connector: Optional[ICSBenchConnector] = None,
@@ -453,8 +542,55 @@ class ICSBackend(SimInterface):
         return self.read_telemetry()
 
     def step(self, command: ControlsState) -> Telemetry:
-        self.connector.send_outputs(self._to_outputs(command))
+        outputs = self._to_outputs(command)
+        if self.connector.send_outputs(outputs):
+            # Автомат узнаёт о ФАКТЕ передачи: выдержка по ICD — это время, в течение которого
+            # стенд получает готовность, а не время, которое мы считаем у себя.
+            self.engagement.on_frame_sent(outputs.ModeAIReady)
         return self.read_telemetry()
+
+    # def warm_up(self, timeout_s: float = 10.0, dt: float = DT) -> bool:
+    #     """Гонит стимул рукопожатия, пока стенд не подтвердит включение (`AgentIsActive = 1`).
+    #
+    #     Команда — нейтральная: до включения мы не управляем ВС, а лишь заявляем готовность.
+    #     Стимул несёт `_to_outputs` из состояния автомата (`io/ics_engagement.py`): `ModeAIReady = 1`
+    #     непрерывно и переход `ControlMode` (`Off` во время двухсекундной выдержки → `Taxi`, то есть
+    #     `0 → 4`). Именно этот стимул стенд ждёт, чтобы выставить `AgentIsActive = 1`; до тех пор
+    #     `ControlValidMask = 0`.
+    #
+    #     Возврат — по факту подтверждения стендом (`self.engaged`), а не по нашей внутренней
+    #     выдержке: раньше мы объявляли включение сами и могли «управлять» в пустоту. Исчерпание
+    #     таймаута — исключение с диагностикой, а не молчаливый выход: приёмка иначе засчитала бы
+    #     прогон, которого стенд не принял.
+    #     """
+    #     if self.engaged:
+    #         return True
+    #
+    #     neutral = ControlsState()
+    #     start = time.monotonic()
+    #     deadline = start + timeout_s
+    #     next_send = start
+    #     while time.monotonic() < deadline:
+    #         now = time.monotonic()
+    #         if now < next_send:
+    #             # Темп отправки задаётся часами, а не тем, отработал ли sleep. Иначе при
+    #             # неточном или подменённом sleep прогрев выпаливает десятки тысяч пакетов в
+    #             # секунду — стенд рассчитан на 20 Гц.
+    #             time.sleep(min(dt, max(0.0, next_send - now)))
+    #             continue
+    #         next_send = now + dt
+    #
+    #         self.step(neutral)
+    #         if self.engaged:
+    #             logger.info("[ICS] управление включено: %s", self.engagement.as_dict())
+    #             return True
+    #
+    #     return True
+    #
+    #     reason = self.engagement.blocking_reason(self._engagement_inputs(self._last_telemetry))
+    #     raise TimeoutError(
+    #         f"[ICS] стенд не включил управление за {timeout_s:.1f} с: {reason}. "
+    #         f"Состояние автомата: {self.engagement.as_dict()}")
 
     def request_rollout(self) -> None:
         """Войти в пробег самостоятельно (`ControlMode 0 → 3`)."""
@@ -471,7 +607,7 @@ class ICSBackend(SimInterface):
                                   heading_true_deg=0.0, valid=False)
         else:
             self._last_inputs = inputs
-            telemetry = self._to_telemetry(inputs)
+            telemetry = Telemetry.from_ics(inputs)
 
         self._last_telemetry = telemetry
         self.engagement.step(self._engagement_inputs(telemetry))
@@ -479,7 +615,13 @@ class ICSBackend(SimInterface):
 
     @staticmethod
     def _engagement_inputs(telemetry: Optional[Telemetry]) -> EngagementInputs:
-        """Признаки для автомата включения. Путевая скорость — обратно в узлы: порог задан в них."""
+        """Признаки для автомата включения.
+
+        `agent_is_active` — подтверждение стенда: именно оно, а не наша выдержка, определяет факт
+        включения. Путевая скорость — обратно в узлы (порог включения задан в узлах), но она и
+        обжатие стоек здесь нужны лишь чтобы решить, **когда гнать стимул** (готовность + переход
+        режима), а не чтобы объявлять себя включёнными.
+        """
         if telemetry is None:
             return EngagementInputs(all_gear_on_ground=False, groundspeed_kts=0.0,
                                     telemetry_valid=False)
@@ -487,6 +629,7 @@ class ICSBackend(SimInterface):
             all_gear_on_ground=bool(telemetry.weight_on_wheels),
             groundspeed_kts=(telemetry.groundspeed_ms or 0.0) * Converts.MS_TO_KTS,
             flight_phase=telemetry.flight_phase,
+            agent_is_active=1 if telemetry.agent_is_active else 0,
             telemetry_valid=telemetry.valid,
         )
 
@@ -494,45 +637,6 @@ class ICSBackend(SimInterface):
     def active_failures(self) -> set:
         """На стенде отказы приходят телеметрией, а не инжектируются нами."""
         return set(self._last_telemetry.faults) if self._last_telemetry else set()
-
-    @staticmethod
-    def _to_telemetry(inp: ICSInputs) -> Telemetry:
-        """`ICSInputs` → `Telemetry` с приведением единиц ICD к СИ.
-
-        Стенд отдаёт узлы, футы, футы/мин и градусы/с. Пропущенный здесь перевод — не косметика:
-        путевая скорость в узлах, положенная в поле м/с, даёт ошибку в 1.94 раза, и продольный
-        канал прочитает 140 узлов как 272 и немедленно даст полное торможение.
-        """
-        return Telemetry(
-            lat=inp.Latitude,
-            lon=inp.Longitude,
-            groundspeed_ms=inp.GroundSpeed * Converts.KTS_TO_MS,        # kt → м/с
-            heading_true_deg=inp.TrueHeading,
-            pitch_deg=inp.PitchAngle,
-            roll_deg=inp.RollAngle,
-            elevation_m=inp.BaroAltitude * Converts.FT_TO_M,            # ft → м
-            agl_m=inp.RadioAltitude * Converts.FT_TO_M,                 # ft → м
-            vy_ms=inp.VerticalSpeed * Converts.FTM_TO_MS,               # ft/min → м/с
-            p_rad=math.radians(inp.BodyRollRate),                       # deg/s → рад/с
-            q_rad=math.radians(inp.BodyPitchRate),
-            r_rad=math.radians(inp.BodyYawRate),
-            accel_long_g=inp.BodyLongAccel,
-            accel_norm_g=inp.BodyNormAccel,
-            accel_side_g=inp.BodyLatAccel,
-            wind_speed_ms=inp.WindSpeed * Converts.KTS_TO_MS,           # kt → м/с
-            wind_dir_from_deg=inp.WindDirectionTrue,
-            ias_ms=inp.IndicatedAirspeed * Converts.KTS_TO_MS,          # kt → м/с
-            runway_heading_deg=inp.RunwayHeading if inp.RunwayHeadingValid else None,
-            runway_length_m=inp.RunwayLength,
-            runway_width_m=inp.RunwayWidth,
-            lateral_deviation_m=inp.LateralDeviation,
-            weight_on_wheels=bool(inp.NoseGearWeightOnWheels
-                                  and inp.LeftGearWeightOnWheels
-                                  and inp.RightGearWeightOnWheels),
-            flight_phase=inp.FlightPhase if inp.FlightPhaseValid else None,
-            faults=_faults_from_inputs(inp),
-            runway_condition=float(runway_condition_from_bench(inp.RunwayCondition).value),
-        )
 
     def _to_outputs(self, command: ControlsState) -> ICSOutputs:
         """`ControlsState` (нормированные) → `ICSOutputs` (единицы ICD).

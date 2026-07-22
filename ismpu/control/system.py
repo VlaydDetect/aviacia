@@ -115,6 +115,15 @@ class ControllingSystem:
 
         return False
 
+    def hand_over_to_taxi(self) -> bool:
+        """Передать управление в руление (`ControlMode 3 → 4`) — пробег окончен.
+
+        Вызывается, когда контур объявил достижение скорости руления. Без этого стенд остаётся
+        в режиме пробега, хотя ВС уже рулит. Разрешающее условие (обжатие стоек) проверяет сам
+        бэкенд; на X-Plane метод — no-op.
+        """
+        return self._require_sim().request_taxi()
+
     def _read(self):
         return self._require_sim().read_telemetry()
 

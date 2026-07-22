@@ -127,6 +127,11 @@ class RolloutEnv:
     def reset(self, scenario: Scenario, *, seed=None):
         self._scenario = scenario
         telemetry = self.sim.reset(scenario)          # телепорт + погода + отказы (среда)
+        # Рукопожатие ДО первого шага: иначе такты прогрева попали бы в `_steps`, reward и
+        # objective, хотя ВС в это время нами не управлялось. На X-Plane — no-op.
+        if not self.sim.warm_up():
+            raise RuntimeError("симулятор не включил управление — эпизод начинать нельзя")
+        telemetry = self.sim.read_telemetry()
         scenario.apply_control(self.controller)        # seed PID пресета + активация отказа
         self._preset_gains = base_gains_from_pids(self.controller.pids)  # пресет-якорь Shield
         if self.shield is not None:
@@ -167,7 +172,11 @@ class RolloutEnv:
         self._history.append(obs)
         reward, components, guidance = self._reward(post, command, shield_report)
 
-        # 6) Завершение.
+        # 6) Завершение. Пробег окончен → передаём управление в руление (ControlMode 3 → 4);
+        # где рукопожатия нет, это no-op.
+        if break_control:
+            self.sim.request_taxi()
+
         off_runway = guidance is not None and abs(guidance["xte"]) > OFF_RUNWAY_XTE_M
         terminated = bool(break_control or off_runway or not post.valid)
         self._steps += 1
@@ -175,7 +184,8 @@ class RolloutEnv:
 
         self._prev_command = _snapshot_command(command)
         info = {"reward_components": components, "shield": shield_report,
-                "break_control": break_control, "off_runway": off_runway}
+                "break_control": break_control, "off_runway": off_runway,
+                "engaged": self.sim.engaged}
         if terminated or truncated:
             # Сводка эпизода — для приёмки (runtime/evaluate.py), веса SFT-меток и отбора
             # чекпоинтов. Считается из тех же отсчётов, что и потактовый reward.
