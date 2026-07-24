@@ -73,6 +73,12 @@ class ApproachResult:
 
     loc_dots: float = 0.0
     gs_dots: float = 0.0
+    course_deg: float = 0.0
+    """Отклонение от курса в градусах (`loc_dots · loc_full_scale_deg`) — для допуска ТЗ 5.1.2.1."""
+    glideslope_deg: float = 0.0
+    """Отклонение от глиссады в градусах (`gs_dots · gs_full_scale_deg`) — для допуска ТЗ 5.1.2."""
+    go_around: bool = False
+    """Такт посчитан законом ухода на второй круг, а не заходом."""
     target_heading_deg: float = 0.0
     heading_error_deg: float = 0.0
     target_roll_deg: float = 0.0
@@ -160,6 +166,8 @@ class ApproachChannel:
         target_vs = self._vertical_target(inp, cfg, res)
         self._pitch(inp, cfg, limits, dt, target_vs, res)
         self._throttle(inp, cfg, dt, res)
+        res.course_deg = res.loc_dots * cfg.loc_full_scale_deg
+        res.glideslope_deg = res.gs_dots * cfg.gs_full_scale_deg
         res.envelope_warnings = self._envelope_warnings(inp, limits, res)
 
         state.cmd_aileron = res.aileron_deg
@@ -173,6 +181,63 @@ class ApproachChannel:
         state.quality_lateral = abs(res.loc_dots)
         state.quality_heading = abs(res.heading_error_deg)
         state.quality_speed = abs(res.target_ias_kt - inp.IndicatedAirspeed)
+
+        self.result = res
+        return res
+
+    def go_around_command(self, dt: float, state, telemetry) -> ApproachResult:
+        """Такт ухода на второй круг: взлётный режим, кабрирование, крылья в горизонт.
+
+        Заход больше не ведётся — локализатор и глиссаду не отслеживаем. Тангаж ведётся к
+        **положительной** вертикальной скорости `go_around_target_vs_fpm` тем же `pitch_pid`, что
+        и заход (отдельного закона набора нет), крен — к нулю, РУД — на полный вперёд максимальным
+        темпом. `ControlMode` остаётся `Approach`: смена режима в воздухе сбрасывает автопилот
+        стенда. Выравнивание принудительно снимается — на уходе оно неприменимо.
+        """
+        inp = getattr(telemetry, "ics_inputs", None) if telemetry is not None else None
+        if telemetry is None or not telemetry.valid or inp is None:
+            state.neutralize_airborne()
+            return self.result
+
+        cfg = self.config
+        dt = clamp(dt, cfg.dt_min_s, cfg.dt_max_s)
+        res = ApproachResult()
+        res.go_around = True
+        self._flare_active = False
+
+        limits = self._limits(inp, res)
+
+        # Набор: тангаж ведётся к положительной вертикальной скорости тем же продольным контуром.
+        res.groundspeed_fpm = max(inp.GroundSpeed, 35.0) * 101.268591
+        target_vs = cfg.go_around_target_vs_fpm
+        res.target_vs_fpm = target_vs
+        self._pitch(inp, cfg, limits, dt, target_vs, res)
+
+        # Крылья в горизонт: уставка крена 0, руль направления 0.
+        res.roll_limit_deg = roll_limit_deg(inp.RadioAltitude, cfg.max_roll_target_deg)
+        res.target_roll_deg = clamp(cfg.go_around_roll_target_deg,
+                                    -res.roll_limit_deg, res.roll_limit_deg)
+        roll_error = res.target_roll_deg - inp.RollAngle
+        res.aileron_deg = self.roll_pid.compute(roll_error, dt, measurement=inp.RollAngle)
+        res.rudder_deg = 0.0
+
+        # Взлётный режим: РУД → полный вперёд максимальным темпом на оба двигателя.
+        self._throttle_norm = cfg.go_around_throttle_norm
+        res.throttle_norm = cfg.go_around_throttle_norm
+        res.throttle_target_angle_deg = cfg.go_around_throttle_norm * cfg.throttle_forward_max_deg
+        res.throttle_left_rate_deg_s = cfg.throttle_left_rate_sign * cfg.throttle_rate_max_deg_per_s
+        res.throttle_right_rate_deg_s = cfg.throttle_right_rate_sign * cfg.throttle_rate_max_deg_per_s
+
+        state.cmd_aileron = res.aileron_deg
+        state.cmd_elevator = res.elevator_g
+        state.rudder_cmd = res.rudder_deg / RUDDER_MAX_DEG
+        state.cmd_throttle_l_rate = res.throttle_left_rate_deg_s
+        state.cmd_throttle_r_rate = res.throttle_right_rate_deg_s
+        state.cmd_throttle_norm = res.throttle_norm
+        # На уходе органы не выдерживают ни оси, ни скорости — показатели качества неприменимы.
+        state.quality_lateral = 0.0
+        state.quality_heading = 0.0
+        state.quality_speed = 0.0
 
         self.result = res
         return res

@@ -123,18 +123,23 @@ Read these before making architectural changes — they define the target design
 - `ismpu/io/` — transport: `ics_connector.py` (`ICSInputs`/`ICSOutputs`/`ICSBenchConnector`),
   `ics_engagement.py` (the engagement state machine).
 - `ismpu/control/` — the classical loop: `pid.py`, `runway_tracker.py`, `trajectory.py`, `channels.py`
-  (`ControlsState` + the two ground channels), `approach.py` (`ApproachChannel` — the airborne law),
-  `flight.py` (`FlightSegment` + the transitions), `system.py` (`ControllingSystem` — the segment
-  supervisor), `failures.py`.
+  (`ControlsState` + the two ground channels), `approach.py` (`ApproachChannel` — the airborne law +
+  `go_around_command`, the TOGA/climb/wings-level law), `tolerance.py` (`evaluate_approach_tolerances` — the
+  runtime ТЗ-tolerance monitor + `ToleranceReport`, distinct from the report-only `_envelope_warnings`),
+  `flight.py` (`FlightSegment` + the transitions + `above_decision_height`/`at_lateral_alignment_gate`),
+  `system.py` (`ControllingSystem` — the segment supervisor + the go-around decision `_should_go_around` and
+  maneuver `_go_around_step`/`GoAroundManeuver`), `failures.py`.
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — the **fallback** when the bench doesn't publish runway
   data), `constants.py`, `scenarios.py` (rollout PID presets per scenario + the conditions each was
   calibrated for; `ScenarioConfig.draft` flags uncalibrated), `run_matrix.py` (the customer's run matrix as
   data), `approach.py` (`ApproachConfig` + `APPROACH_PRESETS` — the static
-  airborne settings and the three airborne PID specs), `envelope.py` (МС-21 approach limits: VAPP/VSR1/VFE,
-  alpha protection, touchdown limits, roll limit by radio altitude), `ics.py` (ICD constants: units,
+  airborne settings, the three airborne PID specs, the ddm→degree map and the go-around params), `envelope.py`
+  (МС-21 approach limits: VAPP/VSR1/VFE, alpha protection, touchdown limits, roll limit by radio altitude),
+  `criticality.py` (Приложение 1 — the АП-25 5-level `SpecialSituation` scale + trajectory tolerance bands:
+  lateral `Zпред`, sink/touchdown-speed/load-factor), `ics.py` (ICD constants: units,
   actuator limits, valid-mask bits, engagement timings, flight phases), `regulators.py`
   (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` — neutral, breaks a shield↔gain_space cycle),
-  `requirements.py` (the ТЗ acceptance thresholds).
+  `requirements.py` (the ТЗ acceptance thresholds + go-around decision height / debounce).
 - `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `train.py` (PPO loop + `smoke_train`,
   `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start), `evaluate.py` (ТЗ acceptance +
   baselines + admission gate). `deploy.py` comes in Phase 6.
@@ -286,6 +291,36 @@ port as the control law — porting the law alone leaves the aircraft flying on 
   the valid flag cleared is indistinguishable from "dead on the centreline".
 - **Loss of `AgentIsActive` mid-run** → the loop stops. Otherwise it passes silently: the mask goes to 0, the
   controller keeps computing and printing, and the run is scored as a success with zero actuator authority.
+
+### Tolerance monitoring & go-around (airborne fallback)
+
+The **allowed intervals** the aircraft dynamics must stay in come from two documents. The ТЗ §5 hard numbers
+(course ≤0.7°, glideslope ≤0.5/0.7/1° by fault, axis ±5 m at H=30 m, speed envelope) live in
+`config/requirements.py`; the МС-21 **Приложение 1** criticality classification (АП-25 5-level
+Normal/УУП/СС/АС/КС + the trajectory bands: lateral `Zпред = 0.5·B − 0.5·Zш`, sink 472/600/736 fpm, touchdown
+speed, load factors) lives in `config/criticality.py`.
+
+`control/tolerance.py::evaluate_approach_tolerances` runs **every approach tick** and returns a
+`ToleranceReport` (`landing_allowed` + per-parameter flags + a diagnostic `SpecialSituation`). It is distinct
+from `ApproachChannel._envelope_warnings`, which stays report-only — this monitor is the one wired to *act*.
+Glideslope tolerance is picked by the reported fault (stab → 1°, gear → 0.7°, else 0.5°). It never touches the
+command; the decision belongs to the loop above it.
+
+**Go-around** is the airborne fallback: if the ТЗ tolerances are not met, *landing is refused*. In
+`system.py::_should_go_around` it fires only **in the air** (segment `APPROACH`), only **above the 30 m
+decision height** (`above_decision_height`; below it landing is committed — no go-around even on a bounce), on
+a **debounced** tolerance violation (`GO_AROUND_CONFIRM_TICKS`, so ILS noise doesn't trip it), and only with
+**reverse stowed** (`_reverse_stowed` — "if reverse is engaged, takeoff is impossible"; trivially true in the
+air today, but the guard is the gate for a future ground path). The ±5 m axis check is active only in a band
+just above the gate (`at_lateral_alignment_gate`); higher up the course tolerance bounds lateral position.
+
+The maneuver (`ApproachChannel.go_around_command`, driven by `_go_around_step`) commands **TOGA** (throttle
+norm→1 at max rate), **nose-up** (a positive climb VS target through the same `pitch_pid`), and **wings level**
+(roll target 0). `ControlMode` stays `Approach` throughout — changing it mid-air resets the bench autopilot.
+Once the climb is established (positive VS **and** altitude gained over the entry point, or a safety timeout),
+the loop stops and `control_exception` releases the channels (`deactivate` → `ControlMode=Off`, mask 0) — that
+release **is** "hand control to the pilot". The go-around is a terminal branch off `APPROACH`; it never
+re-enters the approach law, so the forward-only segment invariant holds.
 
 ## Control architecture (`ismpu/control/`)
 

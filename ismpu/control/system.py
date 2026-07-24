@@ -16,20 +16,31 @@
 """
 
 from typing import Optional
+from dataclasses import dataclass
 
 from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import ReferenceTrajectory, VelocityLaw
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
 from ismpu.control.approach import ApproachChannel
+from ismpu.control.tolerance import evaluate_approach_tolerances
 from ismpu.control.failures import FailureManager, FailureMode
 from ismpu.control.flight import (
     FlightSegment, ApproachRefused, initial_segment, segment_is_decidable, touched_down,
-    approach_blocker, ils_blocker,
+    approach_blocker, ils_blocker, above_decision_height, at_lateral_alignment_gate,
 )
 from ismpu.config.approach import ApproachConfig
 from ismpu.config.constants import INITIAL_SPEED_KTS, TARGET_SPEED_KTS
+from ismpu.config.requirements import GO_AROUND_CONFIRM_TICKS
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
+
+
+@dataclass
+class GoAroundManeuver:
+    """Состояние идущего ухода на второй круг. Пока он активен, заход не ведётся."""
+    reason: str
+    entry_radio_altitude_ft: float
+    elapsed_s: float = 0.0
 
 
 class ControllingSystem:
@@ -69,6 +80,14 @@ class ControllingSystem:
         self.approach_channel = ApproachChannel(approach_config)
         self.abort_reason: Optional[str] = None
 
+        # Уход на второй круг (fallback в воздухе). `go_around` активен → заход не ведётся.
+        self.go_around: Optional[GoAroundManeuver] = None
+        self.go_around_reason: Optional[str] = None
+        self.tolerance_report = None
+        """Отчёт монитора допусков за последний такт захода (диагностика/логи)."""
+        self._violation_ticks = 0
+        """Дебаунс триггера ухода: сколько тактов подряд допуски не выполняются."""
+
     def setup(self, pids: dict[str, PIDController],
               lookahead_min=15.0, lookahead_gain=1.5, xte_gain=1.0,
               steering_brake_gain=0.4, steering_rev_gain=0.0, law: VelocityLaw = VelocityLaw.GAUSS_BELL):
@@ -78,6 +97,10 @@ class ControllingSystem:
         # Иначе `break_control`, выставленный в конце прошлого пробега, оставался бы взведён
         # и следующий эпизод завершался бы на первом такте.
         self.state.reset()
+        self.go_around = None
+        self.go_around_reason = None
+        self.tolerance_report = None
+        self._violation_ticks = 0
 
         tracker = RunwayTracker(lookahead_min, lookahead_gain, xte_gain)
         self.lateral_channel = LateralChannel(pids["runway_center_pid"], tracker,
@@ -217,6 +240,11 @@ class ControllingSystem:
         неприменим (глиссады уже нет, а РУД пора отдавать реверсу), и такт нужно считать уже
         наземными каналами. Иначе первый такт пробега уходил бы с командой захода.
         """
+        # Уход на второй круг — поглощающее состояние: пока он идёт, заход не ведётся и касание
+        # не проверяется (мы уходим вверх, а не садимся).
+        if self.go_around is not None:
+            return self._go_around_step(dt, telemetry)
+
         if touched_down(telemetry):
             self.hand_over_to_rollout()
             return self._ground_step(dt)
@@ -233,6 +261,16 @@ class ControllingSystem:
             return self._abort_approach(blocker)
 
         self.approach_channel.calc_commands(dt, self.state, telemetry)
+
+        # Проверка допусков ТЗ на каждом такте. Если выше высоты решения они устойчиво не
+        # выполняются — садиться нельзя: заход прерывается уходом на второй круг.
+        self.tolerance_report = evaluate_approach_tolerances(
+            telemetry, self.approach_channel.result, self.approach_channel.result.limits,
+            telemetry.faults, at_decision_gate=at_lateral_alignment_gate(telemetry))
+        reason = self._should_go_around(telemetry, self.tolerance_report)
+        if reason is not None:
+            self._start_go_around(reason, telemetry)
+            self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
         return False
 
     def _abort_approach(self, reason: str) -> bool:
@@ -242,6 +280,81 @@ class ControllingSystem:
         self.state.neutralize_airborne()
         self.state.break_control = True
         return True
+
+    # ------------------------------------------------------------------ #
+    # Уход на второй круг (fallback в воздухе)
+    # ------------------------------------------------------------------ #
+
+    def _reverse_stowed(self) -> bool:
+        """Реверс убран: команды обратной тяги нулевые.
+
+        В воздухе реверс не выдаётся вовсе, поэтому guard тут всегда истинен — но он прямо
+        кодирует требование «если реверс уже включён, взлёт невозможен» и готов к тому дню, когда
+        уход появится и на пробеге.
+        """
+        return self.state.cmd_rev_l == 0.0 and self.state.cmd_rev_r == 0.0
+
+    def _should_go_around(self, telemetry, report) -> Optional[str]:
+        """Нужно ли уходить на второй круг по этому такту. → причина или `None`.
+
+        Только **в воздухе** (участок захода) и только **выше высоты решения** (30 м): на земле и
+        ниже 30 м посадка неизбежна, ухода нет даже при козлении. Реверс должен быть убран.
+        Срабатывает по **устойчивому** невыполнению допусков ТЗ (дебаунс `GO_AROUND_CONFIRM_TICKS`),
+        а не по одиночному выбросу шумного сигнала ILS.
+        """
+        if self.segment is not FlightSegment.APPROACH:
+            return None
+        if not above_decision_height(telemetry):
+            self._violation_ticks = 0
+            return None
+        if not self._reverse_stowed():
+            return None
+        if report is None or report.landing_allowed:
+            self._violation_ticks = 0
+            return None
+        self._violation_ticks += 1
+        if self._violation_ticks < GO_AROUND_CONFIRM_TICKS:
+            return None
+        return f"допуски захода не выполнены ({', '.join(report.violations)})"
+
+    def _start_go_around(self, reason: str, telemetry) -> None:
+        """Начать уход: зафиксировать состояние манёвра и высоту входа."""
+        ra = telemetry.radio_altitude_ft if telemetry is not None else None
+        self.go_around = GoAroundManeuver(reason=reason, entry_radio_altitude_ft=ra or 0.0)
+        self.go_around_reason = reason
+        self._violation_ticks = 0
+        print(f"[ControllingSystem] Уход на второй круг: {reason}")
+
+    def _go_around_step(self, dt: float, telemetry) -> bool:
+        """Такт манёвра ухода. → True, когда набор устойчив (пора отдать управление пилоту).
+
+        Взлётный режим + кабрирование + крылья в горизонт (`ApproachChannel.go_around_command`).
+        `ControlMode` не меняется (остаётся `Approach`): смена режима в воздухе сбрасывает
+        автопилот стенда. Завершение = устойчивый набор или страховочный таймаут; дальше цикл
+        останавливается, и `control_exception` снимает заявку каналов — это и есть передача пилоту.
+        """
+        maneuver = self.go_around
+        maneuver.elapsed_s += dt
+        cfg = self.approach_channel.config
+        if telemetry is None or not telemetry.valid:
+            self.abort_reason = "уход прерван: нет валидной телеметрии со стенда"
+            self.state.neutralize_airborne()
+            return True
+        self.approach_channel.go_around_command(dt, self.state, telemetry)
+        if self._climb_established(telemetry) or maneuver.elapsed_s >= cfg.go_around_max_seconds:
+            print("[ControllingSystem] Набор установлен — управление передаётся пилоту.")
+            self.state.neutralize_airborne()
+            return True
+        return False
+
+    def _climb_established(self, telemetry) -> bool:
+        """Набор устойчив: есть и вертикальная скорость вверх, и прирост радиовысоты над входом."""
+        inp = telemetry.ics_inputs
+        cfg = self.approach_channel.config
+        climbing = inp.VerticalSpeed >= cfg.go_around_min_climb_fpm
+        gained = ((telemetry.radio_altitude_ft or 0.0) - self.go_around.entry_radio_altitude_ft
+                  >= cfg.go_around_min_gain_ft)
+        return bool(climbing and gained)
 
     def _ground_step(self, dt: float) -> bool:
         """Такт пробега/руления: два канала, финальные пределы, деградация отказов."""

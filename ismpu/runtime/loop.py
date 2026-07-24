@@ -54,6 +54,10 @@ def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
                     if controller.segment is FlightSegment.ROLLOUT:
                         # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
                         controller.hand_over_to_taxi()
+                    elif controller.go_around_reason is not None:
+                        # Уход на второй круг: заявка каналов снимается ниже (control_exception),
+                        # руление не запрашиваем — ВС в воздухе, управление уходит пилоту.
+                        print(f"[loop] уход на второй круг: {controller.go_around_reason}")
                     raise KeyboardInterrupt
 
                 if _lost_engagement(controller, sim):

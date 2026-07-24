@@ -20,6 +20,9 @@ from enum import Enum
 from ismpu.config.ics import (
     ENGAGE_MIN_RADIO_ALTITUDE_FT, TERMINAL_RADIO_ALTITUDE_FT, FlightPhase,
 )
+from ismpu.config.requirements import (
+    GO_AROUND_DECISION_HEIGHT_FT, GO_AROUND_LATERAL_GATE_BAND_FT,
+)
 
 
 class ApproachRefused(RuntimeError):
@@ -107,6 +110,35 @@ def in_terminal_window(telemetry, *, limit_ft: float = TERMINAL_RADIO_ALTITUDE_F
         return True
     ra = telemetry.radio_altitude_ft
     return ra is not None and ra <= limit_ft
+
+
+def above_decision_height(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT) -> bool:
+    """ВС выше высоты решения ухода на второй круг (30 м по ТЗ 5.1.1.2). → уход разрешён.
+
+    Требует **положительно известной** радиовысоты выше порога: без неё уход не инициируется —
+    выставлять взлётный режим и набирать вслепую хуже, чем довести заход. Обжатая основная стойка
+    — уже не воздух: на земле ухода нет даже при козлении.
+    """
+    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+        return False
+    if telemetry.main_gear_contact:
+        return False
+    ra = telemetry.radio_altitude_ft
+    return ra is not None and ra > limit_ft
+
+
+def at_lateral_alignment_gate(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT,
+                              band_ft: float = GO_AROUND_LATERAL_GATE_BAND_FT) -> bool:
+    """Полоса подхода к гейту совмещения с осью ± 5 м: `(30 м, 30 м + band]`.
+
+    Только в ней проверяется боковое отклонение ± 5 м (ТЗ 5.1.1.2, «на высоте 30 м ось совмещена»):
+    это последний рубеж перед высотой решения, а выше него боковое положение ограничивает курсовой
+    допуск, а не эта планка.
+    """
+    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+        return False
+    ra = telemetry.radio_altitude_ft
+    return ra is not None and limit_ft < ra <= limit_ft + band_ft
 
 
 def ils_blocker(telemetry) -> "str | None":
