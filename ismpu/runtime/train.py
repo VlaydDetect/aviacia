@@ -69,9 +69,17 @@ def make_curriculum_provider(generator, trainer: PPOTrainer, total_updates: int,
     """Возвращает `scenario_provider()`: difficulty растёт с номером апдейта PPO."""
     ramp_updates = max(1, int(total_updates * ramp))
 
+    from ismpu.envs.splits import is_signature_holdout
+
     def provider():
         difficulty = min(1.0, trainer.update_idx / ramp_updates)
-        return generator.sample(difficulty)
+        # Все поддерживаемые типы отказов участвуют в train; резервируются
+        # только устойчивые комбинации условий.
+        for _ in range(10_000):
+            scenario = generator.sample(difficulty)
+            if not is_signature_holdout(scenario):
+                return scenario
+        raise RuntimeError("не удалось сэмплировать train signature")
 
     return provider
 
@@ -96,6 +104,13 @@ class CSVLogger:
     def close(self):
         if self._file:
             self._file.close()
+
+    def __enter__(self) -> "CSVLogger":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
 
 # --------------------------------------------------------------------------- #

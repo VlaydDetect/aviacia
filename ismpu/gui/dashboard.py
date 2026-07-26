@@ -32,6 +32,15 @@ class ViewSpec:
     phase: str
 
 
+@dataclass(frozen=True)
+class GainUpdateRequest:
+    request_id: int
+    revision: int
+    pid_key: str
+    gains: dict[str, float]
+    created_monotonic: float
+
+
 VIEW_SPECS = (
     ViewSpec("roll", "Roll", "roll", "approach"),
     ViewSpec("pitch", "Pitch", "pitch", "approach"),
@@ -84,6 +93,7 @@ class DashboardState:
         npgs_active: bool = False,
         max_points: int = 2400,
         export_root: str | Path = "runs/dashboard-exports",
+        tuning_queue_size: int = 64,
     ) -> None:
         self.controller = controller
         self.sim = sim
@@ -99,6 +109,11 @@ class DashboardState:
         self.timeline = deque(maxlen=512)
         self._last_segment = None
         self._lock = threading.RLock()
+        self._tuning_queue: deque[GainUpdateRequest] = deque()
+        self._tuning_queue_size = max(1, int(tuning_queue_size))
+        self._next_request_id = 1
+        self._revision = 0
+        self._accept_tuning = True
         self.replay_source = None
         self.replay_summary = None
 
@@ -176,6 +191,103 @@ class DashboardState:
                 "value": {"pid": pid_key, **clean},
             })
             return {"pid": pid_key, "kp": pid.kp, "ki": pid.ki, "kd": pid.kd}
+
+    def enqueue_gain_update(self, pid_key: str, gains: dict) -> dict:
+        """Валидировать HTTP-запрос и передать запись control-потоку."""
+        if self.controller is None:
+            raise RuntimeError("replay is read-only")
+        if not self.tune_enabled:
+            raise PermissionError("live tuning is disabled; use --dashboard-tune")
+        if self.npgs_active and pid_key in GROUND_PID_KEYS:
+            raise PermissionError("NPGS overwrites ground gains every tick")
+        pids = controller_pids(self.controller)
+        if pid_key not in pids:
+            raise KeyError(pid_key)
+        current = pids[pid_key]
+        complete = {"kp": current.kp, "ki": current.ki, "kd": current.kd}
+        for name, raw in gains.items():
+            if name not in complete:
+                continue
+            value = _finite_or_none(raw)
+            if value is None:
+                raise ValueError(f"{name} must be finite")
+            complete[name] = value
+        if not any(name in gains for name in complete):
+            raise ValueError("at least one of kp, ki, kd is required")
+        with self._lock:
+            if not self._accept_tuning:
+                raise RuntimeError("dashboard is shutting down")
+            if len(self._tuning_queue) >= self._tuning_queue_size:
+                raise OverflowError("tuning queue is full")
+            request = GainUpdateRequest(
+                request_id=self._next_request_id,
+                revision=self._revision + len(self._tuning_queue) + 1,
+                pid_key=pid_key,
+                gains=complete,
+                created_monotonic=time.monotonic(),
+            )
+            self._next_request_id += 1
+            self._tuning_queue.append(request)
+            return {
+                "status": "pending",
+                "request_id": request.request_id,
+                "revision": request.revision,
+                "pid": pid_key,
+            }
+
+    def apply_pending_gain_updates(self) -> list[dict]:
+        """Применяется только control-потоком в начале такта."""
+        applied: list[dict] = []
+        while True:
+            with self._lock:
+                if not self._tuning_queue:
+                    break
+                request = self._tuning_queue.popleft()
+            try:
+                result = self.update_gains(request.pid_key, request.gains)
+                with self._lock:
+                    self._revision = max(self._revision, request.revision)
+                    event = {
+                        "status": "applied",
+                        "request_id": request.request_id,
+                        "revision": request.revision,
+                        **result,
+                    }
+                    self.timeline.append({
+                        "time_s": time.monotonic() - self.started_monotonic,
+                        "event": "tuning_applied",
+                        "value": event,
+                    })
+                applied.append(event)
+            except Exception as exc:
+                event = {
+                    "status": "rejected",
+                    "request_id": request.request_id,
+                    "revision": request.revision,
+                    "reason": str(exc),
+                }
+                with self._lock:
+                    self.timeline.append({
+                        "time_s": time.monotonic() - self.started_monotonic,
+                        "event": "tuning_rejected",
+                        "value": event,
+                    })
+                applied.append(event)
+        return applied
+
+    def cancel_pending_gain_updates(self) -> None:
+        with self._lock:
+            self._accept_tuning = False
+            while self._tuning_queue:
+                request = self._tuning_queue.popleft()
+                self.timeline.append({
+                    "time_s": time.monotonic() - self.started_monotonic,
+                    "event": "tuning_cancelled",
+                    "value": {
+                        "request_id": request.request_id,
+                        "revision": request.revision,
+                    },
+                })
 
     def export_gains(self, *, label: str = "dashboard") -> Path:
         if self.controller is None:
@@ -358,7 +470,15 @@ class DashboardServer:
             self.thread.start()
         return self
 
+    def __enter__(self) -> "DashboardServer":
+        return self.start()
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.stop()
+        return False
+
     def stop(self) -> None:
+        self.state.cancel_pending_gain_updates()
         if self.thread is not None:
             self.httpd.shutdown()
             self.thread.join(timeout=2.0)
@@ -407,8 +527,8 @@ def _handler_factory(state: DashboardState):
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if path.startswith("/api/gains/"):
                     pid_key = unquote(path.rsplit("/", 1)[-1])
-                    result = state.update_gains(pid_key, payload)
-                    self._json(HTTPStatus.OK, result)
+                    result = state.enqueue_gain_update(pid_key, payload)
+                    self._json(HTTPStatus.ACCEPTED, result)
                 elif path == "/api/export":
                     result = state.export_gains(
                         label=str(payload.get("label", "dashboard"))
@@ -424,6 +544,8 @@ def _handler_factory(state: DashboardState):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except RuntimeError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+            except OverflowError as exc:
+                self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc)})
 
     return Handler
 

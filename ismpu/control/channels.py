@@ -242,6 +242,8 @@ class LateralChannel:
         self.steering_rev_gain = steering_rev_gain
         self.w_lat = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
         self.last_diagnostics = {}
+        self.last_guidance = None
+        self._last_guidance_telemetry_id: int | None = None
 
         print("[LateralChannel] Запуск латерального канала.")
 
@@ -255,15 +257,32 @@ class LateralChannel:
         Запасной геодезический путь (`config/runway.py`) остаётся на случай, когда стенд не
         объявляет `RunwayHeadingValid`: тогда ось считается по конфигурации.
         """
-        runway_heading = getattr(telemetry, "runway_heading_deg", None)
+        if self._last_guidance_telemetry_id == id(telemetry):
+            return self.last_guidance
+        runway_heading = getattr(telemetry, "runway_heading_true_deg", None)
         lateral_deviation = getattr(telemetry, "lateral_deviation_m", None)
-        if runway_heading is not None and lateral_deviation is not None:
-            return self.tracker.guidance_from_deviation(
-                heading, runway_heading, lateral_deviation, groundspeed_ms)
+        # Совместимость синтетических кадров: production backend всегда
+        # заполняет runway_heading_true_deg общими константами UUEE 06R.
+        if runway_heading is None and lateral_deviation is not None:
+            runway_heading = getattr(telemetry, "runway_heading_deg", None)
+            if runway_heading is not None:
+                return self.tracker.guidance_from_deviation(
+                    heading, runway_heading, lateral_deviation, groundspeed_ms)
 
         if None in (telemetry.lat, telemetry.lon):
             return None
-        return self.tracker.guidance(telemetry.lat, telemetry.lon, heading, groundspeed_ms)
+        result = self.tracker.guidance(
+            telemetry.lat, telemetry.lon, heading, groundspeed_ms)
+        self.last_guidance = result
+        self._last_guidance_telemetry_id = id(telemetry)
+        return result
+
+    def guidance_for(self, telemetry):
+        """Единый GuidanceState текущего кадра для control/observation/reward."""
+        if not telemetry.valid:
+            return None
+        return self._guidance(
+            telemetry, telemetry.heading_true_deg, telemetry.groundspeed_ms)
 
     def calc_commands(self, dt: float, state: ControlsState, telemetry):
         heading = telemetry.heading_true_deg

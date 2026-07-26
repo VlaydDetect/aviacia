@@ -53,6 +53,7 @@ class TouchdownSetup:
     pitch_deg: float = 0.0
     lateral_offset_m: float = 0.0
     heading_offset_deg: float = 0.0
+    elevation_m: float = 1.5
 
 
 @dataclass(frozen=True)

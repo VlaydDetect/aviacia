@@ -196,6 +196,13 @@ class RunRecorder:
 
     close = finish
 
+    def __enter__(self) -> "RunRecorder":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.finish({"exception": str(exc)} if exc is not None else None)
+        return False
+
     def _write_json(self, name: str, payload: dict) -> None:
         (self.directory / name).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),

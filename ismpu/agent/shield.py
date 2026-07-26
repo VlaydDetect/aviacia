@@ -115,6 +115,37 @@ class ShieldReport:
     def active(self) -> bool:
         return self.level1_active or self.level2_active or self.level3_active or self.fallback
 
+    def snapshot(self) -> "ShieldReportSnapshot":
+        return ShieldReportSnapshot(
+            level1_active=self.level1_active,
+            level2_active=self.level2_active,
+            level3_active=self.level3_active,
+            ood=self.ood,
+            fallback=self.fallback,
+            l_shield=self.l_shield,
+            l_smooth=self.l_smooth,
+            rules=tuple(self.rules),
+        )
+
+
+@dataclass(frozen=True)
+class ShieldReportSnapshot:
+    level1_active: bool
+    level2_active: bool
+    level3_active: bool
+    ood: bool
+    fallback: bool
+    l_shield: float
+    l_smooth: float
+    rules: tuple[str, ...]
+
+    @property
+    def active(self) -> bool:
+        return (
+            self.level1_active or self.level2_active
+            or self.level3_active or self.fallback
+        )
+
 
 @dataclass(frozen=True)
 class ShieldConfig:

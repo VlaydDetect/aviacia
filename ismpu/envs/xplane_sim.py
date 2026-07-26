@@ -17,15 +17,25 @@ from ismpu.config.runway_profiles import RunwayProfile, UUEE_06R, _destination
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.runway_tracker import RunwayTracker
-from ismpu.envs.ics_sim import Telemetry
+from ismpu.envs.ics_sim import Telemetry, TelemetryExtensions
 from ismpu.envs.scenario import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
-from ismpu.envs.sim_interface import ApproachData
+from ismpu.envs.sim_interface import (
+    ApproachData, ShutdownReport, XPlaneDiagnostics,
+)
 from ismpu.envs.weather import WeatherState
 from ismpu.io import datarefs as dr
 from ismpu.io.xplane_connector import XPlaneConnector
 from ismpu.utils.converts import Converts
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_XPLANE_ROLLOUT_FAILURES = frozenset({
+    FailureMode.ENGINE_OUT_LEFT,
+    FailureMode.ENGINE_OUT_RIGHT,
+    FailureMode.REVERSE_LEFT_FAIL,
+    FailureMode.REVERSE_RIGHT_FAIL,
+    FailureMode.NWS_FAIL,
+})
 
 
 class XPlaneSim:
@@ -58,6 +68,7 @@ class XPlaneSim:
         self.settle_s = settle_s
         self._tracker = RunwayTracker()
         self._active_failures: set[FailureMode] = set()
+        self._ignored_failures: set[FailureMode] = set()
         self._engaged = False
         self._mode = "rollout"
         self._last_telemetry = Telemetry.invalid()
@@ -65,6 +76,9 @@ class XPlaneSim:
         self._distance_m = 0.0
         self._last_friction = None
         self._closed = False
+        self._shutdown_report: ShutdownReport | None = None
+        self._ready = False
+        self._missing_or_stale: tuple[str, ...] = ()
         self._sensor_noise = SensorNoise()
         self._random = random.Random(0)
         self.ils_station = None
@@ -83,8 +97,21 @@ class XPlaneSim:
         return self._engaged
 
     @property
-    def active_failures(self) -> set:
-        return set(self._active_failures)
+    def active_failures(self) -> frozenset[FailureMode]:
+        return frozenset(self._active_failures)
+
+    @property
+    def ignored_failures(self) -> frozenset[FailureMode]:
+        return frozenset(self._ignored_failures)
+
+    @property
+    def diagnostics(self) -> XPlaneDiagnostics:
+        return XPlaneDiagnostics(
+            ready=self._ready,
+            ignored_failures=tuple(sorted(f.name for f in self._ignored_failures)),
+            missing_or_stale_datarefs=self._missing_or_stale,
+            last_flight_time=self.connector.value(dr.TOTAL_FLIGHT_TIME),
+        )
 
     def reset(
         self,
@@ -175,8 +202,13 @@ class XPlaneSim:
         heading_noise = self._random.gauss(
             0.0, self._sensor_noise.heading_sigma_deg)
         true_heading = (value(dr.TRUE_PSI) + heading_noise) % 360.0
-        mag_heading = (value(dr.MAG_PSI, true_heading) + heading_noise) % 360.0
-        mag_track = (value(dr.MAG_TRACK, mag_heading) + heading_noise) % 360.0
+        magnetic_available = dr.MAG_PSI in values and dr.MAG_TRACK in values
+        mag_heading = (
+            (value(dr.MAG_PSI) + heading_noise) % 360.0
+            if magnetic_available else math.nan)
+        mag_track = (
+            (value(dr.MAG_TRACK) + heading_noise) % 360.0
+            if magnetic_available else math.nan)
         mag_variation = value(dr.MAGNETIC_VARIATION)
         runway_mag = (self.runway.heading_true_deg - mag_variation) % 360.0
         radio_alt = max(0.0, value(dr.RADIO_ALT_FT, value(dr.Y_AGL) / Converts.FT_TO_M))
@@ -225,6 +257,10 @@ class XPlaneSim:
             lon=lon,
             groundspeed_ms=groundspeed,
             heading_true_deg=true_heading,
+            heading_magnetic_deg=(mag_heading if magnetic_available else None),
+            track_magnetic_deg=(mag_track if magnetic_available else None),
+            runway_heading_true_deg=self.runway.heading_true_deg,
+            runway_heading_magnetic_deg=runway_mag,
             pitch_deg=approach.PitchAngle,
             roll_deg=approach.RollAngle,
             elevation_m=value(dr.ELEVATION),
@@ -239,6 +275,25 @@ class XPlaneSim:
             wind_speed_ms=wind_speed,
             wind_dir_from_deg=wind_dir,
             approach_inputs=approach,
+            extensions=TelemetryExtensions(
+                ias_ms=ias * Converts.KTS_TO_MS,
+                radio_altitude_ft=radio_alt,
+                ils_valid=ils_valid,
+                landing_flaps=measured_landing_flaps(flap_angle),
+                main_gear_contact=main_contact,
+                runway_heading_true_deg=self.runway.heading_true_deg,
+                runway_heading_magnetic_deg=runway_mag,
+                runway_length_m=self.runway.length_m,
+                runway_width_m=self.runway.width_m,
+                lateral_deviation_m=lateral,
+                weight_on_wheels=on_all_gear,
+                flight_phase=(
+                    FlightPhase.LAND_RUN if main_contact
+                    else FlightPhase.APPROACH_ABOVE_30M),
+                faults=frozenset(self._active_failures),
+                weather=self._weather,
+                agent_is_active=self._engaged,
+            ),
             ias_ms_direct=ias * Converts.KTS_TO_MS,
             radio_altitude_ft_direct=radio_alt,
             ils_valid_direct=ils_valid,
@@ -265,6 +320,7 @@ class XPlaneSim:
             if self._mode == "approach"
             else self.profile.ground_commands(command)
         )
+        print(commands)
         for name, value in commands.items():
             self.connector.send_dref(name, value)
         if self._mode != "approach":
@@ -289,13 +345,25 @@ class XPlaneSim:
         self._set_position_and_velocity(
             lat=lat,
             lon=lon,
-            elevation_m=self.runway.elevation_m + 0.9,
+            elevation_m=self.runway.elevation_m + setup.elevation_m,
             heading_deg=heading,
             pitch_deg=setup.pitch_deg,
             speed_knots=setup.speed_knots,
             vertical_speed_fpm=-abs(setup.descent_rate_fpm),
             flap_ratio=1.0,
+            speedbrakes_ratio=-0.5
         )
+
+        self.connector.sendCMND("sim/view/chase")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.sendCMND("sim/general/up_fast")
 
     def teleport_approach(self, setup: ApproachSetup) -> None:
         altitude_m = setup.radio_altitude_ft * Converts.FT_TO_M
@@ -319,6 +387,7 @@ class XPlaneSim:
             speed_knots=setup.ias_knots,
             vertical_speed_fpm=setup.vertical_speed_fpm,
             flap_ratio=setup.flap_ratio,
+            speedbrakes_ratio=0.0
         )
 
     def _set_position_and_velocity(
@@ -332,6 +401,7 @@ class XPlaneSim:
         speed_knots: float,
         vertical_speed_fpm: float,
         flap_ratio: float,
+        speedbrakes_ratio: float,
     ) -> None:
         self.connector.send_position(
             lat=lat,
@@ -341,6 +411,16 @@ class XPlaneSim:
             pitch_deg=pitch_deg,
             heading_true_deg=heading_deg,
         )
+        self.connector.sendCTRL(
+            lat_control=0.0,
+            lon_control=0.0,
+            rudder_control=0.0,
+            throttle=0.0,
+            gear=1,
+            flaps=flap_ratio,
+            speedbrakes=speedbrakes_ratio,
+            park_brake=0.0,
+        )
         heading_rad = math.radians(heading_deg)
         speed_ms = speed_knots * Converts.KTS_TO_MS
         self.connector.send_dref(dr.LOCAL_VX, speed_ms * math.sin(heading_rad))
@@ -348,9 +428,6 @@ class XPlaneSim:
         self.connector.send_dref(dr.LOCAL_VZ, -speed_ms * math.cos(heading_rad))
         for ref in (dr.POS_P, dr.POS_Q, dr.POS_R):
             self.connector.send_dref(ref, 0.0)
-        self.connector.send_dref(dr.FLAP_HANDLE_RATIO, max(0.0, min(1.0, flap_ratio)))
-        self.connector.send_dref(dr.GEAR_HANDLE_DOWN, 1.0)
-        self.connector.send_dref(dr.SPEEDBRAKE_RATIO, -0.5)
 
     def _offset_point(self, lat: float, lon: float, offset_m: float) -> tuple[float, float]:
         if not offset_m:
@@ -409,6 +486,12 @@ class XPlaneSim:
             self._last_friction = friction
 
     def inject_failure(self, mode: FailureMode) -> None:
+        if mode is FailureMode.NONE:
+            return
+        if mode not in SUPPORTED_XPLANE_ROLLOUT_FAILURES:
+            self._ignored_failures.add(mode)
+            logger.info("[X-Plane] отказ %s проигнорирован для rollout", mode.name)
+            return
         left, right = self.profile.engine_indices
         mapping = {
             FailureMode.ENGINE_OUT_LEFT: f"{dr.FAIL_ENGINE}[{left}]",
@@ -419,14 +502,16 @@ class XPlaneSim:
         dataref = mapping.get(mode)
         if dataref is not None:
             self.connector.send_dref(dataref, dr.FAILURE_ENUM_INOP)
-        if mode is not FailureMode.NONE:
-            self._active_failures.add(mode)
+        # NWS не имеет переносимого failure DataRef и моделируется командным
+        # уровнем: опубликованный отказ обнуляет steering_eff в FailureManager.
+        self._active_failures.add(mode)
 
     def clear_failures(self) -> None:
         for index in self.profile.engine_indices:
             self.connector.send_dref(f"{dr.FAIL_ENGINE}[{index}]", dr.FAILURE_ENUM_OK)
             self.connector.send_dref(f"{dr.FAIL_REVERSER}[{index}]", dr.FAILURE_ENUM_OK)
         self._active_failures.clear()
+        self._ignored_failures.clear()
 
     def _capture_overrides(self) -> None:
         for name in (
@@ -455,16 +540,49 @@ class XPlaneSim:
         self._release_overrides()
         self._engaged = False
 
-    def close(self) -> None:
-        if self._closed:
-            return
+    def __enter__(self) -> "XPlaneSim":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.shutdown()
+        return False
+
+    def shutdown(self, frames: int = 10, dt: float = DT) -> ShutdownReport:
+        if self._shutdown_report is not None:
+            return self._shutdown_report
+        actions: list[str] = []
+        errors: list[str] = []
         try:
-            self.deactivate(frames=1, dt=0.0)
-        finally:
+            self.deactivate(frames=frames, dt=dt)
+            actions.extend(("commands_neutralized", "overrides_released"))
+        except Exception as exc:
+            errors.append(f"deactivate: {type(exc).__name__}: {exc}")
+            logger.exception("[X-Plane] ошибка снятия управления")
+            try:
+                self._release_overrides()
+                actions.append("overrides_released")
+            except Exception as release_exc:
+                errors.append(
+                    f"release_overrides: {type(release_exc).__name__}: {release_exc}")
+        try:
             self.connector.close()
-            self._closed = True
+            actions.append("transport_closed")
+        except Exception as exc:
+            errors.append(f"transport_close: {type(exc).__name__}: {exc}")
+            logger.exception("[X-Plane] ошибка закрытия транспорта")
+        self._engaged = False
+        self._closed = True
+        self._shutdown_report = ShutdownReport(
+            backend=self.backend_name, actions=tuple(actions), errors=tuple(errors))
+        return self._shutdown_report
+
+    def close(self) -> None:
+        self.shutdown(frames=1, dt=0.0)
 
     def _wait_until_ready(self) -> None:
+        if self.ready_timeout_s <= 0:
+            self._ready = True
+            return
         deadline = time.monotonic() + self.ready_timeout_s
         previous = None
         increasing = 0
@@ -474,9 +592,19 @@ class XPlaneSim:
             if current is not None and previous is not None and current > previous:
                 increasing += 1
                 if increasing >= 3:
+                    self._ready = True
+                    self._missing_or_stale = ()
                     return
             else:
                 increasing = 0
             previous = current
             time.sleep(0.1)
-        logger.warning("X-Plane не подтвердил готовность за %.1f с", self.ready_timeout_s)
+        missing = [
+            name for name in self.profile.subscriptions
+            if self.connector.value(name, max_age_s=self.stale_after_s) is None
+        ]
+        self._ready = False
+        self._missing_or_stale = tuple(missing)
+        raise TimeoutError(
+            f"X-Plane не подтвердил готовность за {self.ready_timeout_s:.1f} с; "
+            f"last_flight_time={previous!r}; missing_or_stale={missing}")

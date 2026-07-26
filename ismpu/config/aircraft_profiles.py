@@ -66,8 +66,8 @@ class AircraftProfile:
         return {
             dr.LEFT_BRAKE_RATIO: clamp(command.cmd_brake_l, 0.0, 1.0),
             dr.RIGHT_BRAKE_RATIO: clamp(command.cmd_brake_r, 0.0, 1.0),
-            left: clamp(command.cmd_rev_l, -1.0, 0.0),
-            right: clamp(command.cmd_rev_r, -1.0, 0.0),
+            left: clamp(command.cmd_rev_l, 0.0, 1.0),
+            right: clamp(command.cmd_rev_r, 0.0, 1.0),
             dr.YOKE_HEADING_RATIO: clamp(self.yaw_sign * command.rudder_cmd, -1.0, 1.0),
         }
 

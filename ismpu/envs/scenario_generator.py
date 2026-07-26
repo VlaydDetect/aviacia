@@ -35,8 +35,6 @@ _FAILURE_POOL = [
     FailureMode.NWS_FAIL,
     FailureMode.REVERSE_LEFT_FAIL, FailureMode.REVERSE_RIGHT_FAIL,
     FailureMode.ENGINE_OUT_LEFT, FailureMode.ENGINE_OUT_RIGHT,
-    FailureMode.THRUST_LEFT_DEGRADED, FailureMode.THRUST_RIGHT_DEGRADED,
-    FailureMode.GEAR_CONFIG,
 ]
 
 # Пары отказов, несовместимые в одном эпизоде (симметричные/бессмысленные вместе).

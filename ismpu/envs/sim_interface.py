@@ -8,8 +8,60 @@ ICS и X-Plane различаются транспортом и возможно
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from ismpu.control.channels import ControlsState
+    from ismpu.control.failures import FailureMode
+    from ismpu.envs.ics_sim import Telemetry
+    from ismpu.envs.scenario import Scenario
+
+StartMode = Literal["approach", "rollout"]
+
+
+@dataclass(frozen=True)
+class ShutdownReport:
+    """Результат безусловного best-effort отключения backend."""
+
+    backend: str
+    actions: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def successful(self) -> bool:
+        return not self.errors
+
+
+class RunStopReason(str, Enum):
+    COMPLETED = "completed"
+    GO_AROUND = "go_around"
+    ENGAGEMENT_LOST = "engagement_lost"
+    INTERRUPTED = "interrupted"
+    ERROR = "error"
+
+
+@dataclass(frozen=True)
+class RunResult:
+    reason: RunStopReason
+    shutdown: ShutdownReport | None = None
+    details: str | None = None
+
+
+@dataclass(frozen=True)
+class XPlaneDiagnostics:
+    ready: bool = False
+    ignored_failures: tuple[str, ...] = ()
+    missing_or_stale_datarefs: tuple[str, ...] = ()
+    last_flight_time: float | None = None
+
+
+@dataclass(frozen=True)
+class ControlDiagnostics:
+    segment: str
+    guidance: Mapping[str, float | None] | None = None
+    values: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,15 +101,20 @@ class SimInterface(Protocol):
     def engaged(self) -> bool: ...
 
     @property
-    def active_failures(self) -> set: ...
+    def active_failures(self) -> frozenset["FailureMode"]: ...
 
-    def reset(self, scenario: Any = None, *, start: str | None = None): ...
+    def reset(
+        self,
+        scenario: "Scenario | None" = None,
+        *,
+        start: StartMode | None = None,
+    ) -> "Telemetry": ...
 
     def warm_up(self, timeout_s: float = 10.0, dt: float = 0.05) -> bool: ...
 
-    def read_telemetry(self): ...
+    def read_telemetry(self) -> "Telemetry": ...
 
-    def step(self, command): ...
+    def step(self, command: "ControlsState") -> "Telemetry": ...
 
     def request_rollout(self) -> None: ...
 
@@ -65,4 +122,10 @@ class SimInterface(Protocol):
 
     def deactivate(self, frames: int = 10, dt: float = 0.05) -> None: ...
 
+    def shutdown(self, frames: int = 10, dt: float = 0.05) -> ShutdownReport: ...
+
     def close(self) -> None: ...
+
+    def __enter__(self) -> "SimInterface": ...
+
+    def __exit__(self, exc_type, exc, traceback) -> bool: ...

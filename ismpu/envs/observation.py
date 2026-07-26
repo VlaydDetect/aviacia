@@ -94,8 +94,9 @@ class ObservationBuilder:
         # --- Геометрия (guidance пересчитывается по текущей телеметрии) ---
         lon_ch = controller.longitudinal_channel
         lat_ch = controller.lateral_channel
-        g = lat_ch.tracker.guidance(telemetry.lat, telemetry.lon,
-                                    telemetry.heading_true_deg, telemetry.groundspeed_ms)
+        g = lat_ch.guidance_for(telemetry)
+        if g is None:
+            return np.zeros(OBS_DIM, dtype=np.float32)
         feats["xte"] = clip_unit(linear(g["xte"], XTE_SCALE))
         feats["heading_error"] = clip_unit(linear(g["heading_error_deg"], HEADING_SCALE))
         feats["distance_to_end"] = clip_unit(linear(self.runway_length_m - g["along"], self.runway_length_m))

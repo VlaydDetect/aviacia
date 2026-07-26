@@ -21,7 +21,7 @@
 import math
 import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ismpu.io.ics_connector import (
@@ -31,14 +31,16 @@ from ismpu.io.ics_engagement import IcsEngagement, EngagementInputs
 from ismpu.config.ics import (
     BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
     REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
-    AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK,
+    AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK, FlightPhase,
 )
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
+from ismpu.config.envelope import LandingFlapConfiguration
+from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState
-from ismpu.envs.sim_interface import ApproachData
+from ismpu.envs.sim_interface import ApproachData, ShutdownReport
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,27 @@ def _throttle_rate(reverse_level: float, actual_angle_deg: float) -> float:
     return _clamp(rate, -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
 
 
+@dataclass(frozen=True)
+class TelemetryExtensions:
+    """Типизированные backend-расширения общего SI-кадра."""
+
+    ias_ms: Optional[float] = None
+    radio_altitude_ft: Optional[float] = None
+    ils_valid: Optional[bool] = None
+    landing_flaps: Optional[LandingFlapConfiguration] = None
+    main_gear_contact: Optional[bool] = None
+    runway_heading_true_deg: Optional[float] = None
+    runway_heading_magnetic_deg: Optional[float] = None
+    runway_length_m: Optional[float] = None
+    runway_width_m: Optional[float] = None
+    lateral_deviation_m: Optional[float] = None
+    weight_on_wheels: Optional[bool] = None
+    flight_phase: Optional[FlightPhase] = None
+    faults: frozenset[FailureMode] = frozenset()
+    weather: Optional[WeatherState] = None
+    agent_is_active: Optional[bool] = None
+
+
 @dataclass
 class Telemetry:
     """Телеметрия стенда, приведённая к **СИ**.
@@ -77,6 +100,10 @@ class Telemetry:
     lon: float
     groundspeed_ms: float
     heading_true_deg: float
+    heading_magnetic_deg: Optional[float] = None
+    track_magnetic_deg: Optional[float] = None
+    runway_heading_true_deg: Optional[float] = None
+    runway_heading_magnetic_deg: Optional[float] = None
     pitch_deg: Optional[float] = None
     roll_deg: Optional[float] = None
     elevation_m: Optional[float] = None
@@ -93,8 +120,9 @@ class Telemetry:
 
     # Общий воздушный срез. Для ICS это сам ICSInputs (он имеет тот же набор полей),
     # для X-Plane — ApproachData. Сырой пакет ICS остаётся только для аудита.
-    approach_inputs: Optional[object] = None
+    approach_inputs: Optional[ApproachData | ICSInputs] = None
     ics_inputs: Optional[ICSInputs] = None
+    extensions: TelemetryExtensions = field(default_factory=TelemetryExtensions)
 
     # Значения, которые backend может задать без ICSInputs. Суффикс ``_direct``
     # отличает хранимое поле dataclass от публичного property.
@@ -128,6 +156,13 @@ class Telemetry:
             lon=inp.Longitude,
             groundspeed_ms=inp.GroundSpeed * Converts.KTS_TO_MS,        # kt → м/с
             heading_true_deg=inp.TrueHeading,
+            heading_magnetic_deg=(
+                inp.MagneticHeading if inp.MagneticHeadingValid else None),
+            track_magnetic_deg=(
+                inp.TrkAngleMagnetic if inp.TrkAngleMagneticValid else None),
+            runway_heading_true_deg=float(RWY_HEADING_TRUE),
+            runway_heading_magnetic_deg=(
+                inp.RunwayHeading if inp.RunwayHeadingValid else None),
             pitch_deg=inp.PitchAngle,
             roll_deg=inp.RollAngle,
             elevation_m=inp.BaroAltitude * Converts.FT_TO_M,            # ft → м
@@ -345,6 +380,7 @@ class ICSSim:
         self.timeout = timeout
         self.engagement = engagement if engagement is not None else IcsEngagement()
         self._last_telemetry: Optional[Telemetry] = None
+        self._shutdown_report: Optional[ShutdownReport] = None
 
     @property
     def engaged(self) -> bool:
@@ -428,8 +464,41 @@ class ICSSim:
         """Передать управление в руление (`3 → 4`) — по решению вызывающего, что пробег окончен."""
         return self.engagement.request_taxi(self._engagement_inputs(self._last_telemetry))
 
+    def __enter__(self) -> "ICSSim":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.shutdown()
+        return False
+
+    def shutdown(self, frames: int = 10, dt: float = DT) -> ShutdownReport:
+        if self._shutdown_report is not None:
+            return self._shutdown_report
+        actions: list[str] = []
+        errors: list[str] = []
+        try:
+            self.deactivate(frames=frames, dt=dt)
+            actions.append("controls_released")
+        except Exception as exc:
+            errors.append(f"deactivate: {type(exc).__name__}: {exc}")
+            logger.exception("[ICS] ошибка снятия управления")
+        try:
+            self.engagement.reset()
+            actions.append("engagement_reset")
+        except Exception as exc:
+            errors.append(f"engagement_reset: {type(exc).__name__}: {exc}")
+        try:
+            self.connector.close()
+            actions.append("transport_closed")
+        except Exception as exc:
+            errors.append(f"transport_close: {type(exc).__name__}: {exc}")
+            logger.exception("[ICS] ошибка закрытия транспорта")
+        self._shutdown_report = ShutdownReport(
+            backend=self.backend_name, actions=tuple(actions), errors=tuple(errors))
+        return self._shutdown_report
+
     def close(self) -> None:
-        self.connector.close()
+        self.shutdown()
 
     # --- внутреннее ---
 
@@ -455,9 +524,10 @@ class ICSSim:
         )
 
     @property
-    def active_failures(self) -> set:
+    def active_failures(self) -> frozenset[FailureMode]:
         """На стенде отказы приходят телеметрией, а не инжектируются нами."""
-        return set(self._last_telemetry.faults) if self._last_telemetry else set()
+        return (frozenset(self._last_telemetry.faults)
+                if self._last_telemetry else frozenset())
 
     def deactivate(self, frames: int = 10, dt: float = DT) -> None:
         """Снять управление: пустая маска и `ControlMode = Off` несколько кадров подряд.

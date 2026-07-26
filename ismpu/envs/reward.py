@@ -30,6 +30,19 @@ Reward = − Σ (вес · компонента); все компоненты �
 """
 
 from dataclasses import dataclass, field, asdict
+from typing import TypedDict
+
+
+class RewardComponents(TypedDict, total=False):
+    xte: float
+    heading: float
+    speed: float
+    overspeed: float
+    control: float
+    jerk: float
+    saturation: float
+    stability: float
+    shield: float
 
 from ismpu.config.requirements import (
     XTE_ROLLOUT_MAX_M, XTE_TAXI_MAX_M, HEADING_FAULT_MAX_DEG, HEADING_HOLD_UNTIL_KTS,

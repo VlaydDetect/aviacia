@@ -14,6 +14,7 @@
 """
 
 import argparse
+import logging
 import time
 from dataclasses import replace
 
@@ -22,44 +23,51 @@ from ismpu.control.flight import FlightSegment
 from ismpu.config.constants import DT
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.envs.backend_factory import build_sim
-from ismpu.envs.sim_interface import SimInterface
+from ismpu.envs.sim_interface import (
+    RunResult, RunStopReason, ShutdownReport, SimInterface,
+)
 from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE
 from ismpu.envs.scenario import (
     Scenario, SCENARIO_PRESETS, select_for_telemetry, resolve_preset,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         start: str | None = None, recorder: RunRecorder | None = None,
-        dashboard_state=None):
+        dashboard_state=None) -> RunResult:
     """Прогоняет один полёт на уже настроенном контуре."""
-    telemetry = sim.reset(scenario, start=start)
-
-    # Участок определяется ДО рукопожатия: от него зависит, какой стимул гнать (переход в
-    # `Approach` или в `Taxi`) — автомат включения выбирает его по той же телеметрии.
-    segment = controller.begin_flight(telemetry)
-    print(f"Участок по телеметрии стенда: {segment.value}")
-
-    # Рукопожатие ДО управления: стенд принимает команды только после того, как получит
-    # ModeAIReady=1 в течение выдержки и увидит переход ControlMode.
-    print("Прогрев (ожидание, пока стенд примет управление)...")
-    sim.warm_up()
-    controller.last_telemetry = sim.read_telemetry()
+    reason = RunStopReason.ERROR
+    details: str | None = None
+    shutdown_report: ShutdownReport | None = None
     run_started = time.monotonic()
-    if recorder is not None:
-        recorder.record(controller.last_telemetry, controller, elapsed_s=0.0)
-    if dashboard_state is not None:
-        dashboard_state.capture(elapsed_s=0.0)
-
-    print("Управление включено.")
-    last_time = time.time()
     try:
+        telemetry = sim.reset(scenario, start=start)
+
+        # Участок определяется ДО рукопожатия: от него зависит стимул включения.
+        segment = controller.begin_flight(telemetry)
+        print(f"Участок по телеметрии стенда: {segment.value}")
+
+        print("Прогрев (ожидание, пока стенд примет управление)...")
+        sim.warm_up()
+        controller.last_telemetry = sim.read_telemetry()
+        run_started = time.monotonic()
+        if recorder is not None:
+            recorder.record(controller.last_telemetry, controller, elapsed_s=0.0)
+        if dashboard_state is not None:
+            dashboard_state.capture(elapsed_s=0.0)
+
+        print("Управление включено.")
+        last_time = time.monotonic()
         while True:
-            current_time = time.time()
+            current_time = time.monotonic()
             dt = current_time - last_time
 
             if dt >= DT:
+                if dashboard_state is not None:
+                    dashboard_state.apply_pending_gain_updates()
                 # Контур сам читает телеметрию и сам отправляет команды через sim.
                 finished = controller.control_step(dt)
                 if recorder is not None and controller.last_telemetry is not None:
@@ -75,27 +83,55 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                     if controller.segment is FlightSegment.ROLLOUT:
                         # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
                         controller.hand_over_to_taxi()
+                        reason = RunStopReason.COMPLETED
                     elif controller.go_around_reason is not None:
                         # Уход на второй круг: заявка каналов снимается ниже (control_exception),
                         # руление не запрашиваем — ВС в воздухе, управление уходит пилоту.
                         print(f"[loop] уход на второй круг: {controller.go_around_reason}")
-                    raise KeyboardInterrupt
+                        reason = RunStopReason.GO_AROUND
+                        details = controller.go_around_reason
+                    else:
+                        reason = RunStopReason.COMPLETED
+                    break
 
                 if _lost_engagement(controller, sim):
-                    raise KeyboardInterrupt
+                    reason = RunStopReason.ENGAGEMENT_LOST
+                    details = f"{sim.backend_name}: {controller.segment.value}"
+                    break
 
                 last_time = current_time
 
             time.sleep(0.01)  # Снижение нагрузки на CPU
 
+        if reason is RunStopReason.ERROR:
+            reason = RunStopReason.COMPLETED
     except KeyboardInterrupt:
-        controller.control_exception()
+        reason = RunStopReason.INTERRUPTED
     finally:
+        try:
+            controller.control_exception()
+        except Exception:
+            logger.exception("Ошибка нейтрализации контроллера")
+        try:
+            shutdown_report = sim.shutdown()
+        except Exception as exc:
+            # Старый сторонний backend может ещё не реализовать новый контракт.
+            logger.exception("Ошибка shutdown backend")
+            shutdown_report = ShutdownReport(
+                backend=getattr(sim, "backend_name", "unknown"),
+                errors=(f"shutdown: {type(exc).__name__}: {exc}",),
+            )
         if recorder is not None:
-            recorder.finish({
-                "tolerances": controller.tolerance_report,
-                "approach_criteria_a11": controller.approach_criteria.verdict(),
-            })
+            try:
+                recorder.finish({
+                    "tolerances": controller.tolerance_report,
+                    "approach_criteria_a11": controller.approach_criteria.verdict(),
+                    "stop_reason": reason.value,
+                    "shutdown": shutdown_report,
+                })
+            except Exception:
+                logger.exception("Ошибка завершения журнала прогона")
+    return RunResult(reason=reason, shutdown=shutdown_report, details=details)
 
 
 def _lost_engagement(controller: ControllingSystem, sim: SimInterface) -> bool:

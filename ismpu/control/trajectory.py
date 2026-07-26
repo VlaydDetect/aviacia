@@ -4,6 +4,7 @@
 Перенесено из main.ipynb без изменений.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
@@ -14,6 +15,13 @@ from ismpu.utils.converts import Converts
 class VelocityLaw(Enum):
     EQUALLY_SLOW = 1
     GAUSS_BELL = 2
+
+
+@dataclass(frozen=True)
+class TrajectoryState:
+    distance_m: float
+    reference_speed_ms: float
+    finished: bool
 
 
 class ReferenceTrajectory:
@@ -54,3 +62,11 @@ class ReferenceTrajectory:
                     return self.v_target_ms
 
                 return np.sqrt(val_under_sqrt)
+
+    def state_at(self, current_distance_m: float) -> TrajectoryState:
+        distance = float(current_distance_m)
+        return TrajectoryState(
+            distance_m=distance,
+            reference_speed_ms=float(self.get_reference_speed(distance)),
+            finished=distance >= self.distance,
+        )

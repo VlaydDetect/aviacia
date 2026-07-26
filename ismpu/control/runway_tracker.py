@@ -6,11 +6,35 @@ Guidance формирует Stanley-подобную ошибку курса п�
 константы ВПП импортируются из config.runway (ранее — модульные глобали ноутбука).
 """
 
+from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
 import numpy as np
 
 from ismpu.config.runway import (
     RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON, RWY_HEADING_TRUE,
 )
+
+
+@dataclass(frozen=True)
+class GuidanceState(Mapping[str, float | None]):
+    xte: float
+    along: float | None
+    lookahead: float
+    heading_error_deg: float
+    desired_heading_deg: float
+
+    def __getitem__(self, key: str) -> float | None:
+        """Совместимость со старым словарным API."""
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((
+            "xte", "along", "lookahead",
+            "heading_error_deg", "desired_heading_deg",
+        ))
+
+    def __len__(self) -> int:
+        return 5
 
 
 class RunwayTracker:
@@ -144,13 +168,13 @@ class RunwayTracker:
 
         heading_error = self.wrap_pi(heading_error)
 
-        return {
-            "xte": xte,
-            "along": along,
-            "lookahead": lookahead,
-            "heading_error_deg": np.degrees(heading_error),
-            "desired_heading_deg": np.degrees(desired_heading),
-        }
+        return GuidanceState(
+            xte=float(xte),
+            along=float(along),
+            lookahead=float(lookahead),
+            heading_error_deg=float(np.degrees(heading_error)),
+            desired_heading_deg=float(np.degrees(desired_heading)),
+        )
 
     def guidance_from_deviation(self, aircraft_heading_deg, runway_heading_deg, xte_m, ground_speed):
         """Guidance по курсу ВПП и измеренному отклонению — без собственной геодезии.
@@ -172,13 +196,13 @@ class RunwayTracker:
         heading_error += np.arctan2(-self.xte_gain * xte_m, L)      # Stanley-подобная коррекция
         heading_error = self.wrap_pi(heading_error)
 
-        return {
-            "xte": xte_m,
-            "along": None,          # вдоль-трековая координата на стенде не восстанавливается
-            "lookahead": lookahead,
-            "heading_error_deg": np.degrees(heading_error),
-            "desired_heading_deg": float(runway_heading_deg),
-        }
+        return GuidanceState(
+            xte=float(xte_m),
+            along=None,
+            lookahead=float(lookahead),
+            heading_error_deg=float(np.degrees(heading_error)),
+            desired_heading_deg=float(runway_heading_deg),
+        )
 
     def get_cross_track_error(self, lat_ac: float, lon_ac: float):
         """Возвращает отклонение от осевой линии в метрах. >0 - правее оси, <0 - левее."""
@@ -187,3 +211,15 @@ class RunwayTracker:
 
         xte = np.asin(np.sin(d_ac) * np.sin(theta_ac - self.theta_rwy)) * self.R
         return xte
+
+    def runway_length_m(self) -> float:
+        return float(self.haversine_distance(
+            RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON))
+
+    def point_on_centerline(self, distance_before_threshold_m: float) -> tuple[float, float]:
+        return self.destination(
+            RWY_START_LAT,
+            RWY_START_LON,
+            self.rwy_heading + np.pi,
+            distance_before_threshold_m,
+        )

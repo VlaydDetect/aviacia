@@ -1,0 +1,175 @@
+import importlib
+import struct
+
+import pytest
+
+from ismpu.agent.shield import Shield, ShieldReportSnapshot
+from ismpu.config.json_config import (
+    scenario_from_document,
+    scenario_to_document,
+)
+from ismpu.config.runway_profiles import UUEE_06R
+from ismpu.control.failures import FailureMode
+from ismpu.control.runway_tracker import RunwayTracker
+from ismpu.control.system import ControllingSystem
+from ismpu.envs.ics_sim import ICSSim
+from ismpu.envs.rollout_env import RolloutEnv
+from ismpu.envs.scenario import Scenario
+from ismpu.envs.splits import (
+    is_signature_holdout,
+    scenario_signature,
+)
+from ismpu.io.xplane_connector import XPlaneConnector
+from ismpu.envs.xplane_sim import XPlaneSim
+from ismpu.gui.dashboard import DashboardState
+from ismpu.agent.shield import base_gains_from_pids
+from ismpu.envs.action import preset_action
+
+from tests.fakes import FakeConnector, static_sim
+from tests.test_xplane_backend import MockXPlaneConnector
+
+
+class DatagramSocket:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def sendto(self, packet, address):
+        self.sent.append((packet, address))
+
+    def close(self):
+        self.closed = True
+
+
+def test_xplane_used_wire_packets_match_confirmed_original(monkeypatch):
+    legacy_module = importlib.import_module("ismpu.io.XPlaneConnectX")
+    legacy_socket = DatagramSocket()
+    monkeypatch.setattr(legacy_module.socket, "socket", lambda *a, **k: legacy_socket)
+    legacy = legacy_module.XPlaneConnectX()
+
+    modern_socket = DatagramSocket()
+    modern = XPlaneConnector(sock=modern_socket, start_receiver=False)
+
+    legacy.sendDREF("sim/test/value", 0.25)
+    modern.sendDREF("sim/test/value", 0.25)
+    legacy.sendCMND("sim/operation/pause_on")
+    modern.sendCMND("sim/operation/pause_on")
+    legacy.sendPOSI(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    modern.sendPOSI(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+
+    assert [packet for packet, _ in modern_socket.sent] == [
+        packet for packet, _ in legacy_socket.sent
+    ]
+
+
+def test_legacy_subscription_starts_at_zero_and_retries_with_diagnostics():
+    sock = DatagramSocket()
+    connector = XPlaneConnector(sock=sock, start_receiver=False)
+    with pytest.raises(TimeoutError, match=r"127\.0\.0\.1:49000.*sim/test"):
+        connector.subscribeDREFs(
+            [("sim/test", 20)], timeout=0.03, retry_interval=0.01)
+    packets = [struct.unpack("<4sxii400s", packet) for packet, _ in sock.sent]
+    assert packets[0][2] == 0
+    assert len(packets) >= 2
+
+
+def test_ics_shutdown_is_idempotent_and_releases_every_channel():
+    connector = FakeConnector()
+    sim = ICSSim(connector=connector)
+    first = sim.shutdown(frames=2, dt=0.0)
+    second = sim.shutdown(frames=50, dt=0.0)
+    assert first is second
+    assert first.successful
+    assert connector.closed
+    assert len(connector.sent_outputs) == 2
+    assert all(packet.ControlValidMask == 0 for packet in connector.sent_outputs)
+    assert all(int(packet.ControlMode) == 0 for packet in connector.sent_outputs)
+
+
+def test_scenario_json_v1_supports_unregistered_control_roundtrip():
+    original = Scenario.from_preset("default", scenario_id="external-json", seed=17)
+    document = scenario_to_document(original)
+    document["control"]["name"] = "external-control"
+    restored = scenario_from_document(document)
+    assert restored.scenario_id == "external-json"
+    assert restored.control.name == "external-control"
+    assert restored.control.runway_center == original.control.runway_center
+    assert scenario_to_document(restored) == document
+
+
+def test_scenario_json_rejects_unknown_fields():
+    document = scenario_to_document(Scenario.from_preset("default"))
+    document["surprise"] = True
+    with pytest.raises(ValueError, match="неизвестные поля"):
+        scenario_from_document(document)
+
+
+def test_runway_profile_delegates_geometry_to_tracker():
+    tracker = RunwayTracker()
+    assert UUEE_06R.length_m == pytest.approx(tracker.runway_length_m())
+    assert UUEE_06R.point_on_centerline(1000.0) == pytest.approx(
+        tracker.point_on_centerline(1000.0))
+
+
+def test_one_shield_report_flows_through_both_levels():
+    class IdentityShield(Shield):
+        coefficient_report = None
+
+        def guard_coefficients(self, command, preset_gains):
+            result = super().guard_coefficients(command, preset_gains)
+            self.coefficient_report = result[2]
+            return result
+
+        def guard_command(self, command, runtime, report=None):
+            assert report is self.coefficient_report
+            return super().guard_command(command, runtime, report=report)
+
+    sim, _ = static_sim()
+    controller = ControllingSystem(sim)
+    shield = IdentityShield()
+    env = RolloutEnv(sim, controller, shield=shield)
+    scenario = Scenario.from_preset("default")
+    env.reset(scenario)
+    action = preset_action(base_gains_from_pids(controller.pids))
+    _obs, _reward, _terminated, _truncated, info = env.step(action)
+    assert isinstance(info["shield"], ShieldReportSnapshot)
+
+
+def test_dashboard_http_queue_applies_only_at_tick_boundary(tmp_path):
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller)
+    state = DashboardState(
+        controller, scenario=scenario, tune_enabled=True, export_root=tmp_path)
+    old = controller.approach_channel.roll_pid.kp
+    pending = state.enqueue_gain_update("roll", {"kp": old + 1.0})
+    assert pending["status"] == "pending"
+    assert controller.approach_channel.roll_pid.kp == old
+    applied = state.apply_pending_gain_updates()
+    assert applied[0]["status"] == "applied"
+    assert controller.approach_channel.roll_pid.kp == old + 1.0
+
+
+def test_signature_holdout_is_stable_and_not_failure_family_based():
+    engine = Scenario.from_preset(
+        "default", failures=(FailureMode.ENGINE_OUT_LEFT,), scenario_id="a")
+    same = Scenario.from_preset(
+        "default", failures=(FailureMode.ENGINE_OUT_LEFT,), scenario_id="b")
+    assert scenario_signature(engine) == scenario_signature(same)
+    assert is_signature_holdout(engine) == is_signature_holdout(same)
+
+
+def test_xplane_ignores_failures_outside_rollout_contract():
+    sim = XPlaneSim(
+        connector=MockXPlaneConnector(),
+        reload_each_reset=False,
+        settle_s=0.0,
+    )
+    sim.inject_failure(FailureMode.GEAR_CONFIG)
+    assert FailureMode.GEAR_CONFIG not in sim.active_failures
+    assert FailureMode.GEAR_CONFIG in sim.ignored_failures
+    sim.inject_failure(FailureMode.NWS_FAIL)
+    assert FailureMode.NWS_FAIL in sim.active_failures

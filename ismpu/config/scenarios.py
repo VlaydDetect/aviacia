@@ -17,7 +17,6 @@
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import VelocityLaw
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
@@ -50,15 +49,10 @@ class ScenarioConfig:
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
-    def build_pids(self) -> dict[str, PIDController]:
+    def build_pids(self):
         """Создаёт свежий набор из 5 регуляторов (по имени аргументов setup())."""
-        return dict(
-            runway_center_pid=PIDController(**self.runway_center),
-            pid_brake_l=PIDController(**self.brake_l),
-            pid_brake_r=PIDController(**self.brake_r),
-            pid_rev_l=PIDController(**self.rev_l),
-            pid_rev_r=PIDController(**self.rev_r),
-        )
+        from ismpu.factories.control import build_pids
+        return build_pids(self)
 
     def apply(self, controller: "ControllingSystem") -> "ControllingSystem":
         """Настраивает контур под сценарий и активирует связанный отказ (если задан).
@@ -67,21 +61,8 @@ class ScenarioConfig:
         пресет по имени. Иначе сценарий, заведённый под сквозной прогон с отказом двигателя на
         глиссаде, менял бы только пробег — то есть ровно не тот участок, где отказ вводится.
         """
-        from ismpu.config.approach import APPROACH_PRESETS
-
-        controller.setup(
-            self.build_pids(),
-            lookahead_min=self.lookahead_min,
-            lookahead_gain=self.lookahead_gain,
-            xte_gain=self.xte_gain,
-            steering_brake_gain=self.steering_brake_gain,
-            steering_rev_gain=self.steering_rev_gain,
-            law=self.law,
-        )
-        controller.setup_approach(APPROACH_PRESETS[self.approach])
-        if self.failure is not FailureMode.NONE:
-            controller.apply_failure(self.failure)
-        return controller
+        from ismpu.factories.control import apply_control_config
+        return apply_control_config(self, controller)
 
 
 DEFAULT = ScenarioConfig(
@@ -95,7 +76,6 @@ DEFAULT = ScenarioConfig(
     lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
 )
 
-# Активный сценарий ноутбука.
 NWS_FAIL = ScenarioConfig(
     name="nws_fail",
     failure=FailureMode.NWS_FAIL,

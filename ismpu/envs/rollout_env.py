@@ -22,6 +22,7 @@ terminated, truncated, info)`.
 
 from collections import deque
 from dataclasses import dataclass, replace
+from typing import Any, TypedDict
 
 import numpy as np
 
@@ -32,6 +33,15 @@ from ismpu.control.channels import ControlsState
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.sim_interface import SimInterface
+
+
+class EpisodeInfo(TypedDict, total=False):
+    reward_components: dict[str, float]
+    shield: Any
+    break_control: bool
+    off_runway: bool
+    engaged: bool
+    objective: dict[str, Any]
 from ismpu.envs.scenario import Scenario
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, ACTION_LOW, ACTION_HIGH
@@ -155,7 +165,8 @@ class RolloutEnv:
     def step(self, action):
         # 1) Абсолютные коэффициенты актора → PID + веса каналов (опц. через Shield, якорь — пресет).
         command = decode(action)
-        apply_corrections(command, self._preset_gains, self.controller, shield=self.shield)
+        _effective_gains, shield_report = apply_corrections(
+            command, self._preset_gains, self.controller, shield=self.shield)
 
         # 2) Состояние для поведенческих проверок Shield (по текущей телеметрии).
         pre = self.sim.read_telemetry()
@@ -164,9 +175,9 @@ class RolloutEnv:
         # 3) Расчёт команды контуром по прочитанному кадру, без отправки.
         break_control = self.controller.control_step(self.dt, pre, send=False)
         command = self.controller.state
-        shield_report = None
         if self.shield is not None and not break_control:
-            command, shield_report = self.shield.guard_command(command, runtime)
+            command, shield_report = self.shield.guard_command(
+                command, runtime, report=shield_report)
 
         # 4) Отправка команды и получение новой телеметрии.
         post = self.sim.step(command)
@@ -191,7 +202,9 @@ class RolloutEnv:
         truncated = self._steps >= self.max_steps
 
         self._prev_command = _snapshot_command(command)
-        info = {"reward_components": components, "shield": shield_report,
+        shield_snapshot = (
+            shield_report.snapshot() if shield_report is not None else None)
+        info = {"reward_components": components, "shield": shield_snapshot,
                 "break_control": break_control, "off_runway": off_runway,
                 "engaged": self.sim.engaged}
         if terminated or truncated:
@@ -202,6 +215,13 @@ class RolloutEnv:
 
     def close(self):
         self.sim.close()
+
+    def __enter__(self) -> "RolloutEnv":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
     # --- внутреннее ---
 
@@ -235,8 +255,14 @@ class RolloutEnv:
                                   weights=self.reward_weights)
             return -INVALID_TELEMETRY_PENALTY, comp, None
 
-        g = self.controller.lateral_channel.tracker.guidance(
-            telemetry.lat, telemetry.lon, telemetry.heading_true_deg, telemetry.groundspeed_ms)
+        g = self.controller.lateral_channel.guidance_for(telemetry)
+        if g is None:
+            comp = compute_reward(
+                xte_m=0.0, heading_error_deg=0.0, speed_error_ms=0.0,
+                command=command, prev_command=self._prev_command,
+                weights=self.reward_weights,
+            )
+            return -INVALID_TELEMETRY_PENALTY, comp, None
         lon_channel = self.controller.longitudinal_channel
         ref = lon_channel.trajectory.get_reference_speed(lon_channel.traveled_distance_m)
         speed_error_ms = telemetry.groundspeed_ms - ref

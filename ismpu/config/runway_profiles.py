@@ -37,16 +37,13 @@ class RunwayProfile:
 
     @property
     def length_m(self) -> float:
-        return _distance_m(
-            self.threshold_lat, self.threshold_lon, self.end_lat, self.end_lon)
+        from ismpu.control.runway_tracker import RunwayTracker
+        return RunwayTracker().runway_length_m()
 
     def point_on_centerline(self, distance_before_threshold_m: float) -> tuple[float, float]:
         """Точка на продолжении оси; положительное расстояние — до порога."""
-        return _destination(
-            self.threshold_lat, self.threshold_lon,
-            (self.heading_true_deg + 180.0) % 360.0,
-            distance_before_threshold_m,
-        )
+        from ismpu.control.runway_tracker import RunwayTracker
+        return RunwayTracker().point_on_centerline(distance_before_threshold_m)
 
     def discover_ils(self, xplane_root: str | Path) -> ILSStation:
         nav_path = find_earth_nav_dat(xplane_root)
@@ -116,25 +113,7 @@ def parse_ils_station(path: str | Path, airport: str, runway: str) -> ILSStation
     raise LookupError(f"ILS {airport} {runway} не найден в {path}")
 
 
-def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    radius = 6_371_000.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = p2 - p1
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * radius * math.asin(math.sqrt(a))
-
-
 def _destination(lat: float, lon: float, bearing_deg: float, distance_m: float) -> tuple[float, float]:
-    radius = 6_371_000.0
-    angular = distance_m / radius
-    bearing = math.radians(bearing_deg)
-    p1 = math.radians(lat)
-    l1 = math.radians(lon)
-    p2 = math.asin(
-        math.sin(p1) * math.cos(angular)
-        + math.cos(p1) * math.sin(angular) * math.cos(bearing))
-    l2 = l1 + math.atan2(
-        math.sin(bearing) * math.sin(angular) * math.cos(p1),
-        math.cos(angular) - math.sin(p1) * math.sin(p2))
-    return math.degrees(p2), (math.degrees(l2) + 540.0) % 360.0 - 180.0
+    from ismpu.control.runway_tracker import RunwayTracker
+    return RunwayTracker().destination(
+        lat, lon, math.radians(bearing_deg), distance_m)

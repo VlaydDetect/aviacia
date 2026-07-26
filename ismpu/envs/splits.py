@@ -25,6 +25,96 @@ from ismpu.control.failures import FailureMode
 HOLDOUT_MARKERS = ("holdout", "unseen")
 DEFAULT_HOLDOUT_FRACTION = 0.2
 
+
+@dataclass(frozen=True)
+class ScenarioSignature:
+    """Устойчивая комбинация условий, а не имя или целое семейство отказов."""
+
+    failures: tuple[str, ...]
+    runway_friction_bin: int
+    crosswind_bin: int
+    headwind_bin: int
+    lateral_offset_bin: int
+    heading_offset_bin: int
+    speed_bin: int
+
+    def key(self) -> str:
+        return "|".join((
+            ",".join(self.failures) or "NONE",
+            str(self.runway_friction_bin),
+            str(self.crosswind_bin),
+            str(self.headwind_bin),
+            str(self.lateral_offset_bin),
+            str(self.heading_offset_bin),
+            str(self.speed_bin),
+        ))
+
+
+def scenario_signature(scenario) -> ScenarioSignature:
+    """Каноническая дискретизация условий для train/eval split."""
+    from ismpu.config.runway import RWY_HEADING_TRUE
+    from ismpu.envs.weather import decompose_wind
+
+    weather = scenario.weather
+    cross, head = decompose_wind(
+        weather.wind_speed_kts,
+        weather.wind_dir_from_degt,
+        RWY_HEADING_TRUE,
+    )
+    touchdown = scenario.touchdown
+    return ScenarioSignature(
+        failures=tuple(sorted(f.name for f in scenario.failures)),
+        runway_friction_bin=int(round(float(weather.runway_friction))),
+        crosswind_bin=int(round(cross / 5.0)),
+        headwind_bin=int(round(head / 5.0)),
+        lateral_offset_bin=int(round(touchdown.lateral_offset_m / 2.0)),
+        heading_offset_bin=int(round(touchdown.heading_offset_deg / 2.0)),
+        speed_bin=int(round(touchdown.speed_knots / 10.0)),
+    )
+
+
+def is_signature_holdout(
+    scenario,
+    *,
+    fraction: float = DEFAULT_HOLDOUT_FRACTION,
+) -> bool:
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("holdout fraction должна быть в [0, 1]")
+    return _hash_unit("signature-v1:" + scenario_signature(scenario).key()) < fraction
+
+
+class PartitionedScenarioProvider:
+    """Фильтр над единым sampler с непересекающимися train/eval signatures."""
+
+    def __init__(
+        self,
+        generator,
+        *,
+        partition: str,
+        fraction: float = DEFAULT_HOLDOUT_FRACTION,
+        difficulty=None,
+        max_attempts: int = 10_000,
+    ):
+        if partition not in {"train", "eval"}:
+            raise ValueError("partition должен быть 'train' или 'eval'")
+        self.generator = generator
+        self.partition = partition
+        self.fraction = fraction
+        self.difficulty = difficulty
+        self.max_attempts = max_attempts
+
+    def __call__(self):
+        difficulty = self.difficulty() if callable(self.difficulty) else self.difficulty
+        want_holdout = self.partition == "eval"
+        for _ in range(self.max_attempts):
+            scenario = self.generator.sample(difficulty)
+            if is_signature_holdout(
+                scenario, fraction=self.fraction) is want_holdout:
+                return scenario
+        raise RuntimeError(
+            f"не удалось получить scenario partition={self.partition!r} "
+            f"за {self.max_attempts} попыток")
+
 HOLDOUT_FAILURE_FAMILIES = frozenset({
     FailureMode.ENGINE_OUT_LEFT,
     FailureMode.ENGINE_OUT_RIGHT,

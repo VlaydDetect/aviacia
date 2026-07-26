@@ -20,13 +20,13 @@ class XPlaneConnector:
     """Одна подписка, один поток приёма и явное освобождение ресурсов."""
 
     def __init__(
-        self,
-        ip: str = "127.0.0.1",
-        port: int = 49000,
-        *,
-        sock=None,
-        receive_timeout_s: float = 0.2,
-        start_receiver: bool = True,
+            self,
+            ip: str = "127.0.0.1",
+            port: int = 49000,
+            *,
+            sock=None,
+            receive_timeout_s: float = 0.2,
+            start_receiver: bool = True,
     ) -> None:
         self.address = (ip, int(port))
         self.sock = sock if sock is not None else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -36,6 +36,7 @@ class XPlaneConnector:
         self._samples: dict[str, DataRefSample] = {}
         self._index_to_dref: dict[int, str] = {}
         self._dref_to_index: dict[str, int] = {}
+        self._frequencies: dict[str, int] = {}
         self._next_index = 1
         self._stop = threading.Event()
         self._thread = None
@@ -54,11 +55,12 @@ class XPlaneConnector:
             }
 
     def subscribe(
-        self,
-        datarefs: Iterable[str],
-        *,
-        frequency_hz: int = 20,
-        timeout_s: float = 0.0,
+            self,
+            datarefs: Iterable[str],
+            *,
+            frequency_hz: int = 20,
+            timeout_s: float = 0.0,
+            retry_interval_s: float = 0.5,
     ) -> None:
         requested = []
         with self._lock:
@@ -71,18 +73,38 @@ class XPlaneConnector:
                     self._dref_to_index[name] = index
                     self._index_to_dref[index] = name
                 requested.append((index, name))
+                self._frequencies[name] = int(frequency_hz)
         for index, name in requested:
             self._send_rref(index, name, frequency_hz)
         if timeout_s > 0:
-            self.wait_for((name for _, name in requested), timeout_s=timeout_s)
+            self.wait_for(
+                (name for _, name in requested),
+                timeout_s=timeout_s,
+                retry_interval_s=retry_interval_s,
+            )
 
-    def subscribeDREFs(self, subscribed_drefs, timeout: float = 0.0, **_) -> None:
+    def subscribeDREFs(
+            self,
+            subscribed_drefs,
+            history: float = 0.0,
+            timeout: float = 0.0,
+            retry_interval: float = 0.5,
+            **_,
+    ) -> None:
         """Совместимость с прежним клиентом."""
-        for name, frequency in subscribed_drefs:
+        del history
+        requested = tuple(subscribed_drefs)
+        with self._lock:
+            if not self._dref_to_index:
+                self._next_index = 0
+        for name, frequency in requested:
             self.subscribe((name,), frequency_hz=frequency, timeout_s=0.0)
         if timeout > 0:
-            self.wait_for((name for name, frequency in subscribed_drefs if frequency > 0),
-                          timeout_s=timeout)
+            self.wait_for(
+                (name for name, frequency in requested if frequency > 0),
+                timeout_s=timeout,
+                retry_interval_s=retry_interval,
+            )
 
     def unsubscribe(self, datarefs: Iterable[str] | None = None) -> None:
         with self._lock:
@@ -115,28 +137,54 @@ class XPlaneConnector:
         with self._lock:
             self._samples.clear()
 
-    def wait_for(self, datarefs: Iterable[str], *, timeout_s: float) -> None:
+    def wait_for(
+            self,
+            datarefs: Iterable[str],
+            *,
+            timeout_s: float,
+            retry_interval_s: float = 0.5,
+    ) -> None:
         pending = set(datarefs)
         deadline = time.monotonic() + timeout_s
+        next_retry = time.monotonic() + max(0.01, retry_interval_s)
         while pending and time.monotonic() < deadline:
             pending = {name for name in pending if self.value(name) is None}
             if pending:
+                now = time.monotonic()
+                if now >= next_retry:
+                    with self._lock:
+                        retry = tuple(
+                            (self._dref_to_index[name], name, self._frequencies[name])
+                            for name in pending
+                            if name in self._dref_to_index and name in self._frequencies
+                        )
+                    for index, name, frequency in retry:
+                        self._send_rref(index, name, frequency)
+                    next_retry = now + max(0.01, retry_interval_s)
                 time.sleep(0.01)
         if pending:
-            raise TimeoutError("X-Plane не ответил на DataRef: " + ", ".join(sorted(pending)))
+            raise TimeoutError(
+                f"X-Plane {self.address[0]}:{self.address[1]} не ответил за "
+                f"{timeout_s:.2f} с; отсутствуют DataRef: {', '.join(sorted(pending))}")
 
     def send_dref(self, dataref: str, value: float) -> None:
         encoded = dataref.encode("utf-8")
         if len(encoded) >= 500:
             raise ValueError("имя DataRef длиннее 499 байт")
-        packet = struct.pack("<5sf500s", b"DREF\0", float(value), encoded)
+        packet = struct.pack('<4sxf500s', b'DREF', float(value), encoded)
         self.sock.sendto(packet, self.address)
 
     def sendDREF(self, dataref: str, value: float) -> None:
         self.send_dref(dataref, value)
 
     def send_command(self, command: str) -> None:
-        self.sock.sendto(b"CMND\0" + command.encode("utf-8") + b"\0", self.address)
+        encoded = command.encode("utf-8")
+        if len(encoded) >= 500:
+            raise ValueError("команда X-Plane длиннее 499 байт")
+        self.sock.sendto(
+            struct.pack('<4sx500s', b'CMND', encoded),
+            self.address,
+        )
 
     def sendCMND(self, command: str) -> None:
         self.send_command(command)
@@ -148,18 +196,18 @@ class XPlaneConnector:
         self.send_command("sim/operation/fix_all_systems")
 
     def send_position(
-        self,
-        *,
-        lat: float,
-        lon: float,
-        elevation_m: float,
-        roll_deg: float,
-        pitch_deg: float,
-        heading_true_deg: float,
-        aircraft_index: int = 0,
+            self,
+            *,
+            lat: float,
+            lon: float,
+            elevation_m: float,
+            roll_deg: float,
+            pitch_deg: float,
+            heading_true_deg: float,
+            aircraft_index: int = 0,
     ) -> None:
         packet = struct.pack(
-            "<4sxidddfff",
+            '<4sxidddfff',
             b"VEHS",
             int(aircraft_index),
             float(lat),
@@ -177,6 +225,66 @@ class XPlaneConnector:
         self.send_position(
             lat=lat, lon=lon, elevation_m=elev, roll_deg=phi, pitch_deg=theta,
             heading_true_deg=psi_true, aircraft_index=ac)
+
+    def sendCTRL(self, lat_control: float, lon_control: float, rudder_control: float, throttle: float, gear: int,
+                 flaps: float, speedbrakes: float, park_brake: float) -> None:
+        """Send basic controls to the ego aircraft. There are hundreds of DataRefs that provide more fine-grained control. These can be set through the setDREF method.
+
+        Args:
+            lat_control (float): Lateral pilot input, i.e., yoke rotation, or side stick left/right position. Ranges from [-1...1].
+            lon_control (float): Longitudinal pilot input, i.e., yoke and side stick forward/backward position. Ranges from [-1...1].
+            rudder_control (float): Rudder pilor input. Ranges from [-1...1].
+            throttle (float): Throttle position. Ranges from [-1...1] with -1 being full reverse thrust, and 1 being full forward thrust.
+            gear (int): Requested gear position. 0 corresponds to gear up, and 1 corresponds to gear down.
+            flaps (float): Requested flaps position. Ranges from [0...1].
+            speedbrakes (float): Requested speedbakes position. Possible values are {-0.5, [0...1]} where -0.5 means the speedbrake is armed, 0 is retracted, and 1 is fully deployed.
+            park_brake (float): Requested park brake ratio. Ranged from [0...1]
+
+        Example:
+            xpc = XPlaneConnectX()
+            xpc.sendCTRL(lat_control=-0.2, lon_control=0.0, rudder_control=0.2, throttle=0.8, gear=1, flaps=0.5, speedbrakes=0, park_brake=0)
+        """
+
+        # lateral control
+        dref = "sim/cockpit2/controls/yoke_roll_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', lat_control, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # longitudinal control
+        dref = "sim/cockpit2/controls/yoke_pitch_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', lon_control, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # rudder control
+        dref = "sim/cockpit2/controls/yoke_heading_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', rudder_control, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # throttle
+        dref = "sim/cockpit2/engine/actuators/throttle_jet_rev_ratio_all"
+        msg = struct.pack('<4sxf500s', b'DREF', throttle, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # gear
+        dref = "sim/cockpit/switches/gear_handle_status"
+        msg = struct.pack('<4sxf500s', b'DREF', gear, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # flaps
+        # dref = "sim/cockpit2/controls/flap_handle_request_ratio" #this only for X-Plane 12.0+
+        dref = "sim/cockpit2/controls/flap_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', flaps, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # speedbrakes
+        dref = "sim/cockpit2/controls/speedbrake_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', speedbrakes, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
+
+        # park brake
+        dref = "sim/cockpit2/controls/parking_brake_ratio"
+        msg = struct.pack('<4sxf500s', b'DREF', park_brake, dref.encode('UTF-8'))
+        self.sock.sendto(msg, self.address)
 
     def pause(self, flag: bool) -> None:
         self.send_command("sim/operation/pause_on" if flag else "sim/operation/pause_off")
@@ -227,6 +335,13 @@ class XPlaneConnector:
             finally:
                 if self._thread is not None and self._thread.is_alive():
                     self._thread.join(timeout=0.5)
+
+    def __enter__(self) -> "XPlaneConnector":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
 
 # Старое публичное имя оставлено для пользовательских скриптов.
