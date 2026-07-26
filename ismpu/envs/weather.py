@@ -17,6 +17,7 @@
 import math
 from enum import Enum
 from dataclasses import dataclass
+from typing import Optional
 
 from ismpu.utils.converts import Converts
 from ismpu.config.runway import RWY_HEADING_TRUE
@@ -68,6 +69,36 @@ def runway_condition_from_bench(code: int) -> RunwayCondition:
 
 
 @dataclass(frozen=True)
+class FrictionProfile:
+    """Ступенчатый профиль сцепления по дистанции пробега."""
+
+    segments: tuple[tuple[float, float], ...]
+
+    def __post_init__(self):
+        ordered = tuple(sorted(
+            ((float(start), float(value)) for start, value in self.segments),
+            key=lambda item: item[0]))
+        if not ordered:
+            raise ValueError("профиль сцепления не может быть пустым")
+        object.__setattr__(self, "segments", ordered)
+
+    def at(self, distance_m: float) -> float:
+        value = self.segments[0][1]
+        for start, friction in self.segments:
+            if distance_m < start:
+                break
+            value = friction
+        return value
+
+    def to_list(self) -> list[list[float]]:
+        return [[start, friction] for start, friction in self.segments]
+
+    @classmethod
+    def from_list(cls, values) -> "FrictionProfile":
+        return cls(tuple((float(start), float(friction)) for start, friction in values))
+
+
+@dataclass(frozen=True)
 class WeatherState:
     """Погодные условия. Поля — ровно то, что сообщает стенд (см. `from_ics`).
 
@@ -76,8 +107,12 @@ class WeatherState:
     """
     wind_speed_kts: float = 0.0
     wind_dir_from_degt: float = 0.0     # откуда дует, ° от истинного севера
+    gust_kts: float = 0.0
+    turbulence: float = 0.0
+    variability_pct: float = 0.0
 
     runway_friction: float = RunwayCondition.DRY.value  # 0..15, см. RunwayCondition
+    friction_profile: Optional[FrictionProfile] = None
 
     rain_pct: float = 0.0               # 0..1, интенсивность осадков
     visibility_m: float = 16000.0       # ~10 миль (ясно)
@@ -114,7 +149,12 @@ class WeatherState:
         return {
             "wind_speed_kts": self.wind_speed_kts,
             "wind_dir_from_degt": self.wind_dir_from_degt,
+            "gust_kts": self.gust_kts,
+            "turbulence": self.turbulence,
+            "variability_pct": self.variability_pct,
             "runway_friction": self.runway_friction,
+            "friction_profile": (
+                self.friction_profile.to_list() if self.friction_profile else None),
             "rain_pct": self.rain_pct,
             "visibility_m": self.visibility_m,
             "temperature_c": self.temperature_c,
@@ -122,7 +162,10 @@ class WeatherState:
 
     @classmethod
     def from_dict(cls, d: dict) -> "WeatherState":
-        return cls(**d)
+        values = dict(d)
+        profile = values.get("friction_profile")
+        values["friction_profile"] = FrictionProfile.from_list(profile) if profile else None
+        return cls(**values)
 
 
 # --------------------------------------------------------------------------- #

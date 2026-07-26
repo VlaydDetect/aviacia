@@ -30,7 +30,7 @@
 исключение, и осознанное: его коэффициенты размерные (градусы на фут-в-минуту, фут-в-минуту на
 точку, узлы), откалиброваны на стенде именно в этих единицах, и перевод в СИ означал бы пересчёт
 каждого коэффициента с последующей перекалибровкой. Поэтому канал читает «сырой» пакет
-(`Telemetry.ics_inputs`) напрямую. Без пакета стенда воздушное управление невозможно — канал
+(`Telemetry.approach_inputs`) напрямую. Без воздушного среза backend управление невозможно — канал
 честно отдаёт нейтральную команду, а не считает по нулям.
 """
 
@@ -147,11 +147,11 @@ class ApproachChannel:
     def calc_commands(self, dt: float, state, telemetry) -> ApproachResult:
         """Такт воздушного управления: пишет команды в `state`, возвращает диагностику.
 
-        Кадр без пакета стенда (`ics_inputs is None`) или невалидный — команда нейтральная:
+        Кадр без воздушных сигналов (`approach_inputs is None`) или невалидный — команда нейтральная:
         воздушный закон размерный и считать его по нулям значит выдать осмысленно выглядящее
         отклонение по несуществующим данным.
         """
-        inp = getattr(telemetry, "ics_inputs", None) if telemetry is not None else None
+        inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
         if telemetry is None or not telemetry.valid or inp is None:
             state.neutralize_airborne()
             return self.result
@@ -194,7 +194,7 @@ class ApproachChannel:
         темпом. `ControlMode` остаётся `Approach`: смена режима в воздухе сбрасывает автопилот
         стенда. Выравнивание принудительно снимается — на уходе оно неприменимо.
         """
-        inp = getattr(telemetry, "ics_inputs", None) if telemetry is not None else None
+        inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
         if telemetry is None or not telemetry.valid or inp is None:
             state.neutralize_airborne()
             return self.result
@@ -254,7 +254,7 @@ class ApproachChannel:
         static_temperature_k = max(180.0, 273.15 + inp.AirfieldTemp)
         speed_of_sound_kt = 38.967854 * math.sqrt(static_temperature_k)
         mach = (inp.TrueAirspeed / speed_of_sound_kt
-                if inp.TrueAirspeedValid and inp.TrueAirspeed > 0.0 else 0.32)
+                if math.isfinite(inp.TrueAirspeed) and inp.TrueAirspeed > 0.0 else 0.32)
         res.mach = mach
         limits = approach_limits(cfg.landing_weight_kg, flaps, mach)
         res.limits = limits
@@ -269,7 +269,8 @@ class ApproachChannel:
         cfg = self.config
         if self._target_ias_kt is None:
             self._target_ias_kt = (inp.IndicatedAirspeed
-                                   if inp.IndicatedAirspeedValid and inp.IndicatedAirspeed > 0.0
+                                   if math.isfinite(inp.IndicatedAirspeed)
+                                   and inp.IndicatedAirspeed > 0.0
                                    else limits.vapp_kt)
         step = cfg.target_ias_rate_kt_per_s * dt
         self._target_ias_kt += clamp(limits.vapp_kt - self._target_ias_kt, -step, step)
@@ -285,7 +286,9 @@ class ApproachChannel:
         intercept = clamp(cfg.localizer_sign * cfg.localizer_intercept_deg_per_dot * res.loc_dots,
                           -cfg.max_intercept_angle_deg, cfg.max_intercept_angle_deg)
         res.target_heading_deg = (inp.RunwayHeading + intercept) % 360.0
-        res.heading_error_deg = angle_error_deg(res.target_heading_deg, inp.MagneticHeading)
+        # На заходе выдерживается путевой угол, а не ориентация фюзеляжа:
+        # при боковом ветре между ними есть устойчивый угол сноса.
+        res.heading_error_deg = angle_error_deg(res.target_heading_deg, inp.TrkAngleMagnetic)
 
         # Предел крена ужимается с высотой: у земли запас до касания законцовкой минимален.
         res.roll_limit_deg = roll_limit_deg(inp.RadioAltitude, cfg.max_roll_target_deg)
@@ -384,7 +387,7 @@ class ApproachChannel:
             # Выравнивание ведётся прямо по ошибке вертикальной скорости и демпфируется как по
             # положению, так и по угловой скорости тангажа.
             res.vertical_correction_deg = cfg.flare_vs_to_pitch_gain_deg_per_fpm * vs_error
-            pitch_rate = inp.BodyPitchRate if inp.BodyPitchRateValid else 0.0
+            pitch_rate = inp.BodyPitchRate if math.isfinite(inp.BodyPitchRate) else 0.0
             raw_target_pitch = clamp(
                 cfg.flare_pitch_base_deg + res.vertical_correction_deg
                 - cfg.flare_pitch_attitude_damping_gain * inp.PitchAngle
@@ -420,7 +423,8 @@ class ApproachChannel:
         """
         if not cfg.adaptive_aoa_enabled:
             return
-        if not (inp.PitchAngleValid and inp.VerticalSpeedValid and inp.GroundSpeedValid):
+        if not all(math.isfinite(value) for value in (
+                inp.PitchAngle, inp.VerticalSpeed, inp.GroundSpeed)):
             return
 
         upper = min(cfg.adaptive_aoa_max_deg, limits.alpha_prot_deg - 0.5)
@@ -499,7 +503,7 @@ class ApproachChannel:
         if abs(inp.RollAngle) > res.roll_limit_deg:
             warnings.append("ROLL_LIMIT")
         # Нормальное ускорение от ИНС смещено к нулю: установившийся полёт = 0, а не 1 g.
-        if inp.BodyNormAccelValid and abs(inp.BodyNormAccel) > 1.0:
+        if math.isfinite(inp.BodyNormAccel) and abs(inp.BodyNormAccel) > 1.0:
             warnings.append("LOAD_FACTOR")
         if self._flare_active:
             if inp.IndicatedAirspeed <= limits.touchdown_speed_min_kt:

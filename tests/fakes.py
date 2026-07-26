@@ -66,6 +66,7 @@ def airborne_inputs(radio_altitude_ft=1000.0, **overrides) -> ICSInputs:
         PitchAngleValid=1, PitchAngle=2.5,
         RollAngleValid=1, RollAngle=0.0,
         MagneticHeadingValid=1, MagneticHeading=float(RWY_HEADING_TRUE),
+        TrkAngleMagneticValid=1, TrkAngleMagnetic=float(RWY_HEADING_TRUE),
         TrueHeadingValid=1, TrueHeading=float(RWY_HEADING_TRUE),
         BodyPitchRateValid=1, BodyPitchRate=0.0,
         BodyRollRateValid=1, BodyRollRate=0.0,

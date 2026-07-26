@@ -51,6 +51,11 @@ class PretrainRunConfig:
     Черновой пресет ещё не откалиброван, то есть эталона в нём нет, и обучение на нём означает
     поставить сети целью заведомо неверный ответ. Включать сюда шифр матрицы имеет смысл только
     после того, как он реально настроен на стенде."""
+    backend: str = "xplane"
+    start: str = "rollout"
+    xplane_root: str | None = None
+    aircraft_profile: str = "a330-300"
+    runway_profile: str = "uuee-06r"
 
 
 def build_scenarios(cfg: PretrainRunConfig) -> list:
@@ -98,23 +103,32 @@ def matrix_preset_names(*, only_calibrated: bool = True) -> tuple[str, ...]:
     return tuple(names)
 
 
-def build_capture_stack(cfg: PretrainRunConfig, ip: str = LISTEN_IP_ANY, port: int = 3030):
-    """(env, net) поверх стенда; env без Shield (чистая классика). Требует работающий стенд."""
+def build_capture_stack(cfg: PretrainRunConfig, ip: str | None = None,
+                        port: int | None = None, *, backend: str | None = None):
+    """(env, net) поверх выбранного backend; env без Shield (чистая классика)."""
     from ismpu.control.system import ControllingSystem
-    from ismpu.envs.ics_sim import ICSSim
+    from ismpu.envs.backend_factory import build_sim
     from ismpu.envs.rollout_env import RolloutEnv
     from ismpu.config.regulators import validate_action_contract
 
     validate_action_contract()   # контракт обучаемого слоя — до захвата, а не после
 
-    sim = ICSSim(listen_ip=ip, listen_port=port)
+    sim = build_sim(
+        backend or cfg.backend,
+        ip=ip,
+        port=port,
+        xplane_root=cfg.xplane_root,
+        aircraft_profile=cfg.aircraft_profile,
+        runway_profile=cfg.runway_profile,
+    )
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=cfg.npgs.window, shield=None)
     net = NPGS(cfg.npgs)
     return env, net
 
 
-def run_pretrain(cfg: PretrainRunConfig | None = None, ip: str = LISTEN_IP_ANY, port: int = 3030):
+def run_pretrain(cfg: PretrainRunConfig | None = None, ip: str | None = None,
+                 port: int | None = None):
     """Полный SFT: захват на стенде → BC → чекпоинт. → (net, dataset, history)."""
     from ismpu.runtime.train import silence_control_console
 

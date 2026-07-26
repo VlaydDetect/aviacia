@@ -49,7 +49,7 @@ def is_airborne(telemetry, *, min_radio_altitude_ft: float = ENGAGE_MIN_RADIO_AL
     """
     if telemetry is None or not getattr(telemetry, "valid", False):
         return False
-    if getattr(telemetry, "ics_inputs", None) is None:
+    if not getattr(telemetry, "airborne_data_available", False):
         return False
     if telemetry.main_gear_contact:
         return False
@@ -66,7 +66,7 @@ def segment_is_decidable(telemetry) -> bool:
     """
     return (telemetry is not None
             and getattr(telemetry, "valid", False)
-            and getattr(telemetry, "ics_inputs", None) is not None)
+            and getattr(telemetry, "airborne_data_available", False))
 
 
 def initial_segment(telemetry, **kwargs) -> FlightSegment:
@@ -89,10 +89,10 @@ def approach_blocker(telemetry) -> "str | None":
     с заказанной конфигурацией, мы же запрещаем только «не посадочная вовсе» — иначе штатная
     посадка в FULL отвергалась бы при настройке FLAPS 3.
     """
-    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
-        return "нет пакета стенда"
+    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+        return "нет воздушных сигналов backend"
     if telemetry.landing_flaps is None:
-        angle = telemetry.ics_inputs.FlapsAngle
+        angle = telemetry.approach_inputs.FlapsAngle
         return (f"механизация не в посадочной конфигурации (закрылки {angle:.1f}°): таблицы "
                 f"захода МС-21 к ней неприменимы")
     return None
@@ -104,7 +104,7 @@ def in_terminal_window(telemetry, *, limit_ft: float = TERMINAL_RADIO_ALTITUDE_F
     Внутри окна не действуют прерывания по потере валидности ILS и активности стенда: до земли
     остаются секунды, и отпустить органы здесь — худший из вариантов.
     """
-    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
         return False
     if telemetry.main_gear_contact:
         return True
@@ -119,7 +119,7 @@ def above_decision_height(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEI
     выставлять взлётный режим и набирать вслепую хуже, чем довести заход. Обжатая основная стойка
     — уже не воздух: на земле ухода нет даже при козлении.
     """
-    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
         return False
     if telemetry.main_gear_contact:
         return False
@@ -135,7 +135,7 @@ def at_lateral_alignment_gate(telemetry, *, limit_ft: float = GO_AROUND_DECISION
     это последний рубеж перед высотой решения, а выше него боковое положение ограничивает курсовой
     допуск, а не эта планка.
     """
-    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
         return False
     ra = telemetry.radio_altitude_ft
     return ra is not None and limit_ft < ra <= limit_ft + band_ft
@@ -151,7 +151,7 @@ def ils_blocker(telemetry) -> "str | None":
     """
     if in_terminal_window(telemetry):
         return None
-    if telemetry is None or getattr(telemetry, "ics_inputs", None) is None:
+    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
         return None
     if telemetry.ils_valid is False:
         return "стенд снял валидность курсового или глиссадного канала"
@@ -167,7 +167,7 @@ def touched_down(telemetry) -> bool:
     """
     if telemetry is None or not getattr(telemetry, "valid", False):
         return False
-    if getattr(telemetry, "ics_inputs", None) is None:
+    if not getattr(telemetry, "airborne_data_available", False):
         return False
     if telemetry.main_gear_contact:
         return True

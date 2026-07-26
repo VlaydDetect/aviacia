@@ -1,0 +1,50 @@
+import csv
+import json
+
+from ismpu.control.system import ControllingSystem
+from ismpu.envs.scenario import Scenario
+from ismpu.runtime.run_recorder import RunRecorder
+
+from tests.fakes import telemetry
+
+
+def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_path):
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller)
+    original_kp = scenario.control.brake_l["kp"]
+
+    recorder = RunRecorder(
+        root=tmp_path,
+        backend="xplane",
+        aircraft_profile="a330-300",
+        scenario=scenario,
+        start="rollout",
+    )
+    sample = telemetry(groundspeed_ms=80.0)
+    controller.control_step(0.05, sample, send=False)
+    recorder.record(sample, controller, elapsed_s=0.05)
+    exported = recorder.export_gains(controller, label="dashboard")
+    recorder.finish({"accepted": True})
+
+    assert (recorder.directory / "metadata.json").is_file()
+    assert (recorder.directory / "telemetry.csv").is_file()
+    assert (recorder.directory / "report.json").is_file()
+    assert exported.is_file()
+    assert scenario.control.brake_l["kp"] == original_kp
+
+    with (recorder.directory / "telemetry.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["segment"] == "rollout"
+    assert "pid_pitch_p" in rows[0]
+    assert "pid_reverse_r_saturated" in rows[0]
+
+    snapshot = json.loads(exported.read_text(encoding="utf-8"))
+    assert snapshot["backend"] == "xplane"
+    assert set(snapshot["gains"]) == {
+        "roll", "pitch", "air_speed", "steer",
+        "brake_l", "brake_r", "reverse_l", "reverse_r",
+    }

@@ -28,12 +28,11 @@ cloning) can regress toward the hand-tuned expert presets; safety is preserved b
 per-scenario preset as its bound/fallback anchor. Full architecture in `implementation_plan.md` §10; targets
 **A330-300** and **МС-21**.
 
-> **The X-Plane path is gone.** The project used to train against X-Plane 12 behind a two-backend
-> `SimInterface` abstraction. Everything now runs against the bench: one transport (`io/ics_connector.py`),
-> one sim object (`envs/ics_sim.ICSSim`), no backend switch. The consequences are structural, not
-> cosmetic — **we no longer own the environment**. There is no teleport, no episode reset, no weather
-> lever and no failure injection; the bench operator sets the conditions and reports them as telemetry.
-> Anything in older commits or the plan that "applies" a scenario to the simulator is obsolete.
+> **There are two backends again.** ICS remains the production and runtime default; X-Plane 12 is the
+> resettable training/evaluation backend. Both implement `envs/sim_interface.py::SimInterface` and emit the
+> same `Telemetry`. Only `XPlaneSim` applies scenario initial conditions, weather and failures. `ICSSim.reset`
+> remains observational because the bench operator owns its environment. The stock A330 X-Plane approach
+> preset is deliberately `draft` until the live acceptance checklist in `docs/XPLANE_DASHBOARD.md` passes.
 
 ## Planning & reference documents
 
@@ -41,9 +40,10 @@ Read these before making architectural changes — they define the target design
 
 - **[`implementation_plan.md`](implementation_plan.md)** — the phased plan for the neural-control rework:
   target package layout (`ismpu/`), the full Observation/Action spaces, Shield, PPO + multi-component loss,
-  and the observer seams. **This is the source of truth for where the project is going**. It predates the
-  X-Plane removal in places; where it says "X-Plane", read "bench", and where it describes setting up the
-  environment, see the note above.
+  and the observer seams. **This is the source of truth for where the project is going**. ICS is the
+  production backend; X-Plane owns reset/randomization for automated training.
+- **[`docs/XPLANE_DASHBOARD.md`](docs/XPLANE_DASHBOARD.md)** — current backend CLI, X-Plane setup,
+  PID dashboard/replay, run artifacts and the mandatory live acceptance checklist.
 - **[`docs/PIDNN.mmd`](docs/PIDNN.mmd)** — Mermaid diagram of the full architecture (scenario selection, bench,
   PINN observer, NPGS multi-head actor, Shield, classical control, PPO loop, deployment). Data-flow reference.
 - **[`docs/ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf`](docs/ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf)** — the customer's
@@ -88,12 +88,19 @@ Read these before making architectural changes — they define the target design
   `main()` with no argument **picks the preset by telemetry** (`select_for_telemetry`); pass a name
   (`main("nws_fail")`) to force one — see `ismpu.envs.scenario.SCENARIO_PRESETS`. Presets describe the
   **rollout**; the airborne segment is the same static config for every scenario.
-- **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (needs the bench). Captures
+- **Run against X-Plane:** `python -m ismpu.runtime.loop --backend xplane --start approach
+  --xplane-root C:\X-Plane 12`. For fast rollout reset use `--start rollout`. X-Plane is never selected
+  implicitly by the delivery loop.
+- **PID dashboard:** add `--dashboard` for monitor-only mode on `127.0.0.1:8765`, or
+  `--dashboard-tune` to permit explicit gain changes. Replay a CSV with
+  `python -m ismpu.gui.dashboard --replay runs\<run>\telemetry.csv`.
+- **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (X-Plane/rollout by default). Captures
   classical rollouts of the non-draft presets and behavior-clones the NPGS toward their coefficients →
   `checkpoints/npgs_sft.pt`. Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)`
   (see `tests/test_pretrain.py`).
-- **Train the NPGS:** `python -m ismpu.runtime.train` (needs the bench). Builds env + controller over one
-  `ICSSim`, PPO + curriculum, checkpoints to `checkpoints/`. Set `TrainConfig.init_from="checkpoints/npgs_sft.pt"`
+- **Train the NPGS:** `python -m ismpu.runtime.train` (X-Plane/rollout by default). Builds env + controller,
+  PPO + curriculum, checkpoints to `checkpoints/`. ICS remains available explicitly with
+  `TrainConfig(backend="ics")`. Set `TrainConfig.init_from="checkpoints/npgs_sft.pt"`
   to start from the SFT warm-start (strongly recommended — a cold net emits DEFAULT gains, unsafe on failures).
   Offline (no bench) validation of the PPO loop: `ismpu.runtime.train.smoke_train(env, provider, updates=...)`
   with a scripted bench (see `tests/fakes.py`, `tests/test_ppo.py`).
@@ -120,8 +127,9 @@ Read these before making architectural changes — they define the target design
 
 ## Package layout
 
-- `ismpu/io/` — transport: `ics_connector.py` (`ICSInputs`/`ICSOutputs`/`ICSBenchConnector`),
-  `ics_engagement.py` (the engagement state machine).
+- `ismpu/io/` — transports: `ics_connector.py` (`ICSInputs`/`ICSOutputs`/`ICSBenchConnector`),
+  `ics_engagement.py` (the engagement state machine), `xplane_connector.py` (RREF/DREF/CMND/VEHS),
+  `datarefs.py` (curated X-Plane 12 DataRefs).
 - `ismpu/control/` — the classical loop: `pid.py`, `runway_tracker.py`, `trajectory.py`, `channels.py`
   (`ControlsState` + the two ground channels), `approach.py` (`ApproachChannel` — the airborne law +
   `go_around_command`, the TOGA/climb/wings-level law), `tolerance.py` (`evaluate_approach_tolerances` — the
@@ -140,16 +148,18 @@ Read these before making architectural changes — they define the target design
   actuator limits, valid-mask bits, engagement timings, flight phases), `regulators.py`
   (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` — neutral, breaks a shield↔gain_space cycle),
   `requirements.py` (the ТЗ acceptance thresholds + go-around decision height / debounce).
-- `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `train.py` (PPO loop + `smoke_train`,
+- `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `run_recorder.py` (common run artifacts),
+  `roman_logs.py` (external CSV normalization/manifest verification), `train.py` (PPO loop + `smoke_train`,
   `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start), `evaluate.py` (ТЗ acceptance +
   baselines + admission gate). `deploy.py` comes in Phase 6.
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
-- `ismpu/envs/` — environment + RL layer: `ics_sim.py` (`Telemetry` + `ICSSim`), `weather.py`, `scenario.py`,
+- `ismpu/envs/` — environment + RL layer: `sim_interface.py`, `ics_sim.py` (`Telemetry` + `ICSSim`),
+  `xplane_sim.py`, `backend_factory.py`, `weather.py`, `scenario.py`,
   `scenario_generator.py`, `observation.py` / `action.py` / `reward.py` / `rollout_env.py`, `splits.py`,
   `reproducibility.py`.
 - `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_space.py` (absolute-gain map)
   + `gain_scheduler.py` (NPGS actor+critic) + `ppo.py` + `pretrain.py` (SFT/BC) (all done). `observer.py` comes
-  in Phase 7. `ismpu/gui/` — not yet created.
+  in Phase 7. `ismpu/gui/` — the local nine-view PID dashboard and CSV replay server.
 
 ## Bench interface (`ismpu/io/ics_connector.py`, `ismpu/config/ics.py`)
 

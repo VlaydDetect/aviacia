@@ -71,6 +71,7 @@ def _descent_frames(n=340, *, start_ra=420.0, descent_fps=20.0):
             IndicatedAirspeed=143.0 + 2.0 * math.sin(i / 8.0),
             TrueAirspeed=148.0,
             MagneticHeading=75.079 + 0.8 * math.sin(i / 10.0),
+            TrkAngleMagnetic=75.079 + 0.8 * math.sin(i / 10.0),
             LeftThrottleAngle=20.0 + 0.4 * i % 5, RightThrottleAngle=20.0 + 0.3 * i % 5,
         ))
         ra = max(0.0, ra - descent_fps * 0.05)
@@ -120,6 +121,73 @@ def test_the_parity_scenario_actually_reaches_flare():
         res = ours.calc_commands(0.05, state, _telemetry(inp))
         seen_flare = seen_flare or res.flare_active
     assert seen_flare
+
+
+def test_lateral_loop_uses_magnetic_track_not_fuselage_heading():
+    """Угол сноса не должен превращаться в ошибку курса на локализаторе."""
+    channel = _our_channel()
+    state = ControlsState()
+    inp = airborne_inputs(
+        MagneticHeading=68.0,
+        TrkAngleMagnetic=float(75.079),
+        RunwayHeading=float(75.079),
+        LocDeviation=0.0,
+    )
+
+    result = channel.calc_commands(0.05, state, _telemetry(inp))
+
+    assert result.heading_error_deg == pytest.approx(0.0, abs=1e-12)
+    assert result.target_roll_deg == pytest.approx(0.0, abs=1e-12)
+
+
+def test_finite_values_remain_authoritative_when_valid_flags_are_zero():
+    """Стенд иногда сбрасывает Valid при сохранении пригодного численного значения."""
+    normal = _our_channel()
+    flagged = _our_channel()
+    state_normal = ControlsState()
+    state_flagged = ControlsState()
+    values = dict(
+        TrueAirspeed=151.0,
+        IndicatedAirspeed=147.0,
+        PitchAngle=2.4,
+        VerticalSpeed=-720.0,
+        GroundSpeed=139.0,
+        BodyNormAccel=0.2,
+    )
+    normal_inp = airborne_inputs(**values)
+    flagged_inp = airborne_inputs(
+        **values,
+        TrueAirspeedValid=0,
+        IndicatedAirspeedValid=0,
+        PitchAngleValid=0,
+        VerticalSpeedValid=0,
+        GroundSpeedValid=0,
+        BodyNormAccelValid=0,
+    )
+
+    expected = normal.calc_commands(0.05, state_normal, _telemetry(normal_inp))
+    got = flagged.calc_commands(0.05, state_flagged, _telemetry(flagged_inp))
+
+    assert got.mach == pytest.approx(expected.mach, abs=1e-12)
+    assert got.target_ias_kt == pytest.approx(expected.target_ias_kt, abs=1e-12)
+    assert got.reference_aoa_deg == pytest.approx(expected.reference_aoa_deg, abs=1e-12)
+    assert got.elevator_g == pytest.approx(expected.elevator_g, abs=1e-12)
+
+
+def test_non_finite_optional_measurements_are_not_used():
+    channel = _our_channel()
+    state = ControlsState()
+    inp = airborne_inputs(
+        TrueAirspeed=math.nan,
+        IndicatedAirspeed=math.inf,
+        BodyNormAccel=math.nan,
+    )
+
+    result = channel.calc_commands(0.05, state, _telemetry(inp))
+
+    assert math.isfinite(result.mach)
+    assert math.isfinite(result.target_ias_kt)
+    assert "LOAD_FACTOR" not in result.envelope_warnings
 
 
 # --------------------------------------------------------------------------- #

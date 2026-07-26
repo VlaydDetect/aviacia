@@ -81,7 +81,7 @@ def evaluate_approach_tolerances(telemetry, result, limits, faults, *,
     (`Telemetry.faults`). `at_decision_gate` — активен ли гейт совмещения с осью ± 5 м (у высоты
     решения 30 м): выше него боковое отклонение допуском не ограничивается (за него отвечает курс).
     """
-    inp = getattr(telemetry, "ics_inputs", None) if telemetry is not None else None
+    inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
     violations = []
 
     course_deg = abs(result.course_deg)

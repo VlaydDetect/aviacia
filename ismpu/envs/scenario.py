@@ -17,15 +17,50 @@
 батареи.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from ismpu.control.failures import FailureMode
 from ismpu.config.scenarios import ScenarioConfig, SCENARIOS
+from ismpu.config.constants import INITIAL_SPEED_KTS
 from ismpu.envs.weather import WeatherState, decompose_wind
 from ismpu.config.runway import RWY_HEADING_TRUE
 
 # Стандартные условия пресетов: ясно, штиль, ВПП сухая (WeatherState() по умолчанию).
 STANDARD_WEATHER = WeatherState()
+
+
+@dataclass(frozen=True)
+class ApproachSetup:
+    """Начальные условия захода X-Plane на продолжении оси и глиссады."""
+
+    radio_altitude_ft: float = 2800.0
+    ias_knots: float = 150.0
+    vertical_speed_fpm: float = -750.0
+    glideslope_deg: float = 3.0
+    flap_ratio: float = 0.75
+    lateral_offset_m: float = 0.0
+    heading_offset_deg: float = 0.0
+    loc_offset_dots: float = 0.0
+    gs_offset_dots: float = 0.0
+
+
+@dataclass(frozen=True)
+class TouchdownSetup:
+    """Начальные условия быстрого старта непосредственно с пробега."""
+
+    speed_knots: float = INITIAL_SPEED_KTS
+    descent_rate_fpm: float = 0.0
+    pitch_deg: float = 0.0
+    lateral_offset_m: float = 0.0
+    heading_offset_deg: float = 0.0
+
+
+@dataclass(frozen=True)
+class SensorNoise:
+    pos_sigma_m: float = 0.0
+    heading_sigma_deg: float = 0.0
+    speed_sigma_ms: float = 0.0
+    dropout_prob: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +71,9 @@ class Scenario:
     control: ScenarioConfig                                    # классические коэффициенты (config.scenarios)
     weather: WeatherState = field(default_factory=lambda: STANDARD_WEATHER)
     failures: tuple[FailureMode, ...] = ()
+    approach: ApproachSetup = field(default_factory=ApproachSetup)
+    touchdown: TouchdownSetup = field(default_factory=TouchdownSetup)
+    sensor_noise: SensorNoise = field(default_factory=SensorNoise)
 
     @property
     def primary_failure(self) -> FailureMode:
@@ -58,6 +96,9 @@ class Scenario:
     @classmethod
     def from_preset(cls, name: str, *, weather: WeatherState | None = None,
                     failures: tuple | None = None,
+                    approach: ApproachSetup | None = None,
+                    touchdown: TouchdownSetup | None = None,
+                    sensor_noise: SensorNoise | None = None,
                     scenario_id: str | None = None, seed: int = 0) -> "Scenario":
         """Готовый сценарий из пресета `config.scenarios.SCENARIOS[name]`."""
         control = SCENARIOS[name]
@@ -67,8 +108,16 @@ class Scenario:
         if weather is None:
             weather = control.weather if control.weather is not None else STANDARD_WEATHER
 
-        return cls(scenario_id=scenario_id or name, seed=seed, control=control,
-                   weather=weather, failures=tuple(failures))
+        return cls(
+            scenario_id=scenario_id or name,
+            seed=seed,
+            control=control,
+            weather=weather,
+            failures=tuple(failures),
+            approach=approach or ApproachSetup(),
+            touchdown=touchdown or TouchdownSetup(),
+            sensor_noise=sensor_noise or SensorNoise(),
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +126,9 @@ class Scenario:
             "control": self.control.name,   # канонический ключ SCENARIOS
             "weather": self.weather.to_dict(),
             "failures": [f.name for f in self.failures],
+            "approach": asdict(self.approach),
+            "touchdown": asdict(self.touchdown),
+            "sensor_noise": asdict(self.sensor_noise),
         }
 
     @classmethod
@@ -87,6 +139,9 @@ class Scenario:
             control=SCENARIOS[d["control"]],
             weather=WeatherState.from_dict(d["weather"]),
             failures=tuple(FailureMode[name] for name in d.get("failures", [])),
+            approach=ApproachSetup(**d.get("approach", {})),
+            touchdown=TouchdownSetup(**d.get("touchdown", {})),
+            sensor_noise=SensorNoise(**d.get("sensor_noise", {})),
         )
 
 

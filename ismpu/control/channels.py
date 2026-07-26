@@ -155,6 +155,7 @@ class LongitudinalChannel:
         self.pid_rev_r = pid_rev_r
 
         self.traveled_distance_m = 0.0
+        self.last_diagnostics = {}
         self.w_lon = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
         self.rollout_started = False
         """Защёлка «пробег действительно начался».
@@ -184,6 +185,12 @@ class LongitudinalChannel:
 
         # Глобальная ошибка по скорости. >0 означает, что мы едем слишком быстро
         error = current_speed_ms - ref_speed_ms
+        self.last_diagnostics = {
+            "value": current_speed_ms,
+            "setpoint": ref_speed_ms,
+            "error": error,
+            "distance_m": self.traveled_distance_m,
+        }
 
         # 1. Расчет тормозов (Hydraulic Brakes). w_lon — вес влияния канала (=1 у классики).
         state.cmd_brake_l = self.w_lon * self.pid_brake_l.compute(error, dt)
@@ -234,6 +241,7 @@ class LateralChannel:
         self.steering_brake_gain = steering_brake_gain
         self.steering_rev_gain = steering_rev_gain
         self.w_lat = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
+        self.last_diagnostics = {}
 
         print("[LateralChannel] Запуск латерального канала.")
 
@@ -273,6 +281,13 @@ class LateralChannel:
             return
 
         error = guidance["heading_error_deg"]
+        self.last_diagnostics = {
+            "value": heading,
+            "setpoint": guidance["desired_heading_deg"],
+            "error": error,
+            "xte_m": guidance["xte"],
+            "lookahead_m": guidance["lookahead"],
+        }
         # Показатели выдерживания (ТЗ 5.1.5): боковое уклонение в **метрах** от осевой и ошибка
         # курса в градусах. На пробеге их обязан заполнять именно этот канал — иначе на стенд
         # уходили бы замороженные величины момента касания (в точках курсового маяка!), а при

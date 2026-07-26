@@ -39,6 +39,11 @@ class TrainConfig:
     checkpoint_every: int = 20
     silence_console: bool = True      # заглушить cprint контура (иначе флуд на 20 Гц×5)
     init_from: str | None = None      # SFT-чекпоинт (npgs_sft.pt) — тёплый старт перед PPO
+    backend: str = "xplane"
+    start: str = "rollout"
+    xplane_root: str | None = None
+    aircraft_profile: str = "a330-300"
+    runway_profile: str = "uuee-06r"
     npgs: NPGSConfig = field(default_factory=NPGSConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
@@ -97,14 +102,20 @@ class CSVLogger:
 # Тренировочный стек на стенде
 # --------------------------------------------------------------------------- #
 
-def build_ics_stack(cfg: TrainConfig, ip: str = LISTEN_IP_ANY, port: int = 3030):
+def build_training_stack(
+    cfg: TrainConfig,
+    ip: str | None = None,
+    port: int | None = None,
+    *,
+    backend: str | None = None,
+):
     """Строит (env, npgs, trainer) поверх стенда. Требует работающий стенд.
 
     С `cfg.init_from` — грузит SFT-подогретые веса (тёплый старт; конфиг/нормировка берутся
     из чекпоинта). При `ppo.lambda_anchor > 0` замороженная SFT-копия ставится как
     `trainer.sft_reference` (L_anchor — не забывать пресеты)."""
     from ismpu.control.system import ControllingSystem
-    from ismpu.envs.ics_sim import ICSSim
+    from ismpu.envs.backend_factory import build_sim
     from ismpu.envs.rollout_env import RolloutEnv
 
     # Контракт обучаемого слоя проверяется ДО того, как потрачен прогон: рассинхронизация
@@ -113,7 +124,14 @@ def build_ics_stack(cfg: TrainConfig, ip: str = LISTEN_IP_ANY, port: int = 3030)
 
     net = NPGS.load(cfg.init_from) if cfg.init_from else NPGS(cfg.npgs)
 
-    sim = ICSSim(listen_ip=ip, listen_port=port)
+    sim = build_sim(
+        backend or cfg.backend,
+        ip=ip,
+        port=port,
+        xplane_root=cfg.xplane_root,
+        aircraft_profile=cfg.aircraft_profile,
+        runway_profile=cfg.runway_profile,
+    )
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=net.cfg.window, shield=Shield())
 
@@ -126,7 +144,13 @@ def build_ics_stack(cfg: TrainConfig, ip: str = LISTEN_IP_ANY, port: int = 3030)
     return env, net, trainer
 
 
-def train(cfg: TrainConfig | None = None, ip: str = LISTEN_IP_ANY, port: int = 3030) -> PPOTrainer:
+def build_ics_stack(cfg: TrainConfig, ip: str = LISTEN_IP_ANY, port: int = 3030):
+    """Обратная совместимость: явно построить поставочный ICS-стек."""
+    return build_training_stack(cfg, ip=ip, port=port, backend="ics")
+
+
+def train(cfg: TrainConfig | None = None, ip: str | None = None,
+          port: int | None = None) -> PPOTrainer:
     """Полный цикл обучения на стенде с curriculum, логом и чекпоинтами."""
     from ismpu.envs.scenario_generator import ScenarioGenerator
 
@@ -134,7 +158,7 @@ def train(cfg: TrainConfig | None = None, ip: str = LISTEN_IP_ANY, port: int = 3
     if cfg.silence_console:
         silence_control_console()
 
-    env, net, trainer = build_ics_stack(cfg, ip=ip, port=port)
+    env, net, trainer = build_training_stack(cfg, ip=ip, port=port)
     generator = ScenarioGenerator(seed=cfg.seed)
     provider = make_curriculum_provider(generator, trainer, cfg.total_updates, cfg.curriculum_ramp)
 

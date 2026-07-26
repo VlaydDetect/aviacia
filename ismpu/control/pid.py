@@ -63,6 +63,12 @@ class PIDController:
         self.der_filter_tf = der_filter_tf  # Постоянная времени фильтра низких частот D-составляющей (T_f в секундах)
         self.filtered_derivative = 0.0  # Накопленное отфильтрованное значение производной
         self.last_output = 0.0  # Последний зажатый выход (для Observation Space)
+        self.last_error = 0.0
+        self.last_measurement = None
+        self.last_unconstrained = 0.0
+        self.last_p_term = 0.0
+        self.last_i_term = 0.0
+        self.last_d_term = 0.0
 
         # --- опциональная численность (по умолчанию = прежнее поведение) ---
         self.derivative_on_measurement = derivative_on_measurement
@@ -161,6 +167,13 @@ class PIDController:
         self.prev_error = error
         self._prev_deriv_input = deriv_input
 
+        self.last_error = error
+        self.last_measurement = measurement
+        self.last_p_term = self.kp * error
+        self.last_i_term = self.ki * self.integral
+        self.last_d_term = self.kd * derivative
+        self.last_unconstrained = (
+            self.last_p_term + self.last_i_term + self.last_d_term)
         self.last_output = self.clamp(unconstrained)
         return self.last_output
 
@@ -188,3 +201,8 @@ class PIDController:
         self.prev_error = None
         self.filtered_derivative = 0.0
         self._prev_deriv_input = None
+        self.last_error = 0.0
+        self.last_measurement = None
+        self.last_unconstrained = 0.0
+        self.last_p_term = self.last_i_term = self.last_d_term = 0.0
+        self.last_output = 0.0

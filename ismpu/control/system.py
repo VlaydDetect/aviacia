@@ -23,6 +23,7 @@ from ismpu.control.trajectory import ReferenceTrajectory, VelocityLaw
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
 from ismpu.control.approach import ApproachChannel
+from ismpu.control.approach_criteria import ApproachCriteriaMonitor
 from ismpu.control.tolerance import evaluate_approach_tolerances
 from ismpu.control.failures import FailureManager, FailureMode
 from ismpu.control.flight import (
@@ -84,6 +85,7 @@ class ControllingSystem:
         self.go_around: Optional[GoAroundManeuver] = None
         self.go_around_reason: Optional[str] = None
         self.tolerance_report = None
+        self.approach_criteria = ApproachCriteriaMonitor()
         """Отчёт монитора допусков за последний такт захода (диагностика/логи)."""
         self._violation_ticks = 0
         """Дебаунс триггера ухода: сколько тактов подряд допуски не выполняются."""
@@ -100,6 +102,7 @@ class ControllingSystem:
         self.go_around = None
         self.go_around_reason = None
         self.tolerance_report = None
+        self.approach_criteria = ApproachCriteriaMonitor()
         self._violation_ticks = 0
 
         tracker = RunwayTracker(lookahead_min, lookahead_gain, xte_gain)
@@ -162,7 +165,7 @@ class ControllingSystem:
         """
         if telemetry is None or not telemetry.valid:
             return
-        if getattr(telemetry, "ics_inputs", None) is None:
+        if not getattr(telemetry, "faults_available", False):
             return
         self.failures.sync(telemetry.faults)
 
@@ -245,6 +248,16 @@ class ControllingSystem:
         if self.go_around is not None:
             return self._go_around_step(dt, telemetry)
 
+        criteria_ra = getattr(
+            getattr(telemetry, "approach_inputs", None), "RadioAltitude", None)
+        if (
+            criteria_ra is not None
+            and criteria_ra <= self.approach_criteria.config.cutoff_radio_altitude_ft
+            and not self.approach_criteria.cutoff_reached
+        ):
+            self.approach_criteria.observe(
+                telemetry, self.approach_channel.result.flight_path_angle_deg)
+
         if touched_down(telemetry):
             self.hand_over_to_rollout()
             return self._ground_step(dt)
@@ -261,6 +274,9 @@ class ControllingSystem:
             return self._abort_approach(blocker)
 
         self.approach_channel.calc_commands(dt, self.state, telemetry)
+        if not self.approach_criteria.cutoff_reached:
+            self.approach_criteria.observe(
+                telemetry, self.approach_channel.result.flight_path_angle_deg)
 
         # Проверка допусков ТЗ на каждом такте. Если выше высоты решения они устойчиво не
         # выполняются — садиться нельзя: заход прерывается уходом на второй круг.
@@ -349,7 +365,7 @@ class ControllingSystem:
 
     def _climb_established(self, telemetry) -> bool:
         """Набор устойчив: есть и вертикальная скорость вверх, и прирост радиовысоты над входом."""
-        inp = telemetry.ics_inputs
+        inp = telemetry.approach_inputs
         cfg = self.approach_channel.config
         climbing = inp.VerticalSpeed >= cfg.go_around_min_climb_fpm
         gained = ((telemetry.radio_altitude_ft or 0.0) - self.go_around.entry_radio_altitude_ft

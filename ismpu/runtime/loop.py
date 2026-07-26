@@ -13,22 +13,28 @@
 определяется из заголовка первого входящего пакета, задавать его не нужно.
 """
 
+import argparse
 import time
+from dataclasses import replace
 
 from ismpu.control.system import ControllingSystem
 from ismpu.control.flight import FlightSegment
 from ismpu.config.constants import DT
 from ismpu.io.ics_connector import LISTEN_IP_ANY
-from ismpu.envs.ics_sim import ICSSim
+from ismpu.envs.backend_factory import build_sim
+from ismpu.envs.sim_interface import SimInterface
+from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE
 from ismpu.envs.scenario import (
     Scenario, SCENARIO_PRESETS, select_for_telemetry, resolve_preset,
 )
 
 
-def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
+def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
+        start: str | None = None, recorder: RunRecorder | None = None,
+        dashboard_state=None):
     """Прогоняет один полёт на уже настроенном контуре."""
-    telemetry = sim.reset(scenario)
+    telemetry = sim.reset(scenario, start=start)
 
     # Участок определяется ДО рукопожатия: от него зависит, какой стимул гнать (переход в
     # `Approach` или в `Taxi`) — автомат включения выбирает его по той же телеметрии.
@@ -40,6 +46,11 @@ def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
     print("Прогрев (ожидание, пока стенд примет управление)...")
     sim.warm_up()
     controller.last_telemetry = sim.read_telemetry()
+    run_started = time.monotonic()
+    if recorder is not None:
+        recorder.record(controller.last_telemetry, controller, elapsed_s=0.0)
+    if dashboard_state is not None:
+        dashboard_state.capture(elapsed_s=0.0)
 
     print("Управление включено.")
     last_time = time.time()
@@ -50,7 +61,17 @@ def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
 
             if dt >= DT:
                 # Контур сам читает телеметрию и сам отправляет команды через sim.
-                if controller.control_step(dt):
+                finished = controller.control_step(dt)
+                if recorder is not None and controller.last_telemetry is not None:
+                    recorder.record(
+                        controller.last_telemetry,
+                        controller,
+                        elapsed_s=time.monotonic() - run_started,
+                    )
+                if dashboard_state is not None:
+                    dashboard_state.capture(
+                        elapsed_s=time.monotonic() - run_started)
+                if finished:
                     if controller.segment is FlightSegment.ROLLOUT:
                         # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
                         controller.hand_over_to_taxi()
@@ -69,9 +90,15 @@ def run(controller: ControllingSystem, sim: ICSSim, scenario: Scenario):
 
     except KeyboardInterrupt:
         controller.control_exception()
+    finally:
+        if recorder is not None:
+            recorder.finish({
+                "tolerances": controller.tolerance_report,
+                "approach_criteria_a11": controller.approach_criteria.verdict(),
+            })
 
 
-def _lost_engagement(controller: ControllingSystem, sim: ICSSim) -> bool:
+def _lost_engagement(controller: ControllingSystem, sim: SimInterface) -> bool:
     """Снял ли стенд активность посреди прогона. → пора останавливаться.
 
     Без этой проверки потеря включения проходит **молча**: `ICSSim._to_outputs` перестаёт
@@ -82,12 +109,25 @@ def _lost_engagement(controller: ControllingSystem, sim: ICSSim) -> bool:
     """
     if sim.engaged:
         return False
-    print(f"[loop] стенд снял активность (AgentIsActive=0) на участке "
-          f"{controller.segment.value}: {sim.engagement.as_dict()}")
+    details = getattr(getattr(sim, "engagement", None), "as_dict", lambda: {})()
+    print(f"[loop] backend {sim.backend_name} снял управление на участке "
+          f"{controller.segment.value}: {details}")
     return True
 
 
-def main(preset: "str | Scenario | None" = None, ip: str = LISTEN_IP_ANY, port: int = 3030):
+def main(
+    preset: "str | Scenario | None" = None,
+    ip: str | None = None,
+    port: int | None = None,
+    *,
+    backend: str = "ics",
+    start: str | None = None,
+    xplane_root: str | None = None,
+    aircraft_profile: str = "a330-300",
+    runway_profile: str = "uuee-06r",
+    dashboard: bool = False,
+    dashboard_tune: bool = False,
+):
     """Точка входа: подключиться к стенду, выбрать пресет и провести полёт.
 
     `preset=None` — пресет **подбирается по телеметрии** стенда: по фактическим отказам и погоде
@@ -104,16 +144,29 @@ def main(preset: "str | Scenario | None" = None, ip: str = LISTEN_IP_ANY, port: 
     Черновые пресеты матрицы автоматическим подбором **не берутся** — только по имени или шифру,
     и запуск об этом предупреждает.
     """
-    sim = ICSSim(listen_ip=ip, listen_port=port)
+    sim = build_sim(
+        backend,
+        ip=ip,
+        port=port,
+        xplane_root=xplane_root,
+        aircraft_profile=aircraft_profile,
+        runway_profile=runway_profile,
+    )
     controller = ControllingSystem(sim)
 
     if isinstance(preset, Scenario):
         scenario = preset
-    elif preset is None:
+    elif preset is None and backend == "ics":
         scenario = select_for_telemetry(sim.read_telemetry())
         print(f"Сценарий подобран по телеметрии стенда: {scenario.scenario_id}")
+    elif preset is None:
+        scenario = SCENARIO_PRESETS["default"]
     else:
         scenario = resolve_preset(preset)
+
+    if backend == "xplane":
+        from ismpu.config.xplane_presets import xplane_ground_preset
+        scenario = replace(scenario, control=xplane_ground_preset(scenario.control.name))
 
     if scenario.matrix_code:
         case = CASE_BY_CODE.get(scenario.matrix_code)
@@ -125,8 +178,72 @@ def main(preset: "str | Scenario | None" = None, ip: str = LISTEN_IP_ANY, port: 
                   f"убедитесь, что на стенде выставлен именно этот прогон.")
 
     scenario.apply_control(controller)   # PID пресета (отказы уточняются по телеметрии)
-    run(controller, sim, scenario)
+    if backend == "xplane":
+        # ``ScenarioConfig.apply`` настраивает связанный стендовый воздушный пресет;
+        # для A330 возвращаем отдельный черновой набор после наземной настройки.
+        from ismpu.config.xplane_presets import XPLANE_A330_APPROACH
+        controller.setup_approach(XPLANE_A330_APPROACH)
+    recorder = RunRecorder(
+        backend=sim.backend_name,
+        aircraft_profile=sim.aircraft_profile_name,
+        scenario=scenario,
+        start=start,
+    )
+    print(f"Журнал прогона: {recorder.directory}")
+    dashboard_server = None
+    dashboard_state = None
+    if dashboard or dashboard_tune:
+        from ismpu.gui.dashboard import DashboardServer, DashboardState
+        dashboard_state = DashboardState(
+            controller,
+            sim=sim,
+            scenario=scenario,
+            recorder=recorder,
+            tune_enabled=dashboard_tune,
+        )
+        dashboard_server = DashboardServer(dashboard_state).start()
+        mode = "tuning" if dashboard_tune else "monitor-only"
+        print(
+            f"PID dashboard: http://{dashboard_server.address[0]}:"
+            f"{dashboard_server.address[1]} ({mode})"
+        )
+    try:
+        run(
+            controller,
+            sim,
+            scenario,
+            start=start,
+            recorder=recorder,
+            dashboard_state=dashboard_state,
+        )
+    finally:
+        if dashboard_server is not None:
+            dashboard_server.stop()
+        sim.close()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="ИСМПУ: стенд ICS или X-Plane 12")
+    parser.add_argument("preset", nargs="?", default=None)
+    parser.add_argument("--backend", choices=("ics", "xplane"), default="ics")
+    parser.add_argument("--start", choices=("approach", "rollout"), default=None)
+    parser.add_argument("--ip", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--xplane-root", default=None)
+    parser.add_argument("--aircraft-profile", default="a330-300")
+    parser.add_argument("--runway-profile", default="uuee-06r")
+    parser.add_argument("--dashboard", action="store_true")
+    parser.add_argument("--dashboard-tune", action="store_true")
+    args = parser.parse_args()
+    main(
+        args.preset,
+        ip=args.ip,
+        port=args.port,
+        backend=args.backend,
+        start=args.start,
+        xplane_root=args.xplane_root,
+        aircraft_profile=args.aircraft_profile,
+        runway_profile=args.runway_profile,
+        dashboard=args.dashboard,
+        dashboard_tune=args.dashboard_tune,
+    )

@@ -31,7 +31,7 @@ from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.ics_sim import ICSSim
+from ismpu.envs.sim_interface import SimInterface
 from ismpu.envs.scenario import Scenario
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, ObserverEstimate
 from ismpu.envs.action import decode, apply_corrections, ACTION_LOW, ACTION_HIGH
@@ -95,7 +95,7 @@ def _snapshot_command(state: ControlsState) -> ControlsState:
 
 
 class RolloutEnv:
-    def __init__(self, sim: ICSSim, controller: ControllingSystem, *,
+    def __init__(self, sim: SimInterface, controller: ControllingSystem, *,
                  dt: float = DT, history_len: int = 1, shield=None,
                  obs_builder: ObservationBuilder | None = None,
                  reward_weights: RewardWeights | None = None, max_steps: int = 4000):
@@ -126,6 +126,10 @@ class RolloutEnv:
     # --- Gymnasium API ---
 
     def reset(self, scenario: Scenario, *, seed=None):
+        if getattr(self.sim, "backend_name", "") == "xplane":
+            from ismpu.config.xplane_presets import xplane_ground_preset
+            scenario = replace(
+                scenario, control=xplane_ground_preset(scenario.control.name))
         self._scenario = scenario
         telemetry = self.sim.reset(scenario)          # сброс рукопожатия + первый кадр стенда
         # Рукопожатие ДО первого шага: иначе такты прогрева попали бы в `_steps`, reward и

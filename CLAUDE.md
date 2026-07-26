@@ -28,12 +28,11 @@ cloning) can regress toward the hand-tuned expert presets; safety is preserved b
 per-scenario preset as its bound/fallback anchor. Full architecture in `implementation_plan.md` §10; targets
 **A330-300** and **МС-21**.
 
-> **The X-Plane path is gone.** The project used to train against X-Plane 12 behind a two-backend
-> `SimInterface` abstraction. Everything now runs against the bench: one transport (`io/ics_connector.py`),
-> one sim object (`envs/ics_sim.ICSSim`), no backend switch. The consequences are structural, not
-> cosmetic — **we no longer own the environment**. There is no teleport, no episode reset, no weather
-> lever and no failure injection; the bench operator sets the conditions and reports them as telemetry.
-> Anything in older commits or the plan that "applies" a scenario to the simulator is obsolete.
+> **There are two backends again.** ICS remains the production and runtime default; X-Plane 12 is the
+> resettable training/evaluation backend. Both implement `envs/sim_interface.py::SimInterface` and emit the
+> same `Telemetry`. Only `XPlaneSim` applies scenario initial conditions, weather and failures. `ICSSim.reset`
+> remains observational because the bench operator owns its environment. The stock A330 X-Plane approach
+> preset is deliberately `draft` until the live acceptance checklist in `docs/XPLANE_DASHBOARD.md` passes.
 
 ## Planning & reference documents
 
@@ -149,7 +148,7 @@ Read these before making architectural changes — they define the target design
   `reproducibility.py`.
 - `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_space.py` (absolute-gain map)
   + `gain_scheduler.py` (NPGS actor+critic) + `ppo.py` + `pretrain.py` (SFT/BC) (all done). `observer.py` comes
-  in Phase 7. `ismpu/gui/` — not yet created.
+  in Phase 7. `ismpu/gui/` — the local nine-view PID dashboard and CSV replay server.
 
 ## Bench interface (`ismpu/io/ics_connector.py`, `ismpu/config/ics.py`)
 

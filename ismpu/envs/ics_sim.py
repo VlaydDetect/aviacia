@@ -38,6 +38,7 @@ from ismpu.config.constants import DT
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState
+from ismpu.envs.sim_interface import ApproachData
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,27 @@ class Telemetry:
     wind_speed_ms: Optional[float] = None
     wind_dir_from_deg: Optional[float] = None
 
-    # «Сырой» пакет стенда — единственный источник сигналов ниже (None, если связи нет).
+    # Общий воздушный срез. Для ICS это сам ICSInputs (он имеет тот же набор полей),
+    # для X-Plane — ApproachData. Сырой пакет ICS остаётся только для аудита.
+    approach_inputs: Optional[object] = None
     ics_inputs: Optional[ICSInputs] = None
+
+    # Значения, которые backend может задать без ICSInputs. Суффикс ``_direct``
+    # отличает хранимое поле dataclass от публичного property.
+    ias_ms_direct: Optional[float] = None
+    radio_altitude_ft_direct: Optional[float] = None
+    ils_valid_direct: Optional[bool] = None
+    landing_flaps_direct: Optional[object] = None
+    main_gear_contact_direct: Optional[bool] = None
+    runway_heading_deg_direct: Optional[float] = None
+    runway_length_m_direct: Optional[float] = None
+    runway_width_m_direct: Optional[float] = None
+    lateral_deviation_m_direct: Optional[float] = None
+    weight_on_wheels_direct: Optional[bool] = None
+    flight_phase_direct: Optional[int] = None
+    faults_direct: Optional[frozenset] = None
+    weather_direct: Optional[WeatherState] = None
+    agent_is_active_direct: Optional[bool] = None
 
     valid: bool = True   # False — телеметрии нет (таймаут приёма)
 
@@ -121,6 +141,7 @@ class Telemetry:
             accel_side_g=inp.BodyLatAccel,
             wind_speed_ms=inp.WindSpeed * Converts.KTS_TO_MS,           # kt → м/с
             wind_dir_from_deg=inp.WindDirectionTrue,
+            approach_inputs=inp,
             ics_inputs=inp,
         )
 
@@ -132,9 +153,20 @@ class Telemetry:
     # --- сигналы стенда: выводятся из ics_inputs, отдельно не хранятся --- #
 
     @property
+    def airborne_data_available(self) -> bool:
+        return bool(self.valid and self.approach_inputs is not None)
+
+    @property
+    def faults_available(self) -> bool:
+        return bool(self.valid and (self.faults_direct is not None or self.ics_inputs is not None))
+
+    @property
     def ias_ms(self) -> Optional[float]:
         """Приборная скорость (kt → м/с). Отсечки реверса заданы по ней, а не по путевой."""
-        return self.ics_inputs.IndicatedAirspeed * Converts.KTS_TO_MS if self.ics_inputs else None
+        if self.ias_ms_direct is not None:
+            return self.ias_ms_direct
+        source = self.approach_inputs
+        return source.IndicatedAirspeed * Converts.KTS_TO_MS if source is not None else None
 
     @property
     def radio_altitude_ft(self) -> Optional[float]:
@@ -144,6 +176,8 @@ class Telemetry:
         и сверять их с пересчитанным `agl_m` значило бы гонять величину туда-обратно ради
         сравнения с константой, которая всё равно записана в футах.
         """
+        if self.radio_altitude_ft_direct is not None:
+            return self.radio_altitude_ft_direct
         i = self.ics_inputs
         return i.RadioAltitude if (i is not None and i.RadioAltitudeValid) else None
 
@@ -156,6 +190,8 @@ class Telemetry:
         неотличимо от «идеально на оси» — контур будет уверенно вести ВС по несуществующей
         глиссаде.
         """
+        if self.ils_valid_direct is not None:
+            return self.ils_valid_direct
         i = self.ics_inputs
         if i is None:
             return None
@@ -170,8 +206,10 @@ class Telemetry:
         считается по таблицам посадочной конфигурации и на чистом крыле неприменим.
         """
         from ismpu.config.envelope import measured_landing_flaps
-        i = self.ics_inputs
-        return measured_landing_flaps(i.FlapsAngle) if i is not None else None
+        if self.landing_flaps_direct is not None:
+            return self.landing_flaps_direct
+        source = self.approach_inputs
+        return measured_landing_flaps(source.FlapsAngle) if source is not None else None
 
     @property
     def main_gear_contact(self) -> bool:
@@ -181,30 +219,42 @@ class Telemetry:
         начало пробега. Признак подтверждён на стенде коллегой как точка окончания воздушного
         участка.
         """
+        if self.main_gear_contact_direct is not None:
+            return self.main_gear_contact_direct
         i = self.ics_inputs
         return bool(i is not None and (i.LeftGearWeightOnWheels or i.RightGearWeightOnWheels))
 
     @property
     def runway_heading_deg(self) -> Optional[float]:
+        if self.runway_heading_deg_direct is not None:
+            return self.runway_heading_deg_direct
         i = self.ics_inputs
         return i.RunwayHeading if (i is not None and i.RunwayHeadingValid) else None
 
     @property
     def runway_length_m(self) -> Optional[float]:
+        if self.runway_length_m_direct is not None:
+            return self.runway_length_m_direct
         return self.ics_inputs.RunwayLength if self.ics_inputs else None
 
     @property
     def runway_width_m(self) -> Optional[float]:
+        if self.runway_width_m_direct is not None:
+            return self.runway_width_m_direct
         return self.ics_inputs.RunwayWidth if self.ics_inputs else None
 
     @property
     def lateral_deviation_m(self) -> Optional[float]:
         """Боковое отклонение от оси, измеренное стендом. Позволяет не считать геодезию самим."""
+        if self.lateral_deviation_m_direct is not None:
+            return self.lateral_deviation_m_direct
         return self.ics_inputs.LateralDeviation if self.ics_inputs else None
 
     @property
     def weight_on_wheels(self) -> Optional[bool]:
         """Обжатие ВСЕХ стоек. Диагностический сигнал; условие включения проверяет сам стенд."""
+        if self.weight_on_wheels_direct is not None:
+            return self.weight_on_wheels_direct
         i = self.ics_inputs
         if i is None:
             return None
@@ -213,6 +263,8 @@ class Telemetry:
     @property
     def flight_phase(self) -> Optional[int]:
         """Фаза полёта по `config.ics.FlightPhase` — по ней распознаётся уже идущий пробег."""
+        if self.flight_phase_direct is not None:
+            return self.flight_phase_direct
         i = self.ics_inputs
         return i.FlightPhase if (i is not None and i.FlightPhaseValid) else None
 
@@ -224,11 +276,15 @@ class Telemetry:
         телеметрией, и выдумывать их на своей стороне значит управлять по несуществующей
         конфигурации.
         """
+        if self.faults_direct is not None:
+            return self.faults_direct
         return _faults_from_inputs(self.ics_inputs) if self.ics_inputs else frozenset()
 
     @property
     def weather(self) -> Optional[WeatherState]:
         """Фактические погодные условия со стенда (ветер, сцепление, осадки, видимость)."""
+        if self.weather_direct is not None:
+            return self.weather_direct
         return WeatherState.from_ics(self.ics_inputs) if self.ics_inputs else None
 
     @property
@@ -242,6 +298,8 @@ class Telemetry:
         """Подтверждение стенда, что он **принял** наше управление к исполнению. Единственный
         авторитет по факту включения: наша сторона его не вычисляет, а читает (см.
         `io/ics_engagement.py`)."""
+        if self.agent_is_active_direct is not None:
+            return self.agent_is_active_direct
         return bool(self.ics_inputs.AgentIsActive) if self.ics_inputs else False
 
 
@@ -277,6 +335,9 @@ class ICSSim:
     нет, `ControlValidMask = 0` и органы не выдаются.
     """
 
+    backend_name = "ics"
+    aircraft_profile_name = "bench"
+
     def __init__(self, connector: Optional[ICSBenchConnector] = None,
                  listen_ip: str = LISTEN_IP_ANY, listen_port: int = 3030, timeout: float = 1.0,
                  engagement: Optional[IcsEngagement] = None):
@@ -292,7 +353,7 @@ class ICSSim:
 
     # --- жизненный цикл эпизода ---
 
-    def reset(self, scenario=None) -> Telemetry:
+    def reset(self, scenario=None, *, start: str | None = None) -> Telemetry:
         """Начало эпизода: сброс рукопожатия и первый кадр со стенда.
 
         Средой распоряжается Заказчик, поэтому сбрасывать здесь нечего — ни телепорта, ни

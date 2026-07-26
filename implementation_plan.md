@@ -1,5 +1,13 @@
 # План реализации: нейросетевое управление посадкой и пробегом (ИСМПУ)
 
+> ## Current backend status (2026-07-26)
+>
+> The historical warning below that says X-Plane was removed is superseded. ICS is still the production
+> default, while `XPlaneSim` is restored as the resettable training/evaluation backend behind the common
+> `SimInterface`. X-Plane applies serialized scenario initial conditions, weather, failures and noise;
+> `ICSSim.reset` remains observational. The A330 X-Plane approach preset stays draft until the live
+> acceptance checklist in `docs/XPLANE_DASHBOARD.md` passes.
+
 Шифр НИР: **Интеграл-КБО-МС-ГосНИИАС-ИСМПУ-2026**. Срок: **28.07.2026**, целевой УГТ 3.
 
 Документ описывает переход от текущего прототипа (Jupyter [`main.ipynb`](main.ipynb)) к
