@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from ismpu.agent.gain_scheduler import NPGS, POLICY_DIM, N_GAIN_OUT, phase_labels_from_groundspeed_kts
-from ismpu.agent import gain_space
+from ismpu.agent.gain_space import GainSpace, gain_space_for
 from ismpu.agent.normalization import SPEED_SCALE
 from ismpu.envs.observation import GAIN_FEATURE_INDICES, FEATURE_NAMES
 from ismpu.config.regulators import GAIN_KEYS, REGULATOR_ORDER, GainMap
@@ -34,11 +34,15 @@ from ismpu.utils.converts import Converts
 _GS_IDX = FEATURE_NAMES.index("ground_speed")
 
 
-def target_z_from_gains(gains: GainMap) -> NDArray[np.float32]:
+def target_z_from_gains(
+    gains: GainMap,
+    gain_space: GainSpace | None = None,
+) -> NDArray[np.float32]:
     """Абсолютные коэффициенты пресета → `target_z` (17,): gains через `inv_gain`, веса → 0 (w=1)."""
     vec = np.array([gains[reg][k] for reg in REGULATOR_ORDER for k in GAIN_KEYS], dtype=np.float64)
     z = np.zeros(POLICY_DIM, dtype=np.float32)
-    z[:N_GAIN_OUT] = gain_space.inv_gain(vec).astype(np.float32)   # веса остаются 0 → w=1
+    space = gain_space or gain_space_for("mc21")
+    z[:N_GAIN_OUT] = space.inv_gain(vec).astype(np.float32)   # веса остаются 0 → w=1
     return z
 
 

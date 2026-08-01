@@ -7,14 +7,14 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
-from ismpu.agent import gain_space as gs
+from ismpu.agent.gain_space import gain_space_for
 from ismpu.agent.pretrain import target_z_from_gains, pretrain_sft, PretrainConfig, SFTDataset
 from ismpu.runtime.capture import (
     capture_scenario, capture_dataset, episode_quality,
     QUALITY_CLEAN, QUALITY_CAVEAT, QUALITY_REJECT, CAVEAT_SATURATION_RATIO,
 )
 from ismpu.runtime.pretrain import smoke_pretrain
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.control.system import ControllingSystem
 
@@ -33,7 +33,7 @@ def _make_env(window=6):
 
 def test_target_z_inverts_to_preset_gains():
     ctrl = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+    SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
     preset = base_gains_from_pids(ctrl.pids)
 
     tz = target_z_from_gains(preset)
@@ -54,14 +54,14 @@ def test_target_z_inverts_to_preset_gains():
 
 def test_capture_scenario_produces_constant_target():
     env = _make_env(window=6)
-    ds, report = capture_scenario(env, SCENARIO_PRESETS["nws_fail"], max_steps=30)
+    ds, report = capture_scenario(env, SCENARIOS["nws_fail"], max_steps=30)
     assert report["scenario_id"] == "nws_fail"
     assert ds.obs.ndim == 3 and ds.obs.shape[1:] == (6, 56)
     assert ds.target_z.shape == (len(ds), 17)
     # цель постоянна на прогон
     assert np.allclose(ds.target_z, ds.target_z[0])
     # и равна NWS-пресету
-    ctrl = ControllingSystem(static_sim()[0]); SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+    ctrl = ControllingSystem(static_sim()[0]); SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
     assert np.allclose(ds.target_z[0], target_z_from_gains(base_gains_from_pids(ctrl.pids)))
 
 
@@ -72,7 +72,7 @@ def test_capture_scenario_produces_constant_target():
 def test_sft_overfits_small_dataset():
     torch.manual_seed(0)
     env = _make_env(window=6)
-    ds, _ = capture_dataset(env, [SCENARIO_PRESETS["nws_fail"]], max_steps=40, log=None)
+    ds, _ = capture_dataset(env, [SCENARIOS["nws_fail"]], max_steps=40, log=None)
     net = NPGS(NPGSConfig(window=6))
     hist = pretrain_sft(net, ds, PretrainConfig(epochs=60, batch_size=64, lr=2e-3, device="cpu"))
     assert hist[-1]["mse"] < 0.3 * hist[0]["mse"]     # loss заметно падает
@@ -85,7 +85,7 @@ def test_sft_overfits_small_dataset():
 def test_sft_learns_to_distinguish_scenarios_not_copy_input():
     torch.manual_seed(0)
     env = _make_env(window=6)
-    ds, _ = capture_dataset(env, [SCENARIO_PRESETS["default"], SCENARIO_PRESETS["nws_fail"]],
+    ds, _ = capture_dataset(env, [SCENARIOS["default"], SCENARIOS["nws_fail"]],
                             max_steps=60, log=None)
     net = NPGS(NPGSConfig(window=6))
     pretrain_sft(net, ds, PretrainConfig(epochs=80, batch_size=128, lr=2e-3,
@@ -94,12 +94,12 @@ def test_sft_learns_to_distinguish_scenarios_not_copy_input():
     # greedy-выход на DEFAULT-окне ≈ DEFAULT-пресет, на NWS-окне ≈ NWS-пресет — и они РАЗНЫЕ.
     def greedy_gains(preset_name):
         e = _make_env(window=6)
-        obs, _ = e.reset(SCENARIO_PRESETS[preset_name])
+        obs, _ = e.reset(SCENARIOS[preset_name])
         return net.act_numpy(obs, deterministic=True)[0][:15]
 
     from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS
     def preset_vec(name):
-        c = ControllingSystem(static_sim()[0]); SCENARIO_PRESETS[name].apply_control(c)
+        c = ControllingSystem(static_sim()[0]); SCENARIOS[name].apply_control(c, "mc21")
         p = base_gains_from_pids(c.pids)
         return np.array([p[r][k] for r in REGULATOR_ORDER for k in GAIN_KEYS])
 
@@ -110,7 +110,8 @@ def test_sft_learns_to_distinguish_scenarios_not_copy_input():
     assert np.abs(g_def - g_nws).max() > 1e-3
     # каждый ближе к своему пресету, чем к чужому (в лог-норме)
     def lognorm(v):
-        return np.array([gs.gain_norm_scalar(v[i], r, k)
+        space = gain_space_for("mc21")
+        return np.array([space.gain_norm_scalar(v[i], r, k)
                          for i, (r, k) in enumerate([(r, k) for r in REGULATOR_ORDER for k in GAIN_KEYS])])
     d_own = np.abs(lognorm(g_nws) - lognorm(p_nws)).mean()
     d_other = np.abs(lognorm(g_nws) - lognorm(p_def)).mean()
@@ -131,7 +132,7 @@ def _summary(**diag):
 
 
 def test_clean_rollout_gets_full_weight():
-    weight, reasons = episode_quality(_summary(), SCENARIO_PRESETS["default"])
+    weight, reasons = episode_quality(_summary(), SCENARIOS["default"])
     assert weight == QUALITY_CLEAN
     assert reasons == []
 
@@ -139,7 +140,7 @@ def test_clean_rollout_gets_full_weight():
 def test_rollout_violating_a_tz_gate_is_rejected_outright():
     """Пресет вне своего режима даёт траекторию, которую воспроизводить нельзя."""
     weight, reasons = episode_quality(_summary(xte_rollout_max_m=9.0),
-                                      SCENARIO_PRESETS["default"])
+                                      SCENARIOS["default"])
     assert weight == QUALITY_REJECT
     assert any(r.startswith("tz_fail:") for r in reasons)
 
@@ -147,14 +148,14 @@ def test_rollout_violating_a_tz_gate_is_rejected_outright():
 def test_caveated_rollout_is_downweighted_not_dropped():
     weight, reasons = episode_quality(
         _summary(saturation_ratio=CAVEAT_SATURATION_RATIO + 0.1),
-        SCENARIO_PRESETS["default"])
+        SCENARIOS["default"])
     assert weight == QUALITY_CAVEAT
     assert any("saturation" in r for r in reasons)   # причина именованная, а не «плохой прогон»
 
 
 def test_capture_dataset_drops_rejected_rollouts_and_keeps_reports():
     env = _make_env(window=6)
-    scenarios = [SCENARIO_PRESETS["default"], SCENARIO_PRESETS["nws_fail"]]
+    scenarios = [SCENARIOS["default"], SCENARIOS["nws_fail"]]
     ds, reports = capture_dataset(env, scenarios, max_steps=40, log=None)
 
     assert len(reports) == len(scenarios)
@@ -173,7 +174,7 @@ def test_capture_dataset_raises_when_everything_is_rejected():
     capture_mod.episode_quality = lambda summary, scenario: (QUALITY_REJECT, ["tz_fail:test"])
     try:
         with pytest.raises(RuntimeError, match="все прогоны отброшены"):
-            capture_dataset(env, [SCENARIO_PRESETS["default"]], max_steps=20, log=None)
+            capture_dataset(env, [SCENARIOS["default"]], max_steps=20, log=None)
     finally:
         capture_mod.episode_quality = original
 
@@ -182,7 +183,7 @@ def test_weighted_sft_follows_the_trusted_label():
     """Метка с весом 1.0 должна перетянуть противоречащую ей метку с весом 0.5."""
     torch.manual_seed(0)
     env = _make_env(window=6)
-    ds, _ = capture_dataset(env, [SCENARIO_PRESETS["nws_fail"]], max_steps=40, log=None)
+    ds, _ = capture_dataset(env, [SCENARIOS["nws_fail"]], max_steps=40, log=None)
 
     trusted_z = ds.target_z[0].copy()
     conflicting_z = trusted_z + 1.0
@@ -198,7 +199,7 @@ def test_weighted_sft_follows_the_trusted_label():
     net = NPGS(NPGSConfig(window=6))
     pretrain_sft(net, mixed, PretrainConfig(epochs=40, batch_size=128, lr=2e-3, device="cpu"))
 
-    obs, _ = env.reset(SCENARIO_PRESETS["nws_fail"])
+    obs, _ = env.reset(SCENARIOS["nws_fail"])
     _, raw, _, _ = net.act_numpy(obs, deterministic=True)
     # Взвешенный MSE тянет к среднему 2/3·trusted + 1/3·conflicting, т.е. ближе к доверенной.
     assert np.abs(raw - trusted_z).mean() < np.abs(raw - conflicting_z).mean()
@@ -211,7 +212,7 @@ def test_weighted_sft_follows_the_trusted_label():
 def test_smoke_pretrain_runs():
     torch.manual_seed(0)
     env = _make_env(window=6)
-    scenarios = [SCENARIO_PRESETS["default"], SCENARIO_PRESETS["nws_fail"]]
+    scenarios = [SCENARIOS["default"], SCENARIOS["nws_fail"]]
     net, dataset, history = smoke_pretrain(env, scenarios, max_steps=30)
     assert len(dataset) > 0 and len(history) == 3
     assert all(np.isfinite(h["mse"]) for h in history)

@@ -65,7 +65,7 @@ def test_a11_rejects_non_finite_values():
 
 def test_a11_monitor_is_wired_to_approach_without_driving_go_around():
     controller = ControllingSystem()
-    Scenario.from_preset("default").apply_control(controller)
+    Scenario.from_preset("default").apply_control(controller, "mc21")
     first = frame(
         500.0,
         RunwayHeading=75.0,

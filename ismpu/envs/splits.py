@@ -37,9 +37,10 @@ class ScenarioSignature:
     lateral_offset_bin: int
     heading_offset_bin: int
     speed_bin: int
+    aircraft_profile: str = ""
 
     def key(self) -> str:
-        return "|".join((
+        values = (
             ",".join(self.failures) or "NONE",
             str(self.runway_friction_bin),
             str(self.crosswind_bin),
@@ -47,10 +48,11 @@ class ScenarioSignature:
             str(self.lateral_offset_bin),
             str(self.heading_offset_bin),
             str(self.speed_bin),
-        ))
+        )
+        return "|".join(((self.aircraft_profile,) if self.aircraft_profile else ()) + values)
 
 
-def scenario_signature(scenario) -> ScenarioSignature:
+def scenario_signature(scenario, *, aircraft_profile: str | None = None) -> ScenarioSignature:
     """Каноническая дискретизация условий для train/eval split."""
     from ismpu.config.runway import RWY_HEADING_TRUE
     from ismpu.envs.weather import decompose_wind
@@ -70,6 +72,7 @@ def scenario_signature(scenario) -> ScenarioSignature:
         lateral_offset_bin=int(round(touchdown.lateral_offset_m / 2.0)),
         heading_offset_bin=int(round(touchdown.heading_offset_deg / 2.0)),
         speed_bin=int(round(touchdown.speed_knots / 10.0)),
+        aircraft_profile=(aircraft_profile or "").lower(),
     )
 
 
@@ -77,10 +80,14 @@ def is_signature_holdout(
     scenario,
     *,
     fraction: float = DEFAULT_HOLDOUT_FRACTION,
+    aircraft_profile: str | None = None,
 ) -> bool:
     if not 0.0 <= fraction <= 1.0:
         raise ValueError("holdout fraction должна быть в [0, 1]")
-    return _hash_unit("signature-v1:" + scenario_signature(scenario).key()) < fraction
+    return _hash_unit(
+        "signature-v1:" + scenario_signature(
+            scenario, aircraft_profile=aircraft_profile).key()
+    ) < fraction
 
 
 class PartitionedScenarioProvider:
@@ -109,7 +116,10 @@ class PartitionedScenarioProvider:
         for _ in range(self.max_attempts):
             scenario = self.generator.sample(difficulty)
             if is_signature_holdout(
-                scenario, fraction=self.fraction) is want_holdout:
+                scenario,
+                fraction=self.fraction,
+                aircraft_profile=getattr(self.generator, "aircraft_profile", None),
+            ) is want_holdout:
                 return scenario
         raise RuntimeError(
             f"не удалось получить scenario partition={self.partition!r} "
@@ -150,14 +160,20 @@ def has_holdout_failure(scenario) -> bool:
     return bool(failures & HOLDOUT_FAILURE_FAMILIES)
 
 
-def holdout_reason(scenario, *, fraction: float = DEFAULT_HOLDOUT_FRACTION) -> str | None:
+def holdout_reason(
+    scenario,
+    *,
+    fraction: float = DEFAULT_HOLDOUT_FRACTION,
+    aircraft_profile: str | None = None,
+) -> str | None:
     """Почему сценарий в holdout, или `None` если он обучающий. Причина всегда именованная."""
     scenario_id = getattr(scenario, "scenario_id", str(scenario))
     if is_marked_holdout(scenario_id):
         return "marker"
     if has_holdout_failure(scenario):
         return "reserved_failure_family"
-    if _hash_unit(scenario_id) < fraction:
+    profile_prefix = f"{aircraft_profile.lower()}:" if aircraft_profile else ""
+    if _hash_unit(profile_prefix + scenario_id) < fraction:
         return "hash_topup"
     return None
 
@@ -166,6 +182,7 @@ def holdout_reason(scenario, *, fraction: float = DEFAULT_HOLDOUT_FRACTION) -> s
 class SplitResult:
     train: list = field(default_factory=list)
     holdout: list = field(default_factory=list)
+    aircraft_profile: str | None = None
     reasons: dict = field(default_factory=dict)   # scenario_id → причина попадания в holdout
 
     @property
@@ -182,17 +199,28 @@ class SplitResult:
             "holdout": len(self.holdout),
             "holdout_fraction": self.holdout_fraction,
             "holdout_by_reason": counts,
+            "aircraft_profile": self.aircraft_profile,
         }
 
 
-def split_scenarios(scenarios, *, fraction: float = DEFAULT_HOLDOUT_FRACTION) -> SplitResult:
+def split_scenarios(
+    scenarios,
+    *,
+    fraction: float = DEFAULT_HOLDOUT_FRACTION,
+    aircraft_profile: str | None = None,
+) -> SplitResult:
     """Разбивает набор сценариев. Детерминировано и устойчиво к добавлению новых элементов."""
     if not 0.0 <= fraction <= 1.0:
         raise ValueError(f"fraction должна быть в [0, 1], получено {fraction}")
 
-    result = SplitResult()
+    profile = aircraft_profile.lower() if aircraft_profile else None
+    result = SplitResult(aircraft_profile=profile)
     for scenario in scenarios:
-        reason = holdout_reason(scenario, fraction=fraction)
+        if profile and profile not in scenario.aircraft_controls:
+            raise ValueError(
+                f"scenario {scenario.scenario_id!r} has no aircraft profile {profile!r}")
+        reason = holdout_reason(
+            scenario, fraction=fraction, aircraft_profile=profile)
         if reason is None:
             result.train.append(scenario)
         else:

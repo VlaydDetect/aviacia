@@ -52,12 +52,14 @@ def symmetric(x: float, lo: float, hi: float) -> float:
     return clip_unit((x - center) / half)
 
 
-def snapshot() -> dict:
+def snapshot(gain_space=None) -> dict:
     """Сериализуемый слепок контракта нормировки (сохраняется вместе с весами).
 
-    Включает таблицу gain-пространства (`gain_space.snapshot()`) — так чекпоинт полностью
+    Включает таблицу выбранного `GainSpace` (`gain_space.snapshot()`) — так чекпоинт полностью
     фиксирует и масштабы obs, и отображение z↔коэффициенты PID (детерминизм поставки)."""
-    from ismpu.agent import gain_space  # локальный импорт: избегаем цикла на уровне модуля
+    if gain_space is None:
+        from ismpu.agent.gain_space import gain_space_for
+        gain_space = gain_space_for("mc21")
     return {
         "version": NORM_VERSION,
         "xte": XTE_SCALE, "heading": HEADING_SCALE, "lookahead": LOOKAHEAD_SCALE,

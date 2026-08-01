@@ -13,7 +13,7 @@ torch = pytest.importorskip("torch")
 
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.rollout_env import RolloutEnv
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.agent.shield import Shield
 from ismpu.agent.gain_scheduler import NPGS, NPGSConfig, POLICY_DIM
 from ismpu.agent.ppo import PPOTrainer, PPOConfig, RolloutBuffer
@@ -38,7 +38,7 @@ def _make_env(window=6, shield=True):
 
 
 def _provider():
-    return SCENARIO_PRESETS["default"]
+    return SCENARIOS["default"]
 
 
 # --------------------------------------------------------------------------- #
@@ -71,11 +71,10 @@ def test_gae_zeroes_bootstrap_after_done():
 
 def test_env_returns_sequence_window():
     from ismpu.envs.observation import OBS_DIM
-    from ismpu.envs.action import REFERENCE_ACTION
     env = _make_env(window=6)
     obs, _ = env.reset(_provider())
     assert obs.shape == (6, OBS_DIM)
-    obs2, reward, term, trunc, info = env.step(REFERENCE_ACTION)
+    obs2, reward, term, trunc, info = env.step(env.reference_action)
     assert obs2.shape == (6, OBS_DIM)
     assert np.isfinite(reward)
 

@@ -7,7 +7,7 @@
 **Чем это стало после перехода на стенд.** Раньше сгенерированный сценарий *устанавливался* в
 симулятор. Стендом распоряжается Заказчик, поэтому теперь сценарий описывает условия, в которых
 эпизод, как ожидается, проходит: он задаёт, каким пресетом стартовать и с чем сравнивать
-фактическую погоду при подборе (`envs.scenario.select_scenario`). Условия на стенде выставляет
+фактическую погоду при подборе (`config.scenarios.select_scenario`). Условия на стенде выставляет
 оператор — сгенерированный набор говорит, какие именно надо выставить, и служит планом прогонов
 и приёмочной батареей.
 
@@ -16,12 +16,15 @@
 приёмочный набор (штат + отказы + погода).
 """
 
+from dataclasses import replace
+
 import numpy as np
 
 from ismpu.control.failures import FailureMode
-from ismpu.config.scenarios import SCENARIOS
+from ismpu.config.aircraft_profiles import MC21, AircraftProfile
+from ismpu.config.scenarios import SCENARIOS, Scenario, SegmentConditions
+from ismpu.config.segments import FlightSegment
 from ismpu.envs.weather import WeatherState, RunwayCondition, WEATHER_PRESETS
-from ismpu.envs.scenario import Scenario
 
 
 # Пресеты классических коэффициентов под конкретный отказ (иначе — "default").
@@ -49,8 +52,11 @@ _CONDITIONS = [RunwayCondition.DRY, RunwayCondition.WET, RunwayCondition.PUDDLY,
 
 
 class ScenarioGenerator:
-    def __init__(self, seed: int = 0):
+    def __init__(self, seed: int = 0, aircraft_profile: AircraftProfile | str = MC21):
         self.seed = seed
+        self.aircraft_profile = (
+            aircraft_profile.name if isinstance(aircraft_profile, AircraftProfile)
+            else str(aircraft_profile).lower())
         self.rng = np.random.default_rng(seed)
         self._counter = 0
 
@@ -69,16 +75,28 @@ class ScenarioGenerator:
         scenario_id = f"gen-{self.seed}-{self._counter:04d}"
         scenario_seed = int(self.rng.integers(0, 2 ** 31 - 1))
         self._counter += 1
-        return Scenario(scenario_id=scenario_id, seed=scenario_seed, control=SCENARIOS[preset],
-                        weather=weather, failures=failures)
+        base = SCENARIOS[preset]
+        conditions = dict(base.conditions)
+        rollout = SegmentConditions(weather=weather, failures=frozenset(failures))
+        conditions[FlightSegment.ROLLOUT] = rollout
+        conditions[FlightSegment.TAXI] = rollout
+        scenario = replace(base, scenario_id=scenario_id, seed=scenario_seed, conditions=conditions)
+        scenario.control_for(self.aircraft_profile, FlightSegment.ROLLOUT)
+        return scenario
 
     def battery(self) -> list[Scenario]:
         """Фиксированный приёмочный набор (детерминированный, без RNG)."""
         items: list[Scenario] = []
 
         def add(sid, preset, weather, failures=()):
-            items.append(Scenario(scenario_id=sid, seed=0, control=SCENARIOS[preset],
-                                  weather=weather, failures=tuple(failures)))
+            base = SCENARIOS[preset]
+            conditions = dict(base.conditions)
+            rollout = SegmentConditions(weather=weather, failures=frozenset(failures))
+            conditions[FlightSegment.ROLLOUT] = rollout
+            conditions[FlightSegment.TAXI] = rollout
+            scenario = replace(base, scenario_id=sid, seed=0, conditions=conditions)
+            scenario.control_for(self.aircraft_profile, FlightSegment.ROLLOUT)
+            items.append(scenario)
 
         # Штат + погода
         add("nominal", "default", WEATHER_PRESETS["clear_dry"])

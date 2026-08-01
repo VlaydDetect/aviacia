@@ -13,7 +13,7 @@ from ismpu.config.constants import DT
 from ismpu.control.pid import PIDController
 from ismpu.control.system import ControllingSystem
 from ismpu.control.failures import FailureMode
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 
 from fakes import static_sim, telemetry as _telemetry
 
@@ -70,13 +70,13 @@ def test_control_step_is_unchanged_when_tracking_is_off():
     telem = _telemetry()
 
     ctrl = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+    SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
     for _ in range(5):
         ctrl.control_step(DT, telem, send=True)
     integrals_with_hook = {name: p.integral for name, p in ctrl.pids.items()}
 
     ctrl2 = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["nws_fail"].apply_control(ctrl2)
+    SCENARIOS["nws_fail"].apply_control(ctrl2, "mc21")
     for _ in range(5):
         # тот же цикл, но без хука трекинга
         ctrl2.longitudinal_channel.calc_commands(DT, ctrl2.state, telem)
@@ -131,7 +131,7 @@ def test_tracking_through_control_step_under_a_real_failure():
     """Сквозная проверка: NWS-отказ обнуляет руль, интегратор курсового PID не должен копить."""
     def run(tau):
         ctrl = ControllingSystem(static_sim(groundspeed_ms=50.0)[0])
-        SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+        SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
         ctrl.apply_failure(FailureMode.NWS_FAIL)          # steering_eff = 0
         pid = ctrl.pids["runway_center_pid"]
         pid.tracking_tau_s = tau

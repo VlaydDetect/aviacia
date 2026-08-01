@@ -79,15 +79,17 @@ Read these before making architectural changes — they define the target design
 - Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell). **The `.venv` is the real
   environment** — bare `python` on PATH is a separate 3.14 without torch/pytest. Run tests and training via
   `.venv\Scripts\python.exe` (or the activated venv).
-- **Run the controller:** `python -m ismpu.runtime.loop` (or the thin `main.ipynb`). Listens on
+- **Run the controller:** `python -m ismpu.runtime.loop --aircraft-profile mc21` (or the thin
+  `main.ipynb`). The ICS profile is mandatory because the ICD does not publish aircraft identity. Listens on
   `0.0.0.0:3030` (**not** `127.0.0.1` — the bench may be on another machine); the bench's own address is
   taken from the first incoming packet, so it is not configured. The 20 Hz loop **picks the flight segment
   from the first frame**: above 400 ft with the gear off the ground it arms the airborne handshake and
   flies the approach; on the runway it runs the rollout as before. It ends at taxi speed or
   `KeyboardInterrupt`, which neutralizes the controls and then releases the channels (`ControlValidMask=0`).
   `main()` with no argument **picks the preset by telemetry** (`select_for_telemetry`); pass a name
-  (`main("nws_fail")`) to force one — see `ismpu.envs.scenario.SCENARIO_PRESETS`. Presets describe the
-  **rollout**; the airborne segment is the same static config for every scenario.
+  (`main("nws_fail", aircraft_profile="mc21")`) to force one — see
+  `ismpu.config.scenarios.SCENARIOS`. Every scenario contains profile-specific control and conditions for
+  `APPROACH` / `ROLLOUT` / `TAXI`; ICS requires an explicit aircraft profile.
 - **Run against X-Plane:** `python -m ismpu.runtime.loop --backend xplane --start approach
   --xplane-root C:\X-Plane 12`. For fast rollout reset use `--start rollout`. X-Plane is never selected
   implicitly by the delivery loop.
@@ -138,9 +140,9 @@ Read these before making architectural changes — they define the target design
   `system.py` (`ControllingSystem` — the segment supervisor + the go-around decision `_should_go_around` and
   maneuver `_go_around_step`/`GoAroundManeuver`), `failures.py`.
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — the **fallback** when the bench doesn't publish runway
-  data), `constants.py`, `scenarios.py` (rollout PID presets per scenario + the conditions each was
-  calibrated for; `ScenarioConfig.draft` flags uncalibrated), `run_matrix.py` (the customer's run matrix as
-  data), `approach.py` (`ApproachConfig` + `APPROACH_PRESETS` — the static
+  data), `constants.py`, `scenarios.py` (the canonical profile- and segment-aware `Scenario` registry;
+  `Scenario.is_draft(profile, segment)` gates uncalibrated branches), `run_matrix.py` (the customer's run
+  matrix as data), `approach.py` (`ApproachConfig` + `APPROACH_CONFIGS` — reusable law configurations, not scenarios;
   airborne settings, the three airborne PID specs, the ddm→degree map and the go-around params), `envelope.py`
   (МС-21 approach limits: VAPP/VSR1/VFE, alpha protection, touchdown limits, roll limit by radio altitude),
   `criticality.py` (Приложение 1 — the АП-25 5-level `SpecialSituation` scale + trajectory tolerance bands:
@@ -405,9 +407,10 @@ multiplies the computed commands by them just before sending.
 - Why degrade a command the bench will ignore anyway: the back-calculation feedback
   (`ControllingSystem._track_applied`) uses the *applied* command, so the integrator doesn't wind up against a
   dead actuator (classic windup at `steering_eff = 0`).
-- Each failure case has its own hand-tuned set of PID gains, captured as `ScenarioConfig` presets in
-  `ismpu/config/scenarios.py` (`DEFAULT`, `NWS_FAIL`, `LEFT_REVERSE_FAIL`, `RIGHT_REVERSE_FAIL`, plus weather
-  presets). `NWS_FAIL` is calibrated for the real NWS failure (`steering_eff = 0`, rudder killed): centerline
+- Each failure case has its own hand-tuned set of PID gains, captured in the aircraft-profile branches of
+  `Scenario.aircraft_controls` in `ismpu/config/scenarios.py` (`DEFAULT`, `NWS_FAIL`,
+  `LEFT_REVERSE_FAIL`, `RIGHT_REVERSE_FAIL`, plus weather scenarios). `NWS_FAIL` is calibrated for the real
+  NWS failure (`steering_eff = 0`, rudder killed): centerline
   hold is carried by differential braking plus asymmetric thrust. The reverse presets were carried over from
   draft notebook cells and still need calibration.
 
@@ -449,12 +452,14 @@ The customer's tuning matrix as data: **22 codes ("шифр") × a condition cat
 **one set of coefficients** — that's how the matrix is meant to be worked ("коэффициенты предыдущего
 прогона — начальное приближение следующего"), so presets are per code, not per row.
 
-- Every code has a draft preset in `config/scenarios.py` (ground) and, for the approach codes, in
-  `config/approach.py::APPROACH_PRESETS`. All are `draft=True`, seeded from the nearest **calibrated**
+- Every code has a scenario branch in `config/scenarios.py`; airborne branches refer to reusable law
+  configurations in `config/approach.py::APPROACH_CONFIGS`. Draft status is stored per aircraft and segment,
+  and branches are seeded from the nearest **calibrated**
   parent rather than from zeros — that is the matrix's own method — with the gain dicts copied so tuning a
   draft can't silently mutate its parent.
 - **Drafts are never picked automatically.** `select_scenario` excludes them; running one is a deliberate
-  act. `resolve_preset` accepts the matrix code directly (`main("Б.2.2")`), in either alphabet, because
+  act. `resolve_scenario` accepts the matrix code directly (`main("Б.2.2", aircraft_profile="mc21")`),
+  in either alphabet, because
   that's what the operator at the bench console is holding — and it prints the run title, a draft warning,
   and which other codes are indistinguishable from it.
 - **The matrix distinguishes finer than the ICD can report.** `FaultNWS` is one byte, so Б.2.1 (stuck
@@ -470,18 +475,20 @@ The customer's tuning matrix as data: **22 codes ("шифр") × a condition cat
 
 ## Scenarios (`ismpu/envs/scenario.py`, `scenario_generator.py`)
 
-`Scenario` is the episode descriptor: `control` (a `ScenarioConfig` — the PID/guidance preset), `failures`
-and `weather`. Since we can't impose any of it, **`failures`/`weather` are matching keys, not commands**:
+`Scenario` is the single episode/configuration model. `aircraft_controls` stores independent control sets per
+aircraft and segment; `conditions` stores failures and weather per segment. On ICS those conditions are
+matching keys rather than commands, while X-Plane applies their delta at segment boundaries:
 
 - `select_scenario(failures, weather)` / `select_for_telemetry(telemetry)` pick the preset calibrated for
   the conditions the bench is actually reporting. Failure mismatch dominates the score
   (`FAILURE_MISMATCH_PENALTY`) — no weather similarity compensates for running an NWS-tuned preset on a
   healthy aircraft. Draft presets are excluded unless asked for. Without telemetry the answer is `default`:
   it's the only safe choice when nothing is known about the airframe's configuration.
-- Only `apply_control(controller)` acts on anything (it seeds fresh, stateful PIDs and the preset's failure
-  as a starting assumption; telemetry overrides it from the next tick).
-- `SCENARIO_PRESETS` mirrors `config.scenarios.SCENARIOS`. Serializable via `to_dict`/`from_dict`
-  (`control` stored by preset name).
+- `apply_control(controller, profile, segment)` installs fresh, stateful PIDs for exactly one profile branch;
+  `control_for`, `conditions_for`, and `is_draft` fail explicitly when the requested branch is absent.
+- `config.scenarios.SCENARIOS` is the only canonical registry. `compose_scenario` selects independent source
+  scenarios for approach/rollout/taxi and records provenance. Serialization writes schema v2; v1 is read only
+  through the explicit migration path.
 - `ScenarioGenerator(seed)`: domain randomization across weather and failures, curriculum via
   `difficulty ∈ [0,1]`, deterministic per seed. `battery()` is the fixed acceptance set. It now enumerates
   **which conditions the bench operator should set up**, in what order — it does not configure them.
@@ -549,10 +556,10 @@ is always active, and the network can't issue a command that bypasses it.
 The NPGS outputs **absolute** coefficients, so there's a fixed physical map from the net's raw output `z` to a
 gain, per (regulator, kp|ki|kd) slot — 15 slots in `REGULATOR_ORDER × (kp,ki,kd)` order (=`config/regulators.py`).
 `gain_i = ref_i · exp(s_i · tanh(z_i))` (⇒ bounded to `[lo_i, hi_i]`); inverse `inv_gain` (for SFT targets);
-`gain_norm`/`gain_norm_scalar` (obs normalization = `tanh(z)`). The table (`GAIN_REF/S/LO/HI/DEFAULT` + `*_MAP`
-dicts) is **computed from the preset family** `config.scenarios.SCENARIOS` at import (geometric-midpoint `ref`,
-log half-width `s` sized to span the presets ± `EXPAND`) and frozen into `normalization.snapshot()` → the
-checkpoint pins the whole gain space. Because presets span up to ~70× on some gains, this log-space map (not a
+`gain_norm`/`gain_norm_scalar` (obs normalization = `tanh(z)`). A `GainSpace` instance is built from the
+selected aircraft profile's ground branches (geometric-midpoint `ref`, log half-width `s` sized to span the
+presets ± `EXPAND`) and frozen into `normalization.snapshot(space)` → the profile checkpoint pins the whole
+gain space. Because presets span up to ~70× on some gains, this log-space map (not a
 ±50% band) is what makes SFT-to-preset expressible. `config/regulators.py` holds `REGULATOR_ORDER`/`GAIN_KEYS`/
 `N_GAINS`/`ACTION_DIM` (neutral module so `shield` and `gain_space` avoid an import cycle; `shield` re-exports).
 
@@ -595,8 +602,9 @@ telemetry packet, so reconstructing it from raw fields is wrong). `agent/pretrai
 policy `mean → target_z` (MSE, `log_std` frozen). **Anti-copycat (critical):** the obs carries "previous gains" and
 the BC target is constant per rollout, so the net could just copy the input; `pretrain` replaces the gain features
 with **fresh U(−1,1) noise per batch** (not zeros — real values are in `[−1,1]` too, so no train/inference shift),
-forcing the net to key on the disturbance (failure/weather) features. Canonical labeling: each **non-draft** preset
-(`ScenarioConfig.draft`) is its own regime run in its own conditions; never mix inconsistent labels. Which
+forcing the net to key on the disturbance (failure/weather) features. Canonical labeling: each **non-draft**
+profile/rollout branch (`Scenario.is_draft(profile, FlightSegment.ROLLOUT)`) is its own regime run in its own
+conditions; never mix inconsistent labels. Which
 conditions the bench actually produces is the operator's call — runs that don't match their preset are filtered by
 the quality scoring in `capture.py` (ТЗ gate → reject, saturation/Shield → half weight).
 `runtime/pretrain.py` orchestrates capture→BC→checkpoint (`npgs_sft.pt`); `smoke_pretrain(env, scenarios)` is the

@@ -102,7 +102,7 @@ def test_go_around_completes_on_established_climb():
 def test_go_around_hands_off_via_deactivate():
     """После установившегося набора цикл снимает заявку каналов (ControlMode=Off, маска=0)."""
     conn = FakeConnector(airborne_inputs(radio_altitude_ft=300.0))
-    c = ControllingSystem(ICSSim(connector=conn))
+    c = ControllingSystem(ICSSim(connector=conn, aircraft_profile="mc21"))
     c.begin_flight(_frame(1000.0))
     _drive(c, _frame(200.0, LocDeviation=0.1), GO_AROUND_CONFIRM_TICKS)
     assert c.go_around is not None

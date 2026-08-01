@@ -3,12 +3,54 @@
 ICS остаётся производственным backend по умолчанию. X‑Plane выбирается только явно и предназначен для
 воспроизводимых reset-сценариев, настройки и обучения.
 
+## Профильные сценарии
+
+Канонический реестр — `ismpu.config.scenarios.SCENARIOS`; его значения являются готовыми объектами
+`Scenario`. Сценарий содержит настройки `APPROACH / ROLLOUT / TAXI` отдельно для `mc21` и `a330-300`,
+условия каждого участка и provenance источников составного сценария. Для программной сборки используется:
+
+```python
+from ismpu.config.scenarios import compose_scenario
+
+scenario = compose_scenario(
+    "engine-then-reverse",
+    approach="a_4_1_engine_out_high",
+    rollout="left_reverse_fail",
+)
+```
+
+`taxi=None` наследует источник пробега. Повторяющийся отказ хранится один раз в `frozenset`, поэтому
+X‑Plane не вводит его повторно; неизменная погода также не переустанавливается. ICS не меняет среду:
+он сверяет телеметрию с `SegmentConditions` и сохраняет `ConditionMatch` в `report.json`.
+
+Для ICS профиль обязателен (`mc21` — канонический стендовый профиль). X‑Plane по умолчанию использует
+`a330-300` и отклоняет профиль без X‑Plane-привязки. Воздушная ветка A330 остаётся `draft` до живой
+приёмки; `draft` проверяется отдельно для профиля и участка.
+
+Сценарии сериализуются только в JSON schema v2. Чтение schema v1 относит старые стендовые настройки к
+`mc21`; старый A330-файл нужно читать с `legacy_aircraft_profile="a330-300"`.
+
+NPGS-артефакты разделены по профилям:
+
+```text
+checkpoints/
+├── mc21/
+│   ├── npgs_sft.pt
+│   └── npgs_final.pt
+└── a330-300/
+    ├── npgs_sft.pt
+    └── npgs_final.pt
+```
+
+Чекпоинт другого профиля или с несовпадающим снимком `GainSpace` не загружается. Старый чекпоинт без
+профиля мигрируется только при явном `legacy_aircraft_profile` и совпадении сохранённых диапазонов.
+
 ## Запуск
 
 Стенд ICS:
 
 ```powershell
-.venv\Scripts\python.exe -m ismpu.runtime.loop
+.venv\Scripts\python.exe -m ismpu.runtime.loop --aircraft-profile mc21
 ```
 
 Полный заход в X‑Plane:
@@ -38,13 +80,13 @@ ICS остаётся производственным backend по умолча�
 Безопасный режим наблюдения:
 
 ```powershell
-.venv\Scripts\python.exe -m ismpu.runtime.loop --dashboard
+.venv\Scripts\python.exe -m ismpu.runtime.loop --aircraft-profile mc21 --dashboard
 ```
 
 Live-настройка разрешается отдельным флагом:
 
 ```powershell
-.venv\Scripts\python.exe -m ismpu.runtime.loop --dashboard-tune
+.venv\Scripts\python.exe -m ismpu.runtime.loop --aircraft-profile mc21 --dashboard-tune
 ```
 
 Сервер слушает только `127.0.0.1:8765`. Девять представлений — `Roll`, `Pitch`, `Flare`,
@@ -73,6 +115,9 @@ runs/<UTC timestamp>/
 
 `telemetry.csv` содержит общую телеметрию, команды, участок полёта и для каждого из восьми PID:
 value, setpoint, error, output, P/I/D, saturation и Kp/Ki/Kd. `runs/` исключён из Git.
+Во время прогона снимки накапливаются в памяти, а CSV записывается один раз при штатном завершении
+или обработанном прерывании (`Ctrl-C` / Interrupt). Пустой экземпляр `RunRecorder`, созданный в
+ноутбуке, каталог не создаёт.
 
 Большие исходные логи Романа остаются в `roman_aviacia_ics`. Их целостность описана в
 `docs/roman_logs_manifest.json`; `ismpu.runtime.roman_logs.verify_manifest` сообщает отсутствующие

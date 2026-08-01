@@ -1,67 +1,72 @@
-"""Тесты gain-пространства NPGS (абсолютные коэффициенты): покрытие пресетов,
-обратимость z↔gain, валидность DEFAULT-bias, нормировка признаков."""
+"""Профильные пространства абсолютных PID-коэффициентов NPGS."""
 
 import json
 
 import numpy as np
 
-from ismpu.agent import gain_space as gs
+from ismpu.agent.gain_space import GainSpace, gain_space_for
+from ismpu.config.regulators import GAIN_KEYS, REGULATOR_ORDER
 from ismpu.config.scenarios import SCENARIOS
-from ismpu.agent.shield import REGULATOR_ORDER
+from ismpu.config.segments import FlightSegment
 
 
-def _preset_vector(cfg):
-    return np.array([getattr(cfg, gs._REG_TO_FIELD[reg])[key] for reg, key in gs.SLOTS])
+def _vector(space, config):
+    pids = config.build_pids()
+    return np.array([
+        getattr(pids[regulator], key)
+        for regulator, key in space.slots
+    ])
 
 
-def test_table_shape_and_order():
-    assert gs.N_GAINS == 15 == len(gs.SLOTS)
-    assert gs.SLOTS == [(reg, k) for reg in REGULATOR_ORDER for k in ("kp", "ki", "kd")]
-    for arr in (gs.GAIN_REF, gs.GAIN_S, gs.GAIN_LO, gs.GAIN_HI, gs.GAIN_DEFAULT):
-        assert arr.shape == (15,)
+def test_profile_spaces_have_stable_17_action_contract_and_independent_identity():
+    mc21 = gain_space_for("mc21")
+    a330 = gain_space_for("a330-300")
+    assert len(mc21.slots) == len(a330.slots) == 15
+    assert mc21.slots == tuple(
+        (regulator, key) for regulator in REGULATOR_ORDER for key in GAIN_KEYS
+    )
+    assert mc21.aircraft_profile == "mc21"
+    assert a330.aircraft_profile == "a330-300"
+    assert mc21 is not a330
 
 
-def test_every_preset_gain_inside_physical_band():
-    for name, cfg in SCENARIOS.items():
-        v = _preset_vector(cfg)
-        assert np.all(gs.GAIN_LO <= v) and np.all(v <= gs.GAIN_HI), name
+def test_every_profile_preset_gain_is_inside_its_band():
+    for profile in ("mc21", "a330-300"):
+        space = gain_space_for(profile)
+        for name, scenario in SCENARIOS.items():
+            config = scenario.control_for(profile, FlightSegment.ROLLOUT)
+            values = _vector(space, config)
+            assert np.all(space.lo <= values) and np.all(values <= space.hi), name
 
 
-def test_z_zero_maps_to_ref():
-    assert np.allclose(gs.to_gain(np.zeros(15)), gs.GAIN_REF)
+def test_transform_roundtrip_and_default_bias():
+    space = gain_space_for("mc21")
+    assert np.allclose(space.to_gain(np.zeros(15)), space.ref)
+    assert np.allclose(space.to_gain(space.inv_gain(space.default)), space.default, rtol=1e-6)
+    for scenario in SCENARIOS.values():
+        values = _vector(space, scenario.control_for("mc21", FlightSegment.ROLLOUT))
+        assert np.allclose(space.to_gain(space.inv_gain(values)), values, rtol=1e-9)
 
 
-def test_preset_round_trip_is_exact():
-    for cfg in SCENARIOS.values():
-        v = _preset_vector(cfg)
-        rt = gs.to_gain(gs.inv_gain(v))
-        assert np.allclose(rt, v, rtol=1e-9)
+def test_normalization_endpoints_and_nonpositive_guard():
+    space = gain_space_for("mc21")
+    assert np.allclose(space.gain_norm(space.ref), 0.0)
+    assert np.allclose(space.gain_norm(space.hi), 1.0)
+    assert np.allclose(space.gain_norm(space.lo), -1.0)
+    assert np.all(np.isfinite(space.inv_gain(np.zeros(15))))
 
 
-def test_default_bias_reproduces_default():
-    b = gs.default_bias()
-    assert np.all(np.isfinite(b))
-    assert np.allclose(gs.to_gain(b), gs.GAIN_DEFAULT, rtol=1e-6)
+def test_snapshot_is_serializable_profile_bound_and_exactly_checked():
+    space = gain_space_for("mc21")
+    snapshot = space.snapshot()
+    json.dumps(snapshot)
+    assert snapshot["aircraft_profile"] == "mc21"
+    assert len(snapshot["ref"]) == len(snapshot["slots"]) == 15
+    assert space.compatible_with(snapshot)
+    assert not gain_space_for("a330-300").compatible_with(snapshot)
 
 
-def test_s_covers_default_offset_from_ref():
-    # bias-инициализация корректна только если s_i ≥ |log(DEFAULT_i/ref_i)|.
-    assert np.all(gs.GAIN_S >= np.abs(np.log(gs.GAIN_DEFAULT / gs.GAIN_REF)) - 1e-9)
-
-
-def test_gain_norm_endpoints():
-    assert np.allclose(gs.gain_norm(gs.GAIN_REF), 0.0, atol=1e-9)
-    assert np.allclose(gs.gain_norm(gs.GAIN_HI), 1.0)
-    assert np.allclose(gs.gain_norm(gs.GAIN_LO), -1.0)
-
-
-def test_inv_gain_handles_nonpositive_without_error():
-    z = gs.inv_gain(np.zeros(15))       # gain=0 → guard, конечный z
-    assert np.all(np.isfinite(z))
-
-
-def test_snapshot_serializable_and_complete():
-    snap = gs.snapshot()
-    json.dumps(snap)
-    assert len(snap["ref"]) == len(snap["s"]) == len(snap["slots"]) == 15
-    assert snap["expand"] == gs.EXPAND
+def test_gain_space_can_be_built_from_external_scenario_registry():
+    external = {"default": SCENARIOS["default"]}
+    space = GainSpace.build("mc21", external)
+    assert space.default.shape == (15,)

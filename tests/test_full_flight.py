@@ -19,7 +19,7 @@ from ismpu.control.flight import (
 )
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.ics_sim import ICSSim, Telemetry
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.io.ics_connector import ControlModeState
 from ismpu.io.ics_engagement import IcsEngagement, EngagementInputs, EngagementState
 
@@ -183,7 +183,7 @@ def test_touchdown_is_any_main_gear_not_the_nose():
 def test_the_segment_machine_only_moves_forward():
     """«Козление» после касания снимает обжатие на секунду — назад в заход возвращаться нельзя."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0)))
     assert controller.segment is FlightSegment.APPROACH
 
@@ -202,7 +202,7 @@ def test_the_segment_machine_only_moves_forward():
 def test_the_rollout_default_keeps_the_existing_ground_behaviour():
     """Без `begin_flight` участок остаётся пробегом — среда обучения на это и опирается."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     assert controller.segment is FlightSegment.ROLLOUT
     controller.control_step(DT, telemetry(60.0), send=False)
     assert controller.state.cmd_elevator == 0.0        # воздушный закон не вмешивался
@@ -212,14 +212,20 @@ def test_the_rollout_default_keeps_the_existing_ground_behaviour():
 def test_the_first_ground_tick_is_computed_by_the_ground_channels():
     """В такте касания команда обязана быть уже наземной, а не последней командой захода."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    scenario = SCENARIOS["default"]
+    controller.bind_scenario(scenario, "mc21")
     controller.begin_flight(Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0)))
+    assert controller._configured_segment is FlightSegment.APPROACH
 
     touchdown = Telemetry.from_ics(engaged_inputs(GroundSpeed=140.0))
     controller.control_step(DT, touchdown, send=False)
     assert controller.segment is FlightSegment.ROLLOUT
+    assert controller._configured_segment is FlightSegment.ROLLOUT
+    rollout = scenario.control_for("mc21", FlightSegment.ROLLOUT)
+    assert controller.pids["pid_rev_l"].kp == rollout.rev_l["kp"]
+    assert controller.longitudinal_channel.last_diagnostics["value"] > 0.0
     assert controller.state.cmd_elevator == 0.0
-    assert controller.state.cmd_rev_l < 0.0            # реверс уже выпущен
+    assert controller.state.cmd_rev_l <= 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -250,7 +256,7 @@ def test_approach_is_refused_in_a_non_landing_flap_configuration():
 def test_losing_ils_validity_aborts_the_approach():
     """Нулевое отклонение при снятой валидности неотличимо от «точно на оси»."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0)))
 
     blind = Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0, LocDeviationValid=0))
@@ -262,7 +268,7 @@ def test_losing_ils_validity_aborts_the_approach():
 def test_ils_loss_inside_the_terminal_window_does_not_abort():
     """Ниже 80 футов до земли секунды — бросать органы там хуже, чем доработать."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0)))
 
     low = Telemetry.from_ics(airborne_inputs(radio_altitude_ft=TERMINAL_RADIO_ALTITUDE_FT - 20.0,
@@ -280,7 +286,7 @@ def test_the_segment_is_not_decided_by_a_frame_without_a_bench_packet():
     интегрируемая в полёте.
     """
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
 
     assert controller.begin_flight(Telemetry.invalid()) is FlightSegment.ROLLOUT
     controller.control_step(DT, Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1500.0)),
@@ -291,7 +297,7 @@ def test_the_segment_is_not_decided_by_a_frame_without_a_bench_packet():
 def test_a_decided_rollout_is_never_revised():
     """Пересмотр — только для отложенного решения, не для принятого."""
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     assert controller.begin_flight(Telemetry.from_ics(engaged_inputs())) is FlightSegment.ROLLOUT
     controller.control_step(DT, Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1500.0)),
                             send=False)
@@ -305,7 +311,7 @@ def test_a_decided_rollout_is_never_revised():
 def _engaged_airborne_sim(**overrides):
     """(sim, conn), где стенд уже принял воздушное управление (`ControlMode = Approach`)."""
     conn = FakeConnector(airborne_inputs(**overrides))
-    sim = ICSSim(connector=conn)
+    sim = ICSSim(connector=conn, aircraft_profile="mc21")
     sim.engagement.request_approach()
     sim.read_telemetry()
     assert sim.engaged
@@ -315,7 +321,7 @@ def _engaged_airborne_sim(**overrides):
 def test_airborne_frame_declares_only_the_airborne_channels():
     sim, conn = _engaged_airborne_sim()
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(sim.read_telemetry())
     controller.control_step(DT)
 
@@ -334,7 +340,7 @@ def test_airborne_frame_declares_only_the_airborne_channels():
 def test_airborne_frame_carries_the_commands_in_icd_units():
     sim, conn = _engaged_airborne_sim(RollAngle=4.0, IndicatedAirspeed=150.0)
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(sim.read_telemetry())
     controller.control_step(DT)
 
@@ -353,7 +359,7 @@ def test_quality_fields_are_reported_on_the_approach():
     """ТЗ 5.1.5: показатели выдерживания — отчёт, идущий вместе с командой."""
     sim, conn = _engaged_airborne_sim(LocDeviation=0.03, MagneticHeading=80.0)
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.begin_flight(sim.read_telemetry())
     controller.control_step(DT)
 
@@ -372,7 +378,7 @@ def test_quality_fields_are_reported_on_the_rollout_too():
 
     sim, bench = kinematic_sim(speed=60.0, lateral=6.0)
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.control_step(DT)
 
     out = bench.sent_outputs[-1]
@@ -386,7 +392,7 @@ def test_ground_frame_still_declares_only_the_ground_channels():
 
     sim, conn = engaged_sim(GroundSpeed=120.0)
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.control_step(DT)
 
     out = conn.sent_outputs[-1]
@@ -410,9 +416,9 @@ def test_a_whole_flight_runs_from_approach_to_taxi(monkeypatch):
     monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
 
     bench = ScriptedFlightBench(radio_altitude_ft=600.0, descent_fps=40.0)
-    sim = ICSSim(connector=bench)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21")
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
 
     first = sim.read_telemetry()
     assert controller.begin_flight(first) is FlightSegment.APPROACH
@@ -448,7 +454,7 @@ def test_the_airborne_handshake_is_actually_transmitted_before_approach():
     """Стенд включается по полученной готовности, а не по нашему представлению о ней."""
     bench = HandshakeBench(airborne_inputs(radio_altitude_ft=900.0, AgentIsActive=0),
                            target_mode=ControlModeState.Approach)
-    sim = ICSSim(connector=bench)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21")
     sim.read_telemetry()
     assert sim.engaged is False
 

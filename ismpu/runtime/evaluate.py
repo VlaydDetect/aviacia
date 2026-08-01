@@ -38,7 +38,7 @@ from ismpu.config.requirements import (
 )
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.control.failures import FailureMode
-from ismpu.envs.action import preset_action, REFERENCE_ACTION
+from ismpu.envs.action import preset_action
 from ismpu.envs.reward import TAXI_PHASE_KTS
 from ismpu.envs.reproducibility import contract_for, worst_replica
 from ismpu.envs.splits import split_scenarios, assert_no_leakage
@@ -73,8 +73,14 @@ class DefaultGainsPolicy(Policy):
 
     name = "default_gains"
 
+    def __init__(self):
+        self._action = None
+
+    def begin_episode(self, env):
+        self._action = env.reference_action
+
     def __call__(self, obs):
-        return REFERENCE_ACTION
+        return self._action
 
 
 class PresetPolicy(Policy):
@@ -109,10 +115,15 @@ class NPGSPolicy(Policy):
         return action
 
 
-def load_npgs_policy(path: str, *, name: str | None = None) -> NPGSPolicy:
+def load_npgs_policy(
+    path: str,
+    *,
+    name: str | None = None,
+    aircraft_profile: str | None = None,
+) -> NPGSPolicy:
     """Загружает чекпоинт NPGS (веса + конфиг + слепок нормировки) в политику."""
     from ismpu.agent.gain_scheduler import NPGS   # локальный импорт: torch опционален
-    net = NPGS.load(path, map_location="cpu")
+    net = NPGS.load(path, map_location="cpu", aircraft_profile=aircraft_profile)
     return NPGSPolicy(net, name=name or os.path.splitext(os.path.basename(path))[0])
 
 
@@ -255,7 +266,8 @@ def run_scenario(env, scenario, policy: Policy, *, max_steps: int = 4000,
     быть свойством регулятора, а может — одной удачной реализацией. Берётся худшая реплика, а не
     средняя: ТЗ задаёт пределы как границы (см. `envs/reproducibility`).
     """
-    contract = contract_for(scenario)
+    contract = contract_for(
+        scenario, aircraft_profile=env.sim.aircraft_profile_name)
     count = replicas if replicas is not None else contract.min_replicas
 
     results = [run_episode(env, scenario, policy, max_steps=max_steps) for _ in range(count)]
@@ -450,10 +462,11 @@ def smoke_evaluate(env, scenarios, *, policies: list[Policy] | None = None,
     return compare_policies(env, scenarios, policies, max_steps=max_steps, log=log)
 
 
-def main(*, sft_checkpoint: str | None = "checkpoints/npgs_sft.pt",
-         ppo_checkpoint: str | None = "checkpoints/npgs_final.pt",
+def main(*, sft_checkpoint: str | None = None,
+         ppo_checkpoint: str | None = None,
          out_dir: str = "runs/evaluation",
-         ip: str = LISTEN_IP_ANY, port: int = 3030) -> dict:
+         ip: str = LISTEN_IP_ANY, port: int = 3030,
+         aircraft_profile: str = "mc21") -> dict:
     """Полная приёмка на стенде: приёмочный набор × 4 политики → отчёт + гейт допуска.
 
     Условия каждого сценария выставляет оператор стенда; здесь набор задаёт, что именно надо
@@ -468,21 +481,31 @@ def main(*, sft_checkpoint: str | None = "checkpoints/npgs_sft.pt",
 
     silence_control_console()
 
-    sim = ICSSim(listen_ip=ip, listen_port=port)
+    profile_checkpoint_dir = os.path.join("checkpoints", aircraft_profile)
+    sft_checkpoint = sft_checkpoint or os.path.join(
+        profile_checkpoint_dir, "npgs_sft.pt")
+    ppo_checkpoint = ppo_checkpoint or os.path.join(
+        profile_checkpoint_dir, "npgs_final.pt")
+
+    sim = ICSSim(
+        listen_ip=ip, listen_port=port, aircraft_profile=aircraft_profile)
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, shield=Shield())
 
-    scenarios = ScenarioGenerator(seed=0).battery()
+    scenarios = ScenarioGenerator(
+        seed=0, aircraft_profile=aircraft_profile).battery()
     # Holdout считается ОТДЕЛЬНО: смешанный с обучающим он мерил бы запоминание, а не перенос.
-    split = split_scenarios(scenarios)
+    split = split_scenarios(scenarios, aircraft_profile=aircraft_profile)
     assert_no_leakage(split)
     print(f"Приёмочный набор: {split.summary()}")
 
     policies: list[Policy] = [DefaultGainsPolicy(), PresetPolicy()]
     if sft_checkpoint and os.path.exists(sft_checkpoint):
-        policies.append(load_npgs_policy(sft_checkpoint, name="sft"))
+        policies.append(load_npgs_policy(
+            sft_checkpoint, name="sft", aircraft_profile=aircraft_profile))
     if ppo_checkpoint and os.path.exists(ppo_checkpoint):
-        policies.append(load_npgs_policy(ppo_checkpoint, name="ppo"))
+        policies.append(load_npgs_policy(
+            ppo_checkpoint, name="ppo", aircraft_profile=aircraft_profile))
 
     try:
         comparison = compare_policies(env, scenarios, policies)

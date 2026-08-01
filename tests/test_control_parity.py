@@ -117,7 +117,7 @@ def test_equally_slow_law_endpoints():
 def test_control_step_emits_five_bounded_commands():
     sim, conn = static_sim(groundspeed_ms=50.0)
     controller = ControllingSystem(sim)
-    DEFAULT.apply(controller)
+    DEFAULT.apply_control(controller, "mc21")
 
     stop = controller.control_step(0.05, telemetry(50.0))
 
@@ -139,7 +139,7 @@ def test_nws_fail_preset_injects_failure():
 
     sim, conn = static_sim(groundspeed_ms=50.0)
     controller = ControllingSystem(sim)
-    NWS_FAIL.apply(controller)
+    NWS_FAIL.apply_control(controller, "mc21")
 
     assert controller.failures.state.steering_eff == 0.0  # отказ активирован
     controller.control_step(0.05, telemetry(50.0))
@@ -151,7 +151,7 @@ def test_default_preset_leaves_all_actuators_healthy():
     from ismpu.config.scenarios import DEFAULT
 
     controller = ControllingSystem(static_sim()[0])
-    DEFAULT.apply(controller)
+    DEFAULT.apply_control(controller, "mc21")
 
     assert controller.failures.state.steering_eff == 1.0  # отказ не активирован
 
@@ -161,7 +161,7 @@ def test_control_step_stops_and_sends_nothing_on_missing_telemetry():
 
     sim, conn = static_sim()
     controller = ControllingSystem(sim)
-    DEFAULT.apply(controller)
+    DEFAULT.apply_control(controller, "mc21")
 
     dropped = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=None,
                         heading_true_deg=float(RWY_HEADING_TRUE))
@@ -180,6 +180,6 @@ def test_control_step_stops_on_invalid_frame_even_with_numeric_fields():
     from ismpu.envs.ics_sim import Telemetry
 
     controller = ControllingSystem(static_sim()[0])
-    DEFAULT.apply(controller)
+    DEFAULT.apply_control(controller, "mc21")
 
     assert controller.control_step(0.05, Telemetry.invalid()) is True

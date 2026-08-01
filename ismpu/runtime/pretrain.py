@@ -4,11 +4,11 @@ behavioral cloning на эталонных коэффициентах пресе
 Запуск (нужен работающий стенд):  python -m ismpu.runtime.pretrain
 Оффлайн-валидация без стенда — `smoke_pretrain(env, scenarios, ...)` (среду подаёт вызывающий).
 
-Разметка (канонная): каждый **не-draft** пресет `SCENARIO_PRESETS` = отдельный режим/метка,
+Разметка (каноническая): каждая **не-draft** ветка `SCENARIOS` для выбранного профиля = отдельный режим/метка,
 цель = его собственные коэффициенты. Каждый пресет прогоняется по нескольку раз: разнообразие
 наблюдений даёт сам стенд (расстановка, ветер, шум датчиков от прогона к прогону не повторяются),
 а метка при этом не меняется. Отсев ещё-не-выверенных пресетов — через флаг
-`ScenarioConfig.draft`, НЕ по названию.
+`Scenario.is_draft(profile, FlightSegment.ROLLOUT)`, НЕ по названию.
 
 **Условия задаёт оператор стенда.** `build_scenarios` перечисляет, какие режимы надо снять; в
 каких именно условиях стенд их выдаст, мы не выбираем — сверяться с фактическими условиями
@@ -25,7 +25,8 @@ from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.agent.pretrain import pretrain_sft, PretrainConfig, SFTDataset
 from ismpu.runtime.capture import capture_dataset
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
+from ismpu.config.segments import FlightSegment
 
 
 @dataclass
@@ -35,6 +36,7 @@ class PretrainRunConfig:
     seed: int = 0
     checkpoint_dir: str = "checkpoints"
     checkpoint_name: str = "npgs_sft.pt"
+    legacy_checkpoint_profile: str | None = None
     silence_console: bool = True
     npgs: NPGSConfig = field(default_factory=NPGSConfig)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
@@ -68,18 +70,28 @@ def build_scenarios(cfg: PretrainRunConfig) -> list:
 def _selected_presets(cfg: PretrainRunConfig) -> list:
     """Пресеты для захвата по конфигурации, с явным отчётом о том, что отброшено."""
     if cfg.presets is not None:
-        unknown = [n for n in cfg.presets if n not in SCENARIO_PRESETS]
+        unknown = [n for n in cfg.presets if n not in SCENARIOS]
         if unknown:
             raise KeyError(f"неизвестные пресеты для SFT: {unknown}")
-        chosen = [SCENARIO_PRESETS[n] for n in cfg.presets]
+        chosen = [SCENARIOS[n] for n in cfg.presets]
     else:
-        chosen = list(SCENARIO_PRESETS.values())
+        chosen = list(SCENARIOS.values())
 
-    drafts = [s for s in chosen if s.control.draft]
+    # NPGS controls the ground rollout only.  Approach-only and taxi-only
+    # matrix cases have no rollout expert label and must not enter SFT.
+    chosen = [
+        scenario for scenario in chosen
+        if not scenario.matrix_codes or FlightSegment.ROLLOUT in scenario.matrix_codes
+    ]
+
+    drafts = [s for s in chosen if s.is_draft(cfg.aircraft_profile, FlightSegment.ROLLOUT)]
     if drafts and not cfg.include_drafts:
         names = ", ".join(s.scenario_id for s in drafts)
         print(f"[SFT] пропущены неоткалиброванные пресеты ({len(drafts)}): {names}")
-        chosen = [s for s in chosen if not s.control.draft]
+        chosen = [
+            s for s in chosen
+            if not s.is_draft(cfg.aircraft_profile, FlightSegment.ROLLOUT)
+        ]
     elif drafts:
         names = ", ".join(s.scenario_id for s in drafts)
         print(f"[SFT] ВНИМАНИЕ: в разметку включены черновые пресеты ({len(drafts)}): {names}. "
@@ -89,7 +101,11 @@ def _selected_presets(cfg: PretrainRunConfig) -> list:
     return chosen
 
 
-def matrix_preset_names(*, only_calibrated: bool = True) -> tuple[str, ...]:
+def matrix_preset_names(
+    *,
+    only_calibrated: bool = True,
+    aircraft_profile: str = "mc21",
+) -> tuple[str, ...]:
     """Имена наземных пресетов матрицы прогонов (пригодных для SFT) в порядке матрицы.
 
     Заход сюда не входит: его коэффициенты статические и в пространство действий NPGS не входят
@@ -97,10 +113,16 @@ def matrix_preset_names(*, only_calibrated: bool = True) -> tuple[str, ...]:
     """
     from ismpu.config.run_matrix import ground_cases
 
-    names = [c.preset for c in ground_cases() if c.preset in SCENARIO_PRESETS]
+    cases = [c for c in ground_cases() if c.preset in SCENARIOS]
     if only_calibrated:
-        names = [n for n in names if not SCENARIO_PRESETS[n].control.draft]
-    return tuple(names)
+        cases = [
+            case for case in cases
+            if not SCENARIOS[case.preset].is_draft(
+                aircraft_profile,
+                FlightSegment.TAXI if case.segment == "taxi" else FlightSegment.ROLLOUT,
+            )
+        ]
+    return tuple(case.preset for case in cases)
 
 
 def build_capture_stack(cfg: PretrainRunConfig, ip: str | None = None,
@@ -123,7 +145,8 @@ def build_capture_stack(cfg: PretrainRunConfig, ip: str | None = None,
     )
     controller = ControllingSystem(sim)
     env = RolloutEnv(sim, controller, history_len=cfg.npgs.window, shield=None)
-    net = NPGS(cfg.npgs)
+    net_cfg = replace(cfg.npgs, aircraft_profile=cfg.aircraft_profile)
+    net = NPGS(net_cfg, gain_space=env.gain_space)
     return env, net
 
 
@@ -145,8 +168,10 @@ def run_pretrain(cfg: PretrainRunConfig | None = None, ip: str | None = None,
         print(f"SFT dataset: {len(dataset)} окон из {len(kept)}/{len(scenarios)} прогонов "
               f"(отброшено {len(reports) - len(kept)}, с оговорками {len(caveated)})")
         history = pretrain_sft(net, dataset, cfg.pretrain)
-        os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-        path = os.path.join(cfg.checkpoint_dir, cfg.checkpoint_name)
+        profile_checkpoint_dir = os.path.join(cfg.checkpoint_dir, cfg.aircraft_profile)
+        os.makedirs(profile_checkpoint_dir, exist_ok=True)
+        path = os.path.join(profile_checkpoint_dir, cfg.checkpoint_name)
+        net.source_scenarios = tuple(dict.fromkeys(s.scenario_id.split("-v", 1)[0] for s in scenarios))
         net.save(path)
         print(f"SFT готово: mse {history[-1]['mse']:.5f} → {path}")
     finally:
@@ -157,7 +182,10 @@ def run_pretrain(cfg: PretrainRunConfig | None = None, ip: str | None = None,
 def smoke_pretrain(env, scenarios, *, npgs: NPGS | None = None,
                    pretrain: PretrainConfig | None = None, max_steps: int = 200):
     """Оффлайн SFT на поданной среде (без стенда) — для тестов/отладки. → (net, dataset, history)."""
-    net = npgs or NPGS(NPGSConfig(window=env.history_len))
+    net = npgs or NPGS(
+        NPGSConfig(window=env.history_len, aircraft_profile=env.sim.aircraft_profile_name),
+        gain_space=env.gain_space,
+    )
     dataset, _reports = capture_dataset(env, scenarios, max_steps=max_steps, log=None)
     history = pretrain_sft(net, dataset, pretrain or PretrainConfig(epochs=3, batch_size=64, device="cpu"))
     return net, dataset, history

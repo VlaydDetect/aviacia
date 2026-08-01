@@ -27,6 +27,7 @@ from typing import Any, TypedDict
 import numpy as np
 
 from ismpu.config.constants import DT
+from ismpu.config.segments import FlightSegment
 from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
@@ -42,13 +43,16 @@ class EpisodeInfo(TypedDict, total=False):
     off_runway: bool
     engaged: bool
     objective: dict[str, Any]
-from ismpu.envs.scenario import Scenario
+from ismpu.config.scenarios import Scenario
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, ObserverEstimate
-from ismpu.envs.action import decode, apply_corrections, ACTION_LOW, ACTION_HIGH
+from ismpu.envs.action import (
+    action_high, action_low, decode, apply_corrections, reference_action,
+)
 from ismpu.envs.reward import (
     compute_reward, RewardWeights, EpisodeObjective, saturation_fraction,
 )
 from ismpu.agent.shield import RuntimeState, base_gains_from_pids
+from ismpu.agent.gain_space import GainSpace, gain_space_for
 
 try:  # gymnasium опционален
     from gymnasium import spaces as _gym_spaces
@@ -108,13 +112,17 @@ class RolloutEnv:
     def __init__(self, sim: SimInterface, controller: ControllingSystem, *,
                  dt: float = DT, history_len: int = 1, shield=None,
                  obs_builder: ObservationBuilder | None = None,
-                 reward_weights: RewardWeights | None = None, max_steps: int = 4000):
+                 reward_weights: RewardWeights | None = None, max_steps: int = 4000,
+                 gain_space: GainSpace | None = None):
         self.sim = sim
         self.controller = controller
         self.dt = dt
         self.history_len = history_len
+        self.gain_space = gain_space or gain_space_for(sim.aircraft_profile_name)
         self.shield = shield
-        self.obs_builder = obs_builder or ObservationBuilder()
+        if self.shield is not None and hasattr(self.shield, "set_gain_space"):
+            self.shield.set_gain_space(self.gain_space)
+        self.obs_builder = obs_builder or ObservationBuilder(gain_space=self.gain_space)
         self.reward_weights = reward_weights or RewardWeights()
         self.max_steps = max_steps
 
@@ -131,15 +139,12 @@ class RolloutEnv:
         # а не плоский вектор: сеть обрабатывает временную ось (GRU/attention).
         self.observation_space = _make_box(np.full((history_len, OBS_DIM), -1.0),
                                            np.full((history_len, OBS_DIM), 1.0))
-        self.action_space = _make_box(ACTION_LOW, ACTION_HIGH)
+        self.action_space = _make_box(action_low(self.gain_space), action_high(self.gain_space))
+        self.reference_action = reference_action(self.gain_space)
 
     # --- Gymnasium API ---
 
     def reset(self, scenario: Scenario, *, seed=None):
-        if getattr(self.sim, "backend_name", "") == "xplane":
-            from ismpu.config.xplane_presets import xplane_ground_preset
-            scenario = replace(
-                scenario, control=xplane_ground_preset(scenario.control.name))
         self._scenario = scenario
         telemetry = self.sim.reset(scenario)          # сброс рукопожатия + первый кадр стенда
         # Рукопожатие ДО первого шага: иначе такты прогрева попали бы в `_steps`, reward и
@@ -147,7 +152,8 @@ class RolloutEnv:
         if not self.sim.warm_up():
             raise RuntimeError("стенд не включил управление — эпизод начинать нельзя")
         telemetry = self.sim.read_telemetry()
-        scenario.apply_control(self.controller)        # seed PID пресета + активация отказа
+        self.controller.bind_scenario(scenario, self.sim.aircraft_profile_name)
+        self.controller.activate_segment(FlightSegment.ROLLOUT, telemetry)
         self._preset_gains = base_gains_from_pids(self.controller.pids)  # пресет-якорь Shield
         if self.shield is not None:
             self.shield.reset()

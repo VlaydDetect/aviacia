@@ -15,11 +15,12 @@ from ismpu.config.ics import (
     BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
     TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
 )
-from ismpu.envs.scenario import (
-    Scenario, SCENARIO_PRESETS, select_scenario, select_for_telemetry, weather_distance,
+from ismpu.config.scenarios import (
+    Scenario, SCENARIOS, select_scenario, select_for_telemetry, weather_distance,
 )
 from ismpu.envs.scenario_generator import ScenarioGenerator
-from ismpu.config.scenarios import SCENARIOS, DEFAULT, NWS_FAIL
+from ismpu.config.scenarios import DEFAULT, NWS_FAIL
+from ismpu.config.segments import FlightSegment
 from ismpu.envs.weather import WeatherState, RunwayCondition, WEATHER_PRESETS
 
 from fakes import (
@@ -48,7 +49,7 @@ def test_read_telemetry_converts_icd_units_to_si():
                           VerticalSpeed=-120.0,       # футы/мин
                           BodyYawRate=6.0,            # градусы/с
                           BodyLongAccel=-0.25)
-    telem = ICSSim(connector=FakeConnector(inp)).read_telemetry()
+    telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
 
     assert telem.lat == pytest.approx(55.9)
     assert telem.groundspeed_ms == pytest.approx(140.0 * Converts.KTS_TO_MS)   # ≈72 м/с
@@ -70,7 +71,7 @@ def test_read_telemetry_maps_bench_only_signals():
         LateralDeviation=1.4, RunwayCondition=2,                # 2 = ICE по шкале стенда
         NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1, RightGearWeightOnWheels=1,
         FaultNWS=1, FaultLeftEngineReverse=1)
-    telem = ICSSim(connector=FakeConnector(inp)).read_telemetry()
+    telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
 
     assert telem.runway_heading_deg == pytest.approx(75.08)
     assert telem.runway_length_m == pytest.approx(3700.0)
@@ -84,18 +85,18 @@ def test_read_telemetry_maps_bench_only_signals():
 def test_weight_on_wheels_requires_all_three_gear():
     inp = make_ics_inputs(NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1,
                           RightGearWeightOnWheels=0)
-    assert ICSSim(connector=FakeConnector(inp)).read_telemetry().weight_on_wheels is False
+    assert ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry().weight_on_wheels is False
 
 
 def test_unknown_runway_condition_is_treated_as_slippery():
     """Неизвестный код — не повод предполагать сухую полосу."""
     inp = make_ics_inputs(RunwayCondition=99)
-    telem = ICSSim(connector=FakeConnector(inp)).read_telemetry()
+    telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
     assert telem.runway_condition == pytest.approx(RunwayCondition.ICY.value)
 
 
 def test_read_telemetry_invalid_on_timeout():
-    sim = ICSSim(connector=FakeConnector(None))
+    sim = ICSSim(connector=FakeConnector(None), aircraft_profile="mc21")
     assert sim.read_telemetry().valid is False
 
 
@@ -109,7 +110,7 @@ def test_weather_comes_from_the_bench_packet():
 
     inp = make_ics_inputs(WindSpeed=12.0, WindDirectionTrue=165.0, RunwayCondition=1,
                           PrecipitationRatio=0.6, Visibility=16000.0, AirfieldTemp=-4.0)
-    weather = ICSSim(connector=FakeConnector(inp)).read_telemetry().weather
+    weather = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry().weather
 
     assert weather.wind_speed_kts == pytest.approx(12.0)        # узлы остаются узлами
     assert weather.wind_dir_from_degt == pytest.approx(165.0)
@@ -122,7 +123,7 @@ def test_weather_comes_from_the_bench_packet():
 
 
 def test_weather_is_none_without_a_bench_packet():
-    assert ICSSim(connector=FakeConnector(None)).read_telemetry().weather is None
+    assert ICSSim(connector=FakeConnector(None), aircraft_profile="mc21").read_telemetry().weather is None
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +133,7 @@ def test_weather_is_none_without_a_bench_packet():
 def test_commands_are_withheld_until_engaged():
     """До рукопожатия заявлять каналы нельзя: стенд ещё не разрешил нам ими управлять."""
     conn = FakeConnector(make_ics_inputs(GroundSpeed=30.0))
-    sim = ICSSim(connector=conn)
+    sim = ICSSim(connector=conn, aircraft_profile="mc21")
     cmd = ControlsState()
     cmd.cmd_brake_l = 1.0
     sim.step(cmd)
@@ -259,6 +260,39 @@ def test_active_failures_come_from_telemetry():
     assert FailureMode.ENGINE_OUT_LEFT not in sim.active_failures
 
 
+def test_ics_requires_profile_and_records_nonfatal_transition_mismatch():
+    with pytest.raises(ValueError, match="aircraft_profile"):
+        ICSSim(connector=FakeConnector())
+
+    scenario = SCENARIOS["b_4_2_through_engine_out"]
+    connector = FakeConnector(on_ground(
+        FaultLeftEngine=1,
+        Visibility=16000.0 / 0.3048,
+    ))
+    sim = ICSSim(connector=connector, aircraft_profile="mc21")
+    first = sim.reset(scenario)
+    controller = ControllingSystem(sim)
+    controller.bind_scenario(scenario, "mc21")
+    controller.activate_segment(FlightSegment.APPROACH, first)
+    approach = sim.condition_match
+    assert approach.exact
+    assert sim.conditions_valid
+    assert controller.failures.state.thrust_left_eff == 0.0
+
+    # The bench still reports only the engine failure at touchdown.  This is
+    # unsafe to "fix" by dropping authority, so the transition continues but
+    # the run is invalid and the exact mismatch remains auditable.
+    controller.activate_segment(FlightSegment.ROLLOUT, first)
+    rollout = sim.condition_match
+    assert rollout.missing_failures == frozenset({FailureMode.REVERSE_LEFT_FAIL})
+    assert not sim.conditions_valid
+    assert sim.condition_matches == [approach, rollout]
+    # The first rollout calculation must use what the bench actually reports,
+    # not the expected-but-missing reverser failure from the composed scenario.
+    assert controller.failures.state.thrust_left_eff == 0.0
+    assert controller.failures.state.reverse_left_eff == 1.0
+
+
 # --------------------------------------------------------------------------- #
 # Отказы: источник истины — борт, а не пресет сценария
 # --------------------------------------------------------------------------- #
@@ -268,7 +302,7 @@ def test_controller_takes_failures_from_the_bench_not_from_the_preset():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)     # штатный пресет: руль жив
+    SCENARIOS["default"].apply_control(controller, "mc21")
     assert controller.failures.state.steering_eff == 1.0
 
     failed = telemetry(ics_inputs=on_ground(FaultNWS=1))
@@ -281,7 +315,7 @@ def test_failures_are_cleared_when_the_bench_stops_reporting_them():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["nws_fail"].apply_control(controller)
+    SCENARIOS["nws_fail"].apply_control(controller, "mc21")
     assert controller.failures.state.steering_eff == 0.0
 
     healthy = telemetry(ics_inputs=on_ground())
@@ -298,7 +332,7 @@ def test_synthetic_telemetry_does_not_silently_clear_the_preset_failure():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["nws_fail"].apply_control(controller)
+    SCENARIOS["nws_fail"].apply_control(controller, "mc21")
     controller.control_step(DT, telemetry(50.0), send=False)     # ics_inputs=None
     assert controller.failures.state.steering_eff == 0.0
 
@@ -308,7 +342,7 @@ def test_lost_packet_does_not_repair_a_failed_actuator():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.control_step(DT, telemetry(ics_inputs=on_ground(FaultNWS=1)), send=False)
     assert controller.failures.state.steering_eff == 0.0
 
@@ -327,7 +361,7 @@ def test_controller_runs_the_plain_loop_against_the_bench():
     sim, conn = engaged_sim(GroundSpeed=100.0)
     controller = ControllingSystem(sim)
     assert not hasattr(controller, "xpc")
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
 
     for _ in range(5):
         assert controller.control_step(DT) is False   # ни телеметрии, ни отправки вручную
@@ -357,7 +391,7 @@ def test_plain_loop_reads_telemetry_once_per_tick():
 
     sim.read_telemetry = counting_read
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
 
     ticks = 4
     for _ in range(ticks):
@@ -382,7 +416,7 @@ def test_control_exception_sends_a_neutral_command_then_releases_the_channels(mo
     monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
     sim, conn = engaged_sim(GroundSpeed=100.0)
     controller = ControllingSystem(sim)
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     controller.control_step(DT)
 
     sent_before = len(conn.sent_outputs)
@@ -407,7 +441,7 @@ def test_lateral_channel_uses_runway_geometry_from_telemetry():
 
     def rudder_for(runway_heading, lateral_deviation):
         controller = ControllingSystem()
-        SCENARIO_PRESETS["default"].apply_control(controller)
+        SCENARIOS["default"].apply_control(controller, "mc21")
         # Курс ВПП и боковое отклонение приходят «сырым» пакетом стенда, а не отдельными полями:
         # это те же сигналы, что читает property Telemetry.runway_heading_deg / lateral_deviation_m.
         telem = telemetry(50.0, heading=runway_heading,   # ВС точно по курсу ВПП
@@ -431,7 +465,7 @@ def test_geodetic_path_is_kept_when_the_bench_gives_no_runway_geometry():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     telem = telemetry(50.0)
     assert telem.runway_heading_deg is None and telem.lateral_deviation_m is None
     controller.control_step(DT, telem, send=False)   # геодезический путь, без исключений
@@ -443,7 +477,7 @@ def test_geodetic_path_is_kept_when_the_bench_gives_no_runway_geometry():
 
 def _cold_sim(**overrides):
     conn = HandshakeBench(on_ground(GroundSpeed=0.0, **overrides))
-    return ICSSim(connector=conn), conn
+    return ICSSim(connector=conn, aircraft_profile="mc21"), conn
 
 
 def test_cold_ground_start_engages_only_after_the_bench_confirms(monkeypatch):
@@ -452,7 +486,7 @@ def test_cold_ground_start_engages_only_after_the_bench_confirms(monkeypatch):
 
     monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
     sim, conn = _cold_sim()
-    sim.reset(SCENARIO_PRESETS["default"])
+    sim.reset(SCENARIOS["default"])
     assert sim.engaged is False
 
     assert sim.warm_up(timeout_s=30.0) is True
@@ -486,7 +520,7 @@ def test_warm_up_paces_itself_and_does_not_flood_the_bench(monkeypatch):
     """
     monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
     sim, conn = _cold_sim()
-    sim.reset(SCENARIO_PRESETS["default"])
+    sim.reset(SCENARIOS["default"])
     sim.warm_up(timeout_s=30.0)
 
     assert sim.engaged is True
@@ -509,7 +543,7 @@ def test_reset_does_not_touch_the_bench_environment():
     """Средой распоряжается Заказчик: `reset` ничего не выставляет, только сбрасывает автомат."""
     sim, conn = engaged_sim()
     assert sim.engaged is True
-    sim.reset(SCENARIO_PRESETS["icy_rwy"])
+    sim.reset(SCENARIOS["icy_rwy"])
     assert conn.sent_outputs == []        # ни одной команды на конфигурацию среды
 
 
@@ -522,7 +556,7 @@ def test_cold_ground_start_does_not_end_the_run_on_the_first_tick():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     stationary = telemetry(0.0)
 
     for _ in range(50):
@@ -535,7 +569,7 @@ def test_rollout_completion_still_fires_once_the_run_actually_started():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
 
     controller.control_step(DT, telemetry(70.0), send=False)
     assert controller.longitudinal_channel.rollout_started is True
@@ -548,7 +582,7 @@ def test_controller_without_a_bench_fails_loudly():
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     with pytest.raises(RuntimeError, match="стенд"):
         controller.control_step(DT, telemetry(), send=True)
 
@@ -561,8 +595,8 @@ def test_controller_without_a_bench_fails_loudly():
 # --------------------------------------------------------------------------- #
 
 def test_scenario_roundtrip_with_weather_and_failures():
-    scenario = Scenario(
-        scenario_id="s1", seed=7, control=SCENARIOS["nws_fail"],
+    scenario = Scenario.from_preset(
+        "nws_fail", scenario_id="s1", seed=7,
         weather=WeatherState.from_crosswind(15.0, 5.0, runway_friction=RunwayCondition.ICY.value),
         failures=(FailureMode.NWS_FAIL, FailureMode.REVERSE_LEFT_FAIL),
     )
@@ -574,8 +608,8 @@ def test_scenario_roundtrip_with_weather_and_failures():
 
 def test_select_scenario_matches_the_reported_failure():
     """Ради этого отказы и остались в сценарии: по ним подбирается откалиброванный пресет."""
-    assert select_scenario((FailureMode.NWS_FAIL,)).control is NWS_FAIL
-    assert select_scenario(()).control is DEFAULT
+    assert select_scenario((FailureMode.NWS_FAIL,)) is NWS_FAIL
+    assert select_scenario(()) is DEFAULT
 
 
 def test_failure_match_outweighs_any_weather_similarity():
@@ -595,22 +629,25 @@ def test_select_scenario_prefers_closer_weather_within_the_same_failure_set():
 
 def test_select_scenario_skips_draft_presets_by_default():
     """Молча выбрать невыверенный пресет — вести пробег на непроверенных коэффициентах."""
-    drafts = [s for s in SCENARIO_PRESETS.values() if s.control.draft]
+    drafts = [
+        scenario for scenario in SCENARIOS.values()
+        if scenario.is_draft("mc21", FlightSegment.ROLLOUT)
+    ]
     for scenario in drafts:
         chosen = select_scenario(scenario.failures, scenario.weather)
-        assert not chosen.control.draft
+        assert not chosen.is_draft("mc21", FlightSegment.ROLLOUT)
 
 
 def test_select_for_telemetry_reads_conditions_off_the_bench():
     inp = on_ground(FaultNWS=1, RunwayCondition=2)      # отказ NWS на льду
-    telem = ICSSim(connector=FakeConnector(inp)).read_telemetry()
-    assert select_for_telemetry(telem).control is NWS_FAIL
+    telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
+    assert select_for_telemetry(telem) is NWS_FAIL
 
 
 def test_select_for_telemetry_falls_back_to_default_without_telemetry():
     """Без кадра о конфигурации борта неизвестно ничего — безопасен только штатный пресет."""
-    assert select_for_telemetry(Telemetry.invalid()).control is DEFAULT
-    assert select_for_telemetry(None).control is DEFAULT
+    assert select_for_telemetry(Telemetry.invalid()) is DEFAULT
+    assert select_for_telemetry(None) is DEFAULT
 
 
 # --------------------------------------------------------------------------- #
@@ -654,48 +691,47 @@ def test_battery_covers_key_cases_and_roundtrips():
 
 def test_generator_embeds_control_config():
     s = ScenarioGenerator(seed=1).sample(difficulty=0.0)
-    # control — это ScenarioConfig из общего реестра (не строка-ключ)
-    assert s.control is SCENARIOS[s.control.name]
-    assert s.control is DEFAULT  # без отказов → базовый пресет
+    assert s.provenance[FlightSegment.ROLLOUT] == "default"
+    assert s.control_for("mc21", FlightSegment.ROLLOUT) == \
+           DEFAULT.control_for("mc21", FlightSegment.ROLLOUT)
 
 
 # --------------------------------------------------------------------------- #
 # Единые пресеты сценариев (управление + условия калибровки)
 # --------------------------------------------------------------------------- #
 
-def test_presets_mirror_control_registry_with_same_pids():
-    assert set(SCENARIO_PRESETS) == set(SCENARIOS)
-    # инвариант: PID-настройки не менялись — control это тот же самый объект
-    assert SCENARIO_PRESETS["default"].control is DEFAULT
-    assert SCENARIO_PRESETS["nws_fail"].control is NWS_FAIL
+def test_scenarios_is_the_only_registry():
+    import ismpu.envs.scenario as compatibility_module
+    assert not hasattr(compatibility_module, "SCENARIO_PRESETS")
+    assert SCENARIOS["default"] is DEFAULT
+    assert SCENARIOS["nws_fail"] is NWS_FAIL
 
 
 def test_calm_presets_carry_standard_weather():
     # Спокойные пресеты (default + отказные) — ясно/штиль/сухо. Погодные пресеты
-    # (RIGHT_WIND/WET/...) несут СВОИ условия (ScenarioConfig.weather) и здесь не проверяются.
+    # (RIGHT_WIND/WET/...) несут СВОИ условия (SegmentConditions.weather) и здесь не проверяются.
     for name in ("default", "nws_fail", "left_reverse_fail", "right_reverse_fail"):
-        w = SCENARIO_PRESETS[name].weather
+        w = SCENARIOS[name].weather
         assert w.wind_speed_kts == 0.0          # штиль
         assert w.runway_friction == 0.0         # сухо (Dry)
         assert w.rain_pct == 0.0                # ясно
 
 
 def test_preset_failures_match_control_preset():
-    assert SCENARIO_PRESETS["default"].failures == ()
-    assert SCENARIO_PRESETS["nws_fail"].failures == (FailureMode.NWS_FAIL,)
-    assert SCENARIO_PRESETS["left_reverse_fail"].failures == (FailureMode.REVERSE_LEFT_FAIL,)
+    assert SCENARIOS["default"].failures == ()
+    assert SCENARIOS["nws_fail"].failures == (FailureMode.NWS_FAIL,)
+    assert SCENARIOS["left_reverse_fail"].failures == (FailureMode.REVERSE_LEFT_FAIL,)
 
 
 def test_preset_apply_control_matches_direct_config_apply():
-    # apply_control делегирует в ScenarioConfig.apply → поведение прежнее (NWS активируется)
+    # apply_control пересобирает PID выбранной профильной ветки → NWS активируется.
     controller = ControllingSystem()
-    SCENARIO_PRESETS["nws_fail"].apply_control(controller)
+    SCENARIOS["nws_fail"].apply_control(controller, "mc21")
     assert controller.failures.state.steering_eff == 0.0
 
 
 def test_preset_roundtrips_through_dict():
-    for name in SCENARIO_PRESETS:
-        s = SCENARIO_PRESETS[name]
+    for name in SCENARIOS:
+        s = SCENARIOS[name]
         restored = Scenario.from_dict(s.to_dict())
-        assert restored.control is s.control      # разрешается по имени в общий реестр
         assert restored.to_dict() == s.to_dict()

@@ -36,7 +36,10 @@ from ismpu.config.ics import (
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
 from ismpu.config.envelope import LandingFlapConfiguration
+from ismpu.config.aircraft_profiles import AircraftProfile, get_aircraft_profile
 from ismpu.config.runway import RWY_HEADING_TRUE
+from ismpu.config.segments import FlightSegment
+from ismpu.config.scenarios import ConditionMatch, Scenario, match_conditions
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState
@@ -371,16 +374,32 @@ class ICSSim(SimInterface):
     """
 
     backend_name = "ics"
-    aircraft_profile_name = "bench"
 
     def __init__(self, connector: Optional[ICSBenchConnector] = None,
                  listen_ip: str = LISTEN_IP_ANY, listen_port: int = 3030, timeout: float = 1.0,
-                 engagement: Optional[IcsEngagement] = None):
+                 engagement: Optional[IcsEngagement] = None,
+                 aircraft_profile: AircraftProfile | str | None = None,
+                 validate_conditions: bool = True):
+        if aircraft_profile is None:
+            raise ValueError("для ICS требуется явный aircraft_profile")
+        self.aircraft_profile = (
+            get_aircraft_profile(aircraft_profile)
+            if isinstance(aircraft_profile, str) else aircraft_profile)
         self.connector = connector if connector is not None else ICSBenchConnector(listen_ip, listen_port)
         self.timeout = timeout
         self.engagement = engagement if engagement is not None else IcsEngagement()
         self._last_telemetry: Optional[Telemetry] = None
         self._shutdown_report: Optional[ShutdownReport] = None
+        self._scenario: Scenario | None = None
+        self._entered_segment: FlightSegment | None = None
+        self.condition_match: ConditionMatch | None = None
+        self.condition_matches: list[ConditionMatch] = []
+        self.conditions_valid = True
+        self.validate_conditions = validate_conditions
+
+    @property
+    def aircraft_profile_name(self) -> str:
+        return self.aircraft_profile.name
 
     @property
     def engaged(self) -> bool:
@@ -402,7 +421,44 @@ class ICSSim(SimInterface):
         из `RolloutEnv` и на состояние стенда не влияет.
         """
         self.engagement.reset()
+        self._scenario = scenario
+        self._entered_segment = None
+        self.condition_match = None
+        self.condition_matches.clear()
+        self.conditions_valid = True
         return self.read_telemetry()
+
+    def enter_segment(
+        self,
+        scenario: Scenario,
+        segment: FlightSegment,
+        telemetry: Telemetry | None = None,
+    ) -> ConditionMatch:
+        """Сверить ожидаемые условия; стендовые условия никогда не изменяются кодом."""
+        frame = telemetry or self._last_telemetry or self.read_telemetry()
+        report = match_conditions(
+            scenario.conditions_for(segment), frame.faults, frame.weather, segment)
+        initial = self._entered_segment is None
+        self._scenario = scenario
+        self._entered_segment = segment
+        self.condition_match = report
+        self.condition_matches.append(report)
+        self.conditions_valid = self.conditions_valid and report.exact
+        if self.validate_conditions and initial and not report.failures_match:
+            missing = ", ".join(sorted(f.name for f in report.missing_failures)) or "—"
+            unexpected = ", ".join(sorted(f.name for f in report.unexpected_failures)) or "—"
+            raise RuntimeError(
+                f"условия ICS не соответствуют сценарию {scenario.scenario_id!r}: "
+                f"нет отказов [{missing}], лишние [{unexpected}]")
+        if not report.exact:
+            logger.warning(
+                "Условия участка %s отличаются от сценария %s: missing=%s unexpected=%s "
+                "weather_distance=%.6f",
+                segment.value, scenario.scenario_id,
+                sorted(f.name for f in report.missing_failures),
+                sorted(f.name for f in report.unexpected_failures), report.weather_distance,
+            )
+        return report
 
     def step(self, command: ControlsState) -> Telemetry:
         outputs = self._to_outputs(command)

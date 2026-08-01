@@ -13,12 +13,13 @@ from ismpu.config.approach import APPROACH_DEFAULT
 from ismpu.config.constants import DT
 from ismpu.config.envelope import measured_landing_flaps
 from ismpu.config.ics import FlightPhase
+from ismpu.config.segments import FlightSegment
+from ismpu.config.scenarios import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
 from ismpu.config.runway_profiles import RunwayProfile, UUEE_06R, _destination
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.envs.ics_sim import Telemetry, TelemetryExtensions
-from ismpu.envs.scenario import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
 from ismpu.envs.sim_interface import (
     ApproachData, ShutdownReport, XPlaneDiagnostics, SimInterface, StartMode,
 )
@@ -59,6 +60,7 @@ class XPlaneSim(SimInterface):
     ) -> None:
         self.connector = connector or XPlaneConnector(ip=ip, port=port)
         self.profile = aircraft_profile
+        self.profile.require_xplane()
         self.runway = runway_profile
         self.xplane_root = Path(xplane_root) if xplane_root is not None else None
         self.stale_after_s = stale_after_s
@@ -80,6 +82,8 @@ class XPlaneSim(SimInterface):
         self._ready = False
         self._missing_or_stale: tuple[str, ...] = ()
         self._sensor_noise = SensorNoise()
+        self._scenario: Scenario | None = None
+        self._entered_segment: FlightSegment | None = None
         self._random = random.Random(0)
         self.ils_station = None
         self.connector.subscribe(
@@ -122,6 +126,8 @@ class XPlaneSim(SimInterface):
         if self._closed:
             raise RuntimeError("XPlaneSim уже закрыт")
         scenario = scenario or Scenario.from_preset("default")
+        self._scenario = scenario
+        self._entered_segment = None
         self._sensor_noise = scenario.sensor_noise
         self._random = random.Random(scenario.seed)
         mode = (start or "rollout").lower()
@@ -142,14 +148,18 @@ class XPlaneSim(SimInterface):
         self._capture_overrides()
         try:
             self.clear_failures()
-            self.apply_weather(scenario.weather)
+            segment = (
+                FlightSegment.APPROACH if mode == "approach" else FlightSegment.ROLLOUT)
+            conditions = scenario.conditions_for(segment)
+            self.apply_weather(conditions.weather)
             if mode == "approach":
                 self._configure_ils()
                 self.teleport_approach(scenario.approach)
             else:
                 self.teleport_rollout(scenario.touchdown)
-            for failure in scenario.failures:
+            for failure in conditions.failures:
                 self.inject_failure(failure)
+            self._entered_segment = segment
             self._mode = mode
             self._distance_m = 0.0
             self.connector.pause(False)
@@ -162,6 +172,25 @@ class XPlaneSim(SimInterface):
         if self.settle_s > 0:
             time.sleep(self.settle_s)
         return self.read_telemetry()
+
+    def enter_segment(
+        self,
+        scenario: Scenario,
+        segment: FlightSegment,
+        telemetry: Telemetry | None = None,
+    ) -> None:
+        """Применить только дельту условий при переходе между участками."""
+        del telemetry
+        target = scenario.conditions_for(segment)
+        current = self._active_failures | self._ignored_failures
+        for failure in current - target.failures:
+            self.clear_failure(failure)
+        for failure in target.failures - current:
+            self.inject_failure(failure)
+        if target.weather != self._weather:
+            self.apply_weather(target.weather)
+        self._scenario = scenario
+        self._entered_segment = segment
 
     def warm_up(self, timeout_s: float = 10.0, dt: float = DT) -> bool:
         del timeout_s, dt
@@ -505,6 +534,21 @@ class XPlaneSim(SimInterface):
         # NWS не имеет переносимого failure DataRef и моделируется командным
         # уровнем: опубликованный отказ обнуляет steering_eff в FailureManager.
         self._active_failures.add(mode)
+
+    def clear_failure(self, mode: FailureMode) -> None:
+        """Снять один отказ, не переинициализируя отказ, продолжающийся на новом участке."""
+        left, right = self.profile.engine_indices
+        mapping = {
+            FailureMode.ENGINE_OUT_LEFT: f"{dr.FAIL_ENGINE}[{left}]",
+            FailureMode.ENGINE_OUT_RIGHT: f"{dr.FAIL_ENGINE}[{right}]",
+            FailureMode.REVERSE_LEFT_FAIL: f"{dr.FAIL_REVERSER}[{left}]",
+            FailureMode.REVERSE_RIGHT_FAIL: f"{dr.FAIL_REVERSER}[{right}]",
+        }
+        dataref = mapping.get(mode)
+        if dataref is not None:
+            self.connector.send_dref(dataref, dr.FAILURE_ENUM_OK)
+        self._active_failures.discard(mode)
+        self._ignored_failures.discard(mode)
 
     def clear_failures(self) -> None:
         for index in self.profile.engine_indices:

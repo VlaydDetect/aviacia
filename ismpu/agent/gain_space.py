@@ -1,37 +1,17 @@
-"""Единый источник истины gain-пространства NPGS (план: переход на абсолютные коэффициенты).
-
-Сеть теперь предсказывает **абсолютные** коэффициенты PID (kp/ki/kd для 5 регуляторов),
-а не мультипликативные поправки. Параметризация выхода — лог-tanh вокруг референса:
-
-    gain_i = ref_i · exp(s_i · tanh(z_i))          # z=0 → ref_i, полоса [ref·e^{-s}, ref·e^{+s}]
-    z_i    = atanh( log(target_i / ref_i) / s_i )   # инверсия (для SFT-целей)
-
-Таблица `ref/s/lo/hi` по 15 слотам `(regulator, kp|ki|kd)` вычисляется программно из
-семейства пресетов `config.scenarios.SCENARIOS` и замораживается на импорте:
-
-- `lo_i / hi_i` — физический диапазон = min/max по пресетам, расширенный в `EXPAND` раз
-  (сеть может уйти немного за экспертов; Shield всё равно центрируется на пресете).
-- `ref_i = sqrt(min·max)` — геометрическая середина (минимизирует |log(target/ref)| →
-  лучшее число обусловленности регрессии на широких диапазонах, до ~70× по `ki`).
-- `s_i = log(EXPAND · sqrt(max/min))` — симметричная лог-полуширина; так `lo/hi` = края
-  полосы, все пресеты (и DEFAULT) строго внутри ⇒ `atanh` целей конечен, а bias-инициализация
-  голов на DEFAULT корректна (`s_i ≥ |log(DEFAULT_i/ref_i)|`).
-
-Порядок 15 слотов = `shield.REGULATOR_ORDER` × `(kp, ki, kd)` — совпадает с первыми 15
-компонентами 17-мерного действия (`[gains×15, w_lon, w_lat]`). Таблица сериализуется в
-`normalization.snapshot()` → чекпоинт полностью фиксирует gain-пространство (детерминизм
-поставки). Веса каналов `w_lon/w_lat` сюда НЕ входят (у них своя параметризация `1+tanh`).
-"""
+"""Профильное пространство абсолютных PID-коэффициентов NPGS."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from ismpu.config.aircraft_profiles import AircraftProfile
 from ismpu.config.regulators import (
     GAIN_KEYS,
     N_GAINS,
@@ -40,142 +20,153 @@ from ismpu.config.regulators import (
     GainMap,
     RegulatorKey,
 )
-from ismpu.config.scenarios import DEFAULT, SCENARIOS, PidConfig, ScenarioConfig
-EXPAND = 2.0        # расширение физического диапазона за пределы наблюдённого в пресетах
-_EPS = 1e-6         # отступ от ±1 при atanh (устойчивость на краях полосы)
+from ismpu.config.scenarios import GroundControlConfig, SCENARIOS, Scenario
+from ismpu.config.segments import FlightSegment
 
-def _slot_order() -> list[tuple[RegulatorKey, GainKey]]:
-    """15 слотов в каноническом порядке: REGULATOR_ORDER × (kp, ki, kd)."""
-    return [(reg, k) for reg in REGULATOR_ORDER for k in GAIN_KEYS]
-
-
-def _regulator_config(config: ScenarioConfig, regulator: RegulatorKey) -> PidConfig:
-    """Возвращает PID-секцию сценария без динамического доступа к полям dataclass."""
-    if regulator == "runway_center_pid":
-        return config.runway_center
-    if regulator == "pid_brake_l":
-        return config.brake_l
-    if regulator == "pid_brake_r":
-        return config.brake_r
-    if regulator == "pid_rev_l":
-        return config.rev_l
-    if regulator == "pid_rev_r":
-        return config.rev_r
-    raise ValueError(f"Неизвестный регулятор: {regulator}")
+EXPAND = 2.0
+_EPS = 1e-6
+_REG_TO_FIELD: Mapping[RegulatorKey, str] = {
+    "runway_center_pid": "runway_center",
+    "pid_brake_l": "brake_l",
+    "pid_brake_r": "brake_r",
+    "pid_rev_l": "rev_l",
+    "pid_rev_r": "rev_r",
+}
 
 
-def _collect_preset_values(reg: RegulatorKey, key: GainKey) -> list[float]:
-    """Все значения gain'а `key` регулятора `reg` по всем пресетам SCENARIOS."""
-    vals: list[float] = []
-    for cfg in SCENARIOS.values():
-        d = _regulator_config(cfg, reg)
-        v = d.get(key)
-        if v is not None and v > 0.0:
-            vals.append(float(v))
-    return vals
+def _profile_name(profile: AircraftProfile | str) -> str:
+    return profile.name if isinstance(profile, AircraftProfile) else str(profile).lower()
 
 
-def _build_table() -> tuple[
-    list[tuple[RegulatorKey, GainKey]],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-]:
-    slots = _slot_order()
-    ref = np.empty(N_GAINS, dtype=np.float64)
-    s = np.empty(N_GAINS, dtype=np.float64)
-    lo = np.empty(N_GAINS, dtype=np.float64)
-    hi = np.empty(N_GAINS, dtype=np.float64)
-    default = np.empty(N_GAINS, dtype=np.float64)
-
-    for i, (reg, key) in enumerate(slots):
-        vals = _collect_preset_values(reg, key)
-        vmin, vmax = min(vals), max(vals)
-        lo[i] = vmin / EXPAND
-        hi[i] = vmax * EXPAND
-        ref[i] = math.sqrt(vmin * vmax)                  # геометрическая середина
-        s[i] = math.log(EXPAND * math.sqrt(vmax / vmin))  # = log(hi/ref) = log(ref/lo)
-        default[i] = float(_regulator_config(DEFAULT, reg)[key])
-    return slots, ref, s, lo, hi, default
+def _regulator_config(
+    config: GroundControlConfig, regulator: RegulatorKey,
+) -> dict[str, Any]:
+    try:
+        return getattr(config, _REG_TO_FIELD[regulator])
+    except KeyError as exc:
+        raise ValueError(f"неизвестный регулятор: {regulator}") from exc
 
 
-SLOTS, GAIN_REF, GAIN_S, GAIN_LO, GAIN_HI, GAIN_DEFAULT = _build_table()
+@dataclass(frozen=True)
+class GainSpace:
+    """Замороженная таблица gain'ов одного AircraftProfile."""
+
+    aircraft_profile: str
+    slots: tuple[tuple[RegulatorKey, GainKey], ...]
+    ref: NDArray[np.float64]
+    s: NDArray[np.float64]
+    lo: NDArray[np.float64]
+    hi: NDArray[np.float64]
+    default: NDArray[np.float64]
+
+    @classmethod
+    def build(
+        cls,
+        aircraft_profile: AircraftProfile | str,
+        scenarios: Mapping[str, Scenario] = SCENARIOS,
+    ) -> "GainSpace":
+        profile = _profile_name(aircraft_profile)
+        configs = [
+            scenario.control_for(profile, FlightSegment.ROLLOUT)
+            for scenario in scenarios.values()
+            if profile in scenario.aircraft_controls
+        ]
+        if not configs:
+            raise ValueError(f"нет rollout PID для профиля {profile!r}")
+        default_cfg = scenarios["default"].control_for(profile, FlightSegment.ROLLOUT)
+        slots = tuple((reg, key) for reg in REGULATOR_ORDER for key in GAIN_KEYS)
+        ref = np.empty(N_GAINS, dtype=np.float64)
+        width = np.empty(N_GAINS, dtype=np.float64)
+        lo = np.empty(N_GAINS, dtype=np.float64)
+        hi = np.empty(N_GAINS, dtype=np.float64)
+        default = np.empty(N_GAINS, dtype=np.float64)
+        for index, (regulator, key) in enumerate(slots):
+            values = [
+                float(_regulator_config(config, regulator)[key])
+                for config in configs
+                if float(_regulator_config(config, regulator).get(key, 0.0)) > 0.0
+            ]
+            if not values:
+                raise ValueError(f"нет положительных значений {regulator}:{key}")
+            vmin, vmax = min(values), max(values)
+            lo[index] = vmin / EXPAND
+            hi[index] = vmax * EXPAND
+            ref[index] = math.sqrt(vmin * vmax)
+            width[index] = math.log(EXPAND * math.sqrt(vmax / vmin))
+            default[index] = float(_regulator_config(default_cfg, regulator)[key])
+        return cls(profile, slots, ref, width, lo, hi, default)
+
+    def _by_reg(self, values: Sequence[float]) -> GainMap:
+        return {
+            regulator: {
+                key: float(values[self.slots.index((regulator, key))])
+                for key in GAIN_KEYS
+            }
+            for regulator in REGULATOR_ORDER
+        }
+
+    @property
+    def ref_map(self) -> GainMap:
+        return self._by_reg(self.ref)
+
+    @property
+    def s_map(self) -> GainMap:
+        return self._by_reg(self.s)
+
+    @property
+    def lo_map(self) -> GainMap:
+        return self._by_reg(self.lo)
+
+    @property
+    def hi_map(self) -> GainMap:
+        return self._by_reg(self.hi)
+
+    @property
+    def default_map(self) -> GainMap:
+        return self._by_reg(self.default)
+
+    def gain_norm_scalar(self, value: float, reg: RegulatorKey, key: GainKey) -> float:
+        ratio = math.log(max(float(value), 1e-12) / self.ref_map[reg][key]) / self.s_map[reg][key]
+        return -1.0 if ratio < -1.0 else 1.0 if ratio > 1.0 else ratio
+
+    def to_gain(self, z: ArrayLike) -> NDArray[np.float64]:
+        return self.ref * np.exp(self.s * np.tanh(np.asarray(z, dtype=np.float64)))
+
+    def inv_gain(self, gain: ArrayLike) -> NDArray[np.float64]:
+        values = np.maximum(np.asarray(gain, dtype=np.float64), 1e-12)
+        ratio = np.log(values / self.ref) / self.s
+        return np.arctanh(np.clip(ratio, -1.0 + _EPS, 1.0 - _EPS))
+
+    def gain_norm(self, gain: ArrayLike) -> NDArray[np.float64]:
+        values = np.asarray(gain, dtype=np.float64)
+        ratio = np.log(np.maximum(values, 1e-12) / self.ref) / self.s
+        return np.clip(ratio, -1.0, 1.0)
+
+    def default_bias(self) -> NDArray[np.float64]:
+        return self.inv_gain(self.default)
+
+    def slot_index(self, reg: RegulatorKey, key: GainKey) -> int:
+        return self.slots.index((reg, key))
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "aircraft_profile": self.aircraft_profile,
+            "slots": [f"{reg}:{key}" for reg, key in self.slots],
+            "ref": self.ref.tolist(), "s": self.s.tolist(),
+            "lo": self.lo.tolist(), "hi": self.hi.tolist(),
+            "default": self.default.tolist(), "expand": EXPAND,
+        }
+
+    def compatible_with(self, snapshot: Mapping[str, Any]) -> bool:
+        if snapshot.get("aircraft_profile") != self.aircraft_profile:
+            return False
+        current = self.snapshot()
+        return all(
+            current[key] == snapshot.get(key)
+            for key in ("slots", "ref", "s", "lo", "hi", "default", "expand")
+        )
 
 
-def _by_reg(arr: Sequence[float]) -> GainMap:
-    """Плоский массив (15,) → вложенный словарь {reg: {kp/ki/kd: value}} (для Shield/obs)."""
-    return {reg: {k: float(arr[SLOTS.index((reg, k))]) for k in GAIN_KEYS} for reg in REGULATOR_ORDER}
-
-
-GAIN_REF_MAP = _by_reg(GAIN_REF)
-GAIN_S_MAP = _by_reg(GAIN_S)
-GAIN_LO_MAP = _by_reg(GAIN_LO)
-GAIN_HI_MAP = _by_reg(GAIN_HI)
-GAIN_DEFAULT_MAP = _by_reg(GAIN_DEFAULT)
-
-
-def gain_norm_scalar(value: float, reg: RegulatorKey, key: GainKey) -> float:
-    """Скалярная нормировка одного коэффициента в [−1, 1]: `clip(log(value/ref)/s)`."""
-    ref = GAIN_REF_MAP[reg][key]
-    s = GAIN_S_MAP[reg][key]
-    r = math.log(max(float(value), 1e-12) / ref) / s
-    return -1.0 if r < -1.0 else 1.0 if r > 1.0 else r
-
-
-# --------------------------------------------------------------------------- #
-# Прямое/обратное отображение z ↔ gain (numpy; тензорные версии — в gain_scheduler)
-# --------------------------------------------------------------------------- #
-
-def to_gain(
-    z: ArrayLike,
-    ref: ArrayLike = GAIN_REF,
-    s: ArrayLike = GAIN_S,
-) -> NDArray[np.float64]:
-    """z → абсолютный gain: `ref · exp(s · tanh(z))`."""
-    ref_arr = np.asarray(ref, dtype=np.float64)
-    s_arr = np.asarray(s, dtype=np.float64)
-    return ref_arr * np.exp(s_arr * np.tanh(np.asarray(z, dtype=np.float64)))
-
-
-def inv_gain(
-    gain: ArrayLike,
-    ref: ArrayLike = GAIN_REF,
-    s: ArrayLike = GAIN_S,
-) -> NDArray[np.float64]:
-    """Абсолютный gain → z (инверсия `to_gain`). Клип log-отношения к (−1, 1) перед atanh."""
-    gain = np.maximum(np.asarray(gain, dtype=np.float64), 1e-12)
-    ratio = np.log(gain / np.asarray(ref, dtype=np.float64)) / np.asarray(s, dtype=np.float64)
-    ratio = np.clip(ratio, -1.0 + _EPS, 1.0 - _EPS)
-    return np.arctanh(ratio)
-
-
-def gain_norm(
-    gain: ArrayLike,
-    ref: ArrayLike = GAIN_REF,
-    s: ArrayLike = GAIN_S,
-) -> NDArray[np.float64]:
-    """Нормировка gain'а в [−1, 1] для Observation: `clip(log(gain/ref)/s)` (= tanh(z))."""
-    gain = np.asarray(gain, dtype=np.float64)
-    ratio = np.log(np.maximum(gain, 1e-12) / np.asarray(ref, dtype=np.float64)) / np.asarray(s, dtype=np.float64)
-    return np.clip(ratio, -1.0, 1.0)
-
-
-def default_bias() -> NDArray[np.float64]:
-    """Bias голов (15,), при котором z→bias даёт выход ≈ GAIN_DEFAULT (безопасный старт)."""
-    return inv_gain(GAIN_DEFAULT)
-
-
-def slot_index(reg: RegulatorKey, key: GainKey) -> int:
-    return SLOTS.index((reg, key))
-
-
-def snapshot() -> dict[str, Any]:
-    """Сериализуемый слепок gain-пространства (входит в normalization.snapshot / чекпоинт)."""
-    return {
-        "slots": [f"{reg}:{key}" for reg, key in SLOTS],
-        "ref": GAIN_REF.tolist(), "s": GAIN_S.tolist(),
-        "lo": GAIN_LO.tolist(), "hi": GAIN_HI.tolist(),
-        "default": GAIN_DEFAULT.tolist(), "expand": EXPAND,
-    }
+@lru_cache(maxsize=None)
+def gain_space_for(aircraft_profile: str) -> GainSpace:
+    return GainSpace.build(aircraft_profile)

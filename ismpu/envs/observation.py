@@ -23,7 +23,7 @@ from ismpu.agent.normalization import (
     WIND_SCALE, FRICTION_SCALE, VIS_SCALE, DERIV_SCALE,
     linear, log_norm, symmetric, clip_unit,
 )
-from ismpu.agent import gain_space
+from ismpu.agent.gain_space import GainSpace, gain_space_for
 from ismpu.config.regulators import REGULATOR_ORDER
 from ismpu.utils.converts import Converts
 from ismpu.control.runway_tracker import RunwayTracker
@@ -67,8 +67,15 @@ GAIN_FEATURE_INDICES = [FEATURE_NAMES.index(f"{reg}:{k}") for reg in REGULATOR_O
 class ObservationBuilder:
     """Строит нормированный вектор наблюдения одного кадра."""
 
-    def __init__(self, runway_length_m: float | None = None):
+    def __init__(
+        self,
+        runway_length_m: float | None = None,
+        *,
+        gain_space: GainSpace | None = None,
+        aircraft_profile: str = "mc21",
+    ):
         tracker = RunwayTracker()
+        self.gain_space = gain_space or gain_space_for(aircraft_profile)
         self.runway_length_m = runway_length_m or tracker.haversine_distance(
             RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
 
@@ -122,9 +129,9 @@ class ObservationBuilder:
         # --- PID × 5 (динамические признаки; абсолютные gain'ы в лог-норме) ---
         for reg in REGULATOR_ORDER:
             pid = controller.pids[reg]
-            feats[f"{reg}:kp"] = gain_space.gain_norm_scalar(pid.kp, reg, "kp")
-            feats[f"{reg}:ki"] = gain_space.gain_norm_scalar(pid.ki, reg, "ki")
-            feats[f"{reg}:kd"] = gain_space.gain_norm_scalar(pid.kd, reg, "kd")
+            feats[f"{reg}:kp"] = self.gain_space.gain_norm_scalar(pid.kp, reg, "kp")
+            feats[f"{reg}:ki"] = self.gain_space.gain_norm_scalar(pid.ki, reg, "ki")
+            feats[f"{reg}:kd"] = self.gain_space.gain_norm_scalar(pid.kd, reg, "kd")
             aw = pid.anti_windup or 1.0
             feats[f"{reg}:integral"] = clip_unit(pid.integral / aw)
             feats[f"{reg}:deriv"] = clip_unit(pid.filtered_derivative / DERIV_SCALE)

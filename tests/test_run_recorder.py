@@ -5,6 +5,7 @@ import pytest
 
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.scenario import Scenario
+from ismpu.config.segments import FlightSegment
 from ismpu.runtime.run_recorder import TELEMETRY_FIELDS, RunRecorder
 
 from tests.fakes import telemetry
@@ -13,8 +14,8 @@ from tests.fakes import telemetry
 def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
-    scenario.apply_control(controller)
-    original_kp = scenario.control.brake_l["kp"]
+    scenario.apply_control(controller, "mc21")
+    original_kp = scenario.control_for("mc21", FlightSegment.ROLLOUT).brake_l["kp"]
 
     recorder = RunRecorder(
         root=tmp_path,
@@ -38,7 +39,14 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert (recorder.directory / "telemetry.csv").is_file()
     assert (recorder.directory / "report.json").is_file()
     assert exported.is_file()
-    assert scenario.control.brake_l["kp"] == original_kp
+    assert scenario.control_for("mc21", FlightSegment.ROLLOUT).brake_l["kp"] == original_kp
+
+    metadata = json.loads(
+        (recorder.directory / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["aircraft_profile"] == "a330-300"
+    assert metadata["scenario"]["schema_version"] == 2
+    assert set(metadata["scenario"]["aircraft_controls"]) == {"mc21", "a330-300"}
+    assert set(metadata["scenario"]["conditions"]) == {"approach", "rollout", "taxi"}
 
     with (recorder.directory / "telemetry.csv").open(
         encoding="utf-8", newline=""
@@ -63,7 +71,7 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
 def test_unused_recorder_does_not_create_a_second_run_directory(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
-    scenario.apply_control(controller)
+    scenario.apply_control(controller, "mc21")
     unused = RunRecorder(
         root=tmp_path,
         backend="ics",

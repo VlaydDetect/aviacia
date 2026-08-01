@@ -69,7 +69,7 @@ def capture_scenario(env, scenario, max_steps: int = 2000,
     obs, _ = env.reset(scenario)
     preset = base_gains_from_pids(env.controller.pids)   # коэффициенты пресета сценария
     action = preset_action(preset)                       # точная запись → классика
-    tz = target_z_from_gains(preset)
+    tz = target_z_from_gains(preset, env.gain_space)
 
     windows = [np.asarray(obs, dtype=np.float32)]
     for _ in range(max_steps):

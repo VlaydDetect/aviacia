@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import csv
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
 from ismpu.io.ics_connector import LISTEN_IP_ANY
@@ -39,6 +39,7 @@ class TrainConfig:
     checkpoint_every: int = 20
     silence_console: bool = True      # заглушить cprint контура (иначе флуд на 20 Гц×5)
     init_from: str | None = None      # SFT-чекпоинт (npgs_sft.pt) — тёплый старт перед PPO
+    legacy_checkpoint_profile: str | None = None
     backend: str = "xplane"
     start: str = "rollout"
     xplane_root: str | None = None
@@ -77,7 +78,8 @@ def make_curriculum_provider(generator, trainer: PPOTrainer, total_updates: int,
         # только устойчивые комбинации условий.
         for _ in range(10_000):
             scenario = generator.sample(difficulty)
-            if not is_signature_holdout(scenario):
+            if not is_signature_holdout(
+                scenario, aircraft_profile=generator.aircraft_profile):
                 return scenario
         raise RuntimeError("не удалось сэмплировать train signature")
 
@@ -137,8 +139,6 @@ def build_training_stack(
     # «сеть настраивает не то, что заявлено» иначе всплыла бы только на инференсе.
     validate_action_contract()
 
-    net = NPGS.load(cfg.init_from) if cfg.init_from else NPGS(cfg.npgs)
-
     sim = build_sim(
         backend or cfg.backend,
         ip=ip,
@@ -148,11 +148,41 @@ def build_training_stack(
         runway_profile=cfg.runway_profile,
     )
     controller = ControllingSystem(sim)
-    env = RolloutEnv(sim, controller, history_len=net.cfg.window, shield=Shield())
+    from ismpu.agent.gain_space import gain_space_for
+    space = gain_space_for(cfg.aircraft_profile)
+    if cfg.init_from:
+        net = NPGS.load(
+            cfg.init_from,
+            aircraft_profile=cfg.aircraft_profile,
+            gain_space=space,
+            legacy_aircraft_profile=cfg.legacy_checkpoint_profile,
+        )
+    else:
+        net_cfg = replace(cfg.npgs, aircraft_profile=cfg.aircraft_profile)
+        net = NPGS(net_cfg, gain_space=space)
+    env = RolloutEnv(
+        sim,
+        controller,
+        history_len=net.cfg.window,
+        shield=Shield(gain_space=space),
+        gain_space=space,
+    )
+    if not net.source_scenarios:
+        from ismpu.config.scenarios import SCENARIOS
+        net.source_scenarios = tuple(
+            name for name, scenario in SCENARIOS.items()
+            if cfg.aircraft_profile in scenario.aircraft_controls
+        )
 
     trainer = PPOTrainer(net, cfg.ppo, total_updates=cfg.total_updates)
     if cfg.init_from and cfg.ppo.lambda_anchor > 0:
-        ref = NPGS.load(cfg.init_from, map_location=trainer.device)
+        ref = NPGS.load(
+            cfg.init_from,
+            map_location=trainer.device,
+            aircraft_profile=cfg.aircraft_profile,
+            gain_space=env.gain_space,
+            legacy_aircraft_profile=cfg.legacy_checkpoint_profile,
+        )
         for p in ref.parameters():
             p.requires_grad_(False)
         trainer.sft_reference = ref.to(trainer.device)
@@ -174,11 +204,12 @@ def train(cfg: TrainConfig | None = None, ip: str | None = None,
         silence_control_console()
 
     env, net, trainer = build_training_stack(cfg, ip=ip, port=port)
-    generator = ScenarioGenerator(seed=cfg.seed)
+    generator = ScenarioGenerator(seed=cfg.seed, aircraft_profile=cfg.aircraft_profile)
     provider = make_curriculum_provider(generator, trainer, cfg.total_updates, cfg.curriculum_ramp)
 
-    os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-    logger = CSVLogger(os.path.join(cfg.checkpoint_dir, "train_log.csv"))
+    profile_checkpoint_dir = os.path.join(cfg.checkpoint_dir, cfg.aircraft_profile)
+    os.makedirs(profile_checkpoint_dir, exist_ok=True)
+    logger = CSVLogger(os.path.join(profile_checkpoint_dir, "train_log.csv"))
 
     def on_update(metrics: dict):
         logger(metrics)
@@ -188,12 +219,12 @@ def train(cfg: TrainConfig | None = None, ip: str | None = None,
               f"ent {metrics['entropy']:.3f} kl {metrics['approx_kl']:.4f} "
               f"smooth {metrics['l_smooth']:.4f} shield% {metrics.get('shield_rate', 0):.2f}")
         if metrics["update"] % cfg.checkpoint_every == 0:
-            net.save(os.path.join(cfg.checkpoint_dir, f"npgs_upd{metrics['update']}.pt"))
+            net.save(os.path.join(profile_checkpoint_dir, f"npgs_upd{metrics['update']}.pt"))
 
     try:
         trainer.train(env, provider, cfg.total_updates, callback=on_update)
     finally:
-        net.save(os.path.join(cfg.checkpoint_dir, "npgs_final.pt"))
+        net.save(os.path.join(profile_checkpoint_dir, "npgs_final.pt"))
         logger.close()
         env.close()
     return trainer

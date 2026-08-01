@@ -21,7 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Any
 
-from ismpu.envs.scenario import Scenario
+from ismpu.config.scenarios import Scenario
+from ismpu.config.segments import FlightSegment
 from ismpu.envs.weather import WeatherState
 
 BENCH_WIND = "bench_wind_realization"
@@ -75,16 +76,37 @@ def contract_for(
     scenario: Scenario,
     *,
     min_replicas: int = DEFAULT_MIN_REPLICAS,
+    aircraft_profile: str | None = None,
 ) -> ReproducibilityContract:
     """Строит контракт воспроизводимости для сценария."""
     weather = scenario.weather
-    sources = stochastic_sources(weather)
+    sources = tuple(dict.fromkeys(
+        source
+        for segment in FlightSegment
+        for source in stochastic_sources(scenario.conditions_for(segment).weather)
+    ))
 
     deterministic = {
         "scenario_seed": scenario.seed,
+        "aircraft_profile": aircraft_profile,
         "expected_weather": _as_dict(weather),
         "failures": [failure.name for failure in scenario.failures],
-        "control_preset": scenario.control.name,
+        "control_preset": scenario.provenance.get(
+            FlightSegment.ROLLOUT, scenario.scenario_id),
+        "segment_sources": {
+            segment.value: scenario.provenance.get(segment, scenario.scenario_id)
+            for segment in FlightSegment
+        },
+        "segment_conditions": {
+            segment.value: {
+                "weather": _as_dict(scenario.conditions_for(segment).weather),
+                "failures": sorted(
+                    failure.name
+                    for failure in scenario.conditions_for(segment).failures
+                ),
+            }
+            for segment in FlightSegment
+        },
     }
 
     return ReproducibilityContract(

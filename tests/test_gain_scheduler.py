@@ -13,10 +13,12 @@ from ismpu.agent.gain_scheduler import (
     NPGS, NPGSConfig, build_npgs, POLICY_DIM, N_GAIN_OUT, phase_labels_from_groundspeed_kts,
     PHASE_TOUCHDOWN, PHASE_HIGH, PHASE_MID, PHASE_TAXI, PHASE_STOP,
 )
-from ismpu.agent import gain_space as gs
+from ismpu.agent.gain_space import gain_space_for
 from ismpu.config.regulators import ACTION_DIM, REGULATOR_ORDER
-from ismpu.envs.action import decode, REFERENCE_ACTION, ACTION_LOW, ACTION_HIGH
+from ismpu.envs.action import decode, action_low, action_high, reference_action
 from ismpu.envs.observation import OBS_DIM
+
+SPACE = gain_space_for("mc21")
 
 
 @pytest.fixture
@@ -41,7 +43,7 @@ def test_param_count_is_compact(net):
 
 def test_z_zero_maps_to_ref_gains_and_unit_weights(net):
     g = net.to_gains(torch.zeros(3, POLICY_DIM)).detach().numpy()
-    assert np.allclose(g[:, :15], gs.GAIN_REF, rtol=1e-5)
+    assert np.allclose(g[:, :15], SPACE.ref, rtol=1e-5)
     assert np.allclose(g[:, 15:], 1.0)
 
 
@@ -49,18 +51,18 @@ def test_init_greedy_near_default(net):
     # bias-инициализация gain-голов → старт ≈ классический DEFAULT (безопасный старт).
     obs = torch.randn(6, 8, OBS_DIM)
     a = net.get_action(obs, deterministic=True)["action"].detach().numpy()
-    rel = np.abs(a[:, :15] / gs.GAIN_DEFAULT - 1.0).max()
+    rel = np.abs(a[:, :15] / SPACE.default - 1.0).max()
     assert rel < 0.25, rel
     assert np.allclose(a[:, 15:], 1.0, atol=0.2)   # веса ≈ 1
 
 
 def test_output_bounded_to_physical_band(net):
     g = net.to_gains(torch.randn(64, POLICY_DIM) * 10).detach().numpy()
-    assert np.all(g[:, :15] >= gs.GAIN_LO - 1e-6) and np.all(g[:, :15] <= gs.GAIN_HI + 1e-6)
+    assert np.all(g[:, :15] >= SPACE.lo - 1e-6) and np.all(g[:, :15] <= SPACE.hi + 1e-6)
     assert np.all(g[:, 15:] >= -1e-6) and np.all(g[:, 15:] <= 2.0 + 1e-6)
     # действие всегда в границах пространства
     a = net.get_action(torch.randn(8, 8, OBS_DIM))["action"].detach().numpy()
-    assert np.all(a >= ACTION_LOW - 1e-5) and np.all(a <= ACTION_HIGH + 1e-5)
+    assert np.all(a >= action_low(SPACE) - 1e-5) and np.all(a <= action_high(SPACE) + 1e-5)
 
 
 def test_greedy_is_deterministic(net):
@@ -90,7 +92,7 @@ def test_evaluate_actions_matches_get_action(net):
 
 def test_per_output_log_std_uniform_multiplicative_step(net):
     ls = net.log_std.detach().numpy()
-    step = gs.GAIN_S * np.exp(ls[:N_GAIN_OUT])   # s_i · std_z_i
+    step = SPACE.s * np.exp(ls[:N_GAIN_OUT])
     assert np.allclose(step, 0.15, atol=1e-6)      # exploration_frac
 
 
@@ -111,9 +113,42 @@ def test_save_load_roundtrip(net, tmp_path):
     assert np.allclose(a0, a1, atol=1e-6)
 
 
+def test_checkpoint_rejects_another_profile(net, tmp_path):
+    path = tmp_path / "mc21.pt"
+    net.save(path, source_scenarios=("default", "nws_fail"))
+    with pytest.raises(ValueError, match="profile"):
+        NPGS.load(path, aircraft_profile="a330-300")
+
+    loaded = NPGS.load(path, aircraft_profile="mc21")
+    assert loaded.source_scenarios == ("default", "nws_fail")
+
+
+def test_legacy_checkpoint_requires_explicit_profile_and_matching_space(net, tmp_path):
+    current = tmp_path / "current.pt"
+    legacy = tmp_path / "legacy.pt"
+    net.save(current)
+    payload = torch.load(current, weights_only=False)
+    payload.pop("aircraft_profile")
+    payload["config"].pop("aircraft_profile")
+    payload["gain_space"].pop("aircraft_profile")
+    torch.save(payload, legacy)
+
+    with pytest.raises(ValueError, match="legacy checkpoint"):
+        NPGS.load(legacy)
+    migrated = NPGS.load(legacy, legacy_aircraft_profile="mc21")
+    assert migrated.gain_space.aircraft_profile == "mc21"
+    with pytest.raises(ValueError, match="gain space"):
+        NPGS.load(
+            legacy,
+            legacy_aircraft_profile="mc21",
+            gain_space=gain_space_for("a330-300"),
+        )
+
+
 def test_reference_action_is_default_gains():
-    assert np.allclose(REFERENCE_ACTION[:15], gs.GAIN_DEFAULT)
-    assert np.allclose(REFERENCE_ACTION[15:], 1.0)
+    action = reference_action(SPACE)
+    assert np.allclose(action[:15], SPACE.default)
+    assert np.allclose(action[15:], 1.0)
 
 
 def test_phase_labels_from_groundspeed():

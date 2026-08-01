@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from ismpu.control.channels import ControlsState
     from ismpu.control.failures import FailureMode
     from ismpu.envs.ics_sim import Telemetry
-    from ismpu.envs.scenario import Scenario
+    from ismpu.config.scenarios import Scenario
+    from ismpu.config.segments import FlightSegment
 
 StartMode = Literal["approach", "rollout"]
 
@@ -114,6 +115,13 @@ class SimInterface(Protocol):
     ) -> "Telemetry": ...
 
     def warm_up(self, timeout_s: float = 10.0, dt: float = 0.05) -> bool: ...
+
+    def enter_segment(
+        self,
+        scenario: "Scenario",
+        segment: "FlightSegment",
+        telemetry: "Telemetry | None" = None,
+    ) -> object | None: ...
 
     def read_telemetry(self) -> "Telemetry": ...
 

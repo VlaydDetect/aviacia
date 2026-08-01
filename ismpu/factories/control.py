@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING
 from ismpu.control.pid import PIDController
 
 if TYPE_CHECKING:
-    from ismpu.config.scenarios import ScenarioConfig
+    from ismpu.config.scenarios import GroundControlConfig
     from ismpu.control.system import ControllingSystem
 
 
-def build_pids(config: "ScenarioConfig") -> dict[str, PIDController]:
+def build_pids(config: "GroundControlConfig") -> dict[str, PIDController]:
     return {
         "runway_center_pid": PIDController(**config.runway_center),
         "pid_brake_l": PIDController(**config.brake_l),
@@ -21,13 +21,10 @@ def build_pids(config: "ScenarioConfig") -> dict[str, PIDController]:
     }
 
 
-def apply_control_config(
-    config: "ScenarioConfig",
+def apply_ground_control(
+    config: "GroundControlConfig",
     controller: "ControllingSystem",
 ) -> "ControllingSystem":
-    from ismpu.config.approach import APPROACH_PRESETS
-    from ismpu.control.failures import FailureMode
-
     controller.setup(
         build_pids(config),
         lookahead_min=config.lookahead_min,
@@ -37,7 +34,4 @@ def apply_control_config(
         steering_rev_gain=config.steering_rev_gain,
         law=config.law,
     )
-    controller.setup_approach(APPROACH_PRESETS[config.approach])
-    if config.failure is not FailureMode.NONE:
-        controller.apply_failure(config.failure)
     return controller

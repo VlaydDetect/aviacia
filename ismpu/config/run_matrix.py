@@ -140,7 +140,7 @@ GROUND_CONDITIONS: tuple[MatrixCondition, ...] = (
 class MatrixCase:
     """Один шифр матрицы — вариант отказа/режима, под который настраивается набор коэффициентов."""
     code: str                       # «А.1.1», «Б.3.2»
-    preset: str                     # имя пресета в SCENARIOS / APPROACH_PRESETS
+    preset: str                     # имя сценария в каноническом реестре SCENARIOS
     segment: str                    # approach | rollout | taxi | through
     title: str
     failure: str                    # как отказ описан в матрице

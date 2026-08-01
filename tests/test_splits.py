@@ -10,13 +10,14 @@
 import pytest
 
 from ismpu.control.failures import FailureMode
-from ismpu.envs.scenario import Scenario, SCENARIO_PRESETS
+from ismpu.config.scenarios import Scenario, SCENARIOS
 from ismpu.envs.scenario_generator import ScenarioGenerator
 from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
 from ismpu.config.scenarios import SCENARIOS
 from ismpu.envs.splits import (
     split_scenarios, holdout_reason, is_marked_holdout, has_holdout_failure,
     assert_no_leakage, _hash_unit, HOLDOUT_FAILURE_FAMILIES, DEFAULT_HOLDOUT_FRACTION,
+    scenario_signature,
 )
 from ismpu.envs.reproducibility import (
     contract_for, required_replicas, stochastic_sources, worst_replica,
@@ -25,9 +26,24 @@ from ismpu.envs.reproducibility import (
 
 
 def _scenario(sid, *, failures=(), weather=None):
-    return Scenario(scenario_id=sid, seed=0, control=SCENARIOS["default"],
-                    weather=weather or WEATHER_PRESETS["clear_dry"],
-                    failures=tuple(failures))
+    return Scenario.from_preset(
+        "default", scenario_id=sid, seed=0,
+        weather=weather or WEATHER_PRESETS["clear_dry"],
+        failures=tuple(failures),
+    )
+
+
+def test_profile_is_part_of_the_split_contract():
+    scenario = _scenario("same-conditions")
+    mc21 = scenario_signature(scenario, aircraft_profile="mc21")
+    a330 = scenario_signature(scenario, aircraft_profile="a330-300")
+    assert mc21 != a330
+    assert mc21.key() != a330.key()
+
+    split = split_scenarios(
+        [scenario], aircraft_profile="mc21", fraction=0.0)
+    assert split.aircraft_profile == "mc21"
+    assert split.summary()["aircraft_profile"] == "mc21"
 
 
 # --------------------------------------------------------------------------- #
@@ -194,9 +210,9 @@ def test_rough_preset_requires_replicas():
 
 
 def test_contract_records_the_deterministic_inputs():
-    scenario = SCENARIO_PRESETS["nws_fail"]
+    scenario = SCENARIOS["nws_fail"]
     contract = contract_for(scenario)
-    assert contract.deterministic_inputs["control_preset"] == scenario.control.name
+    assert contract.deterministic_inputs["control_preset"] == "nws_fail"
     assert "NWS_FAIL" in contract.deterministic_inputs["failures"]
     assert contract.as_dict()["scenario_id"] == scenario.scenario_id
 

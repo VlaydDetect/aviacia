@@ -246,7 +246,7 @@ def _draft(name: str) -> ApproachConfig:
                    speed_pid=dict(APPROACH_DEFAULT.speed_pid))
 
 
-APPROACH_PRESETS: dict[str, ApproachConfig] = {
+APPROACH_CONFIGS: dict[str, ApproachConfig] = {
     "default": APPROACH_DEFAULT,
     # Лист А матрицы прогонов: один шифр — один набор коэффициентов (см. config/run_matrix.py).
     "a_1_1_track": _draft("a_1_1_track"),

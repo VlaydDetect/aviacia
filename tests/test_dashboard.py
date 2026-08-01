@@ -16,7 +16,7 @@ from tests.fakes import telemetry
 def configured_controller():
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
-    scenario.apply_control(controller)
+    scenario.apply_control(controller, "mc21")
     sample = telemetry(groundspeed_ms=75.0)
     controller.control_step(0.05, sample, send=False)
     return controller, scenario, sample
@@ -77,6 +77,13 @@ def test_capture_export_and_replay_common_run(tmp_path):
     payload = state.payload()
     assert len(payload["views"]) == 9
     assert payload["views"][4]["latest"]["segment"] == "rollout"
+    assert payload["header"]["aircraft_profile"] == "a330-300"
+    assert set(payload["header"]["segment_sources"]) == {
+        "approach", "rollout", "taxi",
+    }
+    assert set(payload["header"]["segment_conditions"]) == {
+        "approach", "rollout", "taxi",
+    }
     assert state.export_gains().is_file()
 
     replay = DashboardState.from_csv(recorder.directory / "telemetry.csv")

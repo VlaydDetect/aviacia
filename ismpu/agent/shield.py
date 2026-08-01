@@ -45,7 +45,7 @@ from ismpu.config.regulators import (
     PidMap,
     RegulatorKey,
 )
-from ismpu.agent import gain_space
+from ismpu.agent.gain_space import GainSpace, gain_space_for
 
 # Обратная совместимость имён (ранее объявлялись здесь).
 N_ALPHA = N_GAINS   # 15 коэффициентов (kp, ki, kd) × 5 регуляторов
@@ -210,8 +210,20 @@ def apply_gains_to_pids(pids: PidMap, gains: GainMap) -> None:
 class Shield:
     """Защитный контур. Детерминирован; хранит состояние прошлого такта для rate-лимитов."""
 
-    def __init__(self, config: Optional[ShieldConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[ShieldConfig] = None,
+        *,
+        gain_space: GainSpace | None = None,
+        aircraft_profile: str = "mc21",
+    ) -> None:
         self.config: ShieldConfig = config or ShieldConfig()
+        self.gain_space = gain_space or gain_space_for(aircraft_profile)
+        self.reset()
+
+    def set_gain_space(self, gain_space: GainSpace) -> None:
+        """Bind the guard to the same aircraft-specific space as the actor."""
+        self.gain_space = gain_space
         self.reset()
 
     def reset(self) -> None:
@@ -261,7 +273,7 @@ class Shield:
         cfg = self.config
         new_gains = {}
         for reg, g in cmd.gains.items():
-            lo, hi = gain_space.GAIN_LO_MAP[reg], gain_space.GAIN_HI_MAP[reg]
+            lo, hi = self.gain_space.lo_map[reg], self.gain_space.hi_map[reg]
             clipped = {k: _clip(g[k], lo[k], hi[k]) for k in GAIN_KEYS}
             if any(clipped[k] != g[k] for k in GAIN_KEYS):
                 self._flag(report, f"L1:gain_clip:{reg}", level=1)
@@ -275,7 +287,7 @@ class Shield:
     def _is_ood(self, cmd: GainCommand) -> bool:
         cfg = self.config
         for reg, g in cmd.gains.items():
-            lo, hi = gain_space.GAIN_LO_MAP[reg], gain_space.GAIN_HI_MAP[reg]
+            lo, hi = self.gain_space.lo_map[reg], self.gain_space.hi_map[reg]
             for k in GAIN_KEYS:
                 if g[k] < lo[k] / cfg.gain_ood_factor or g[k] > hi[k] * cfg.gain_ood_factor:
                     return True

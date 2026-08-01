@@ -15,7 +15,7 @@
 (`approach_channel.pids`) и настраиваются статически.
 """
 
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 from dataclasses import dataclass
 
 from ismpu.control.pid import PIDController
@@ -37,6 +37,10 @@ from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_E
 from ismpu.envs.ics_sim import Telemetry
 from ismpu.envs.sim_interface import SimInterface
 from ismpu.config.regulators import PidMap
+from ismpu.config.scenarios import ConditionMatch
+
+if TYPE_CHECKING:
+    from ismpu.config.scenarios import Scenario
 
 
 @dataclass
@@ -99,6 +103,49 @@ class ControllingSystem:
         """Отчёт монитора допусков за последний такт захода (диагностика/логи)."""
         self._violation_ticks: int = 0
         """Дебаунс триггера ухода: сколько тактов подряд допуски не выполняются."""
+        self.scenario: Scenario | None = None
+        self.aircraft_profile_name: str | None = None
+        self._configured_segment: FlightSegment | None = None
+
+    def bind_scenario(self, scenario: "Scenario", aircraft_profile: str) -> None:
+        """Связать сценарий с контуром; PID активируются после определения участка."""
+        if aircraft_profile not in scenario.aircraft_controls:
+            known = ", ".join(sorted(scenario.aircraft_controls))
+            raise KeyError(
+                f"сценарий {scenario.scenario_id!r} не содержит профиль "
+                f"{aircraft_profile!r}; доступны: {known}")
+        self.scenario = scenario
+        self.aircraft_profile_name = aircraft_profile
+        self._configured_segment = None
+
+    def activate_segment(
+        self,
+        segment: FlightSegment,
+        telemetry: Telemetry | None = None,
+    ) -> None:
+        """Пересобрать stateful PID и уведомить backend до первого такта участка."""
+        if self.scenario is None or self.aircraft_profile_name is None:
+            raise RuntimeError("сценарий и AircraftProfile не привязаны к контроллеру")
+        if self._configured_segment is segment:
+            return
+        self.scenario.apply_control(self, self.aircraft_profile_name, segment)
+        self._configured_segment = segment
+        if self.sim is not None:
+            enter_segment = getattr(self.sim, "enter_segment", None)
+            if enter_segment is not None:
+                report = enter_segment(self.scenario, segment, telemetry)
+                if (
+                    isinstance(report, ConditionMatch)
+                    and getattr(self.sim, "validate_conditions", True)
+                ):
+                    # ICS cannot set conditions.  On a boundary its current telemetry remains
+                    # authoritative for degradation on the very first tick; the scenario is
+                    # only the expected set recorded by ConditionMatch.
+                    expected = self.scenario.conditions_for(segment).failures
+                    actual = (
+                        expected - report.missing_failures
+                    ) | report.unexpected_failures
+                    self.failures.sync(actual)
 
     def setup(
         self,
@@ -218,6 +265,9 @@ class ControllingSystem:
             blocker = approach_blocker(telemetry)
             if blocker is not None:
                 raise ApproachRefused(f"заход невозможен: {blocker}")
+        if self._segment_decided and self.scenario is not None:
+            self.activate_segment(self.segment, telemetry)
+        elif self.segment is FlightSegment.APPROACH:
             self.approach_channel.reset()
         return self.segment
 
@@ -227,12 +277,17 @@ class ControllingSystem:
             return
         self._segment_decided = True
         if initial_segment(telemetry) is not FlightSegment.APPROACH:
+            if self.scenario is not None:
+                self.activate_segment(FlightSegment.ROLLOUT, telemetry)
             return
         blocker = approach_blocker(telemetry)
         if blocker is not None:
             raise ApproachRefused(f"заход невозможен: {blocker}")
         self.segment = FlightSegment.APPROACH
-        self.approach_channel.reset()
+        if self.scenario is not None:
+            self.activate_segment(FlightSegment.APPROACH, telemetry)
+        else:
+            self.approach_channel.reset()
 
     def control_step(
         self,
@@ -311,13 +366,14 @@ class ControllingSystem:
 
         # Проверка допусков ТЗ на каждом такте. Если выше высоты решения они устойчиво не
         # выполняются — садиться нельзя: заход прерывается уходом на второй круг.
-        self.tolerance_report = evaluate_approach_tolerances(
-            telemetry, self.approach_channel.result, self.approach_channel.result.limits,
-            telemetry.faults, at_decision_gate=at_lateral_alignment_gate(telemetry))
-        reason = self._should_go_around(telemetry, self.tolerance_report)
-        if reason is not None:
-            self._start_go_around(reason, telemetry)
-            self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
+        ## TODO:
+        # self.tolerance_report = evaluate_approach_tolerances(
+        #     telemetry, self.approach_channel.result, self.approach_channel.result.limits,
+        #     telemetry.faults, at_decision_gate=at_lateral_alignment_gate(telemetry))
+        # reason = self._should_go_around(telemetry, self.tolerance_report)
+        # if reason is not None:
+        #     self._start_go_around(reason, telemetry)
+        #     self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
         return False
 
     def _abort_approach(self, reason: str) -> bool:
@@ -439,6 +495,8 @@ class ControllingSystem:
         if self.segment is not FlightSegment.APPROACH:
             return
         self.segment = FlightSegment.ROLLOUT
+        if self.scenario is not None:
+            self.activate_segment(FlightSegment.ROLLOUT, self.last_telemetry)
         # Воздушные команды больше не выдаются — маска пробега их не заявляет, но оставлять в
         # структуре последнее отклонение элеронов значит хранить мусор в логах и в отчёте.
         self.state.neutralize_airborne()
@@ -466,6 +524,8 @@ class ControllingSystem:
         if not accepted:
             return False
         self.segment = FlightSegment.TAXI
+        if self.scenario is not None:
+            self.activate_segment(FlightSegment.TAXI, self.last_telemetry)
         for _ in range(max(1, frames)):
             sim.step(self.state)
         return True

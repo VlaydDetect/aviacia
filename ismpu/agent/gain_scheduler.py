@@ -38,7 +38,7 @@ import torch.nn.functional as F
 
 from ismpu.envs.observation import OBS_DIM
 from ismpu.config.regulators import REGULATOR_ORDER, N_GAINS, ACTION_DIM
-from ismpu.agent import gain_space
+from ismpu.agent.gain_space import GainSpace, gain_space_for
 from ismpu.agent import normalization as norm
 
 # Разбивка 17 выходов: runway_center(3) + brake_l/r(6) + reverse_l/r(6) + weights(2).
@@ -66,6 +66,7 @@ class NPGSConfig:
     dropout: float = 0.0
     exploration_frac: float = 0.15   # целевой мультипликативный шаг исследования gain'ов (±15%)
     weight_std: float = 0.3          # std исследования весов каналов
+    aircraft_profile: str = "mc21"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -119,11 +120,10 @@ def phase_labels_from_groundspeed_kts(gs_kts: ArrayLike) -> NDArray[np.int64]:
     return label
 
 
-def _init_log_std() -> torch.Tensor:
+def _init_log_std(cfg: NPGSConfig, gain_space: GainSpace) -> torch.Tensor:
     """Per-output log_std: gain-слоты `log(frac)−log(s_i)` (равномерный мульт. шаг), веса `log(σ_w)`."""
-    cfg = NPGSConfig()
     log_std = np.empty(POLICY_DIM, dtype=np.float32)
-    log_std[:N_GAINS] = np.log(cfg.exploration_frac) - np.log(gain_space.GAIN_S)
+    log_std[:N_GAINS] = np.log(cfg.exploration_frac) - np.log(gain_space.s)
     log_std[N_GAINS:] = math.log(cfg.weight_std)
     return torch.tensor(log_std)
 
@@ -131,10 +131,24 @@ def _init_log_std() -> torch.Tensor:
 class NPGS(nn.Module):
     """Neural PID Gain Scheduler: общий энкодер + головы актора (абс. gain'ы) + голова критика."""
 
-    def __init__(self, config: NPGSConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: NPGSConfig | None = None,
+        *,
+        gain_space: GainSpace | None = None,
+        source_scenarios: Sequence[str] = (),
+    ) -> None:
         super().__init__()
         cfg = config or NPGSConfig()
+        space = gain_space or gain_space_for(cfg.aircraft_profile)
+        if cfg.aircraft_profile != space.aircraft_profile:
+            raise ValueError(
+                f"NPGS profile {cfg.aircraft_profile!r} does not match gain space "
+                f"{space.aircraft_profile!r}"
+            )
         self.cfg: NPGSConfig = cfg
+        self.gain_space = space
+        self.source_scenarios = tuple(source_scenarios)
         d = cfg.d_model
 
         # --- Общий энкодер ---
@@ -156,19 +170,19 @@ class NPGS(nn.Module):
 
         # --- Головы актора (вход [z_shared ⊕ c]); gain-головы стартуют ≈ DEFAULT ---
         head_in = cfg.trunk_dim + cfg.context_dim
-        bias = gain_space.default_bias()                      # (15,) в порядке REGULATOR_ORDER×(kp,ki,kd)
+        bias = space.default_bias()                      # (15,) в порядке REGULATOR_ORDER×(kp,ki,kd)
         self.head_heading = _mlp_head(head_in, cfg.head_hidden, N_HEADING, 0.01, out_bias=bias[0:3])
         self.head_brake = _mlp_head(head_in, cfg.head_hidden, N_BRAKE, 0.01, out_bias=bias[3:9])
         self.head_reverse = _mlp_head(head_in, cfg.head_hidden, N_REVERSE, 0.01, out_bias=bias[9:15])
         self.head_weights = _mlp_head(head_in, cfg.head_hidden, N_WEIGHTS, 0.01, out_bias=0.0)
-        self.log_std = nn.Parameter(_init_log_std())
+        self.log_std = nn.Parameter(_init_log_std(cfg, space))
 
         # --- Критик (голова от z_shared) ---
         self.critic = _mlp_head(cfg.trunk_dim, (64,), 1, out_gain=1.0)
 
         # Референс/полуширина gain-пространства (буферы: едут с моделью, входят в state_dict).
-        self.register_buffer("gain_ref", torch.tensor(gain_space.GAIN_REF, dtype=torch.float32))
-        self.register_buffer("gain_s", torch.tensor(gain_space.GAIN_S, dtype=torch.float32))
+        self.register_buffer("gain_ref", torch.tensor(space.ref, dtype=torch.float32))
+        self.register_buffer("gain_s", torch.tensor(space.s, dtype=torch.float32))
 
     # ------------------------------------------------------------------ #
     # Энкодер
@@ -270,19 +284,64 @@ class NPGS(nn.Module):
                 out["raw"].squeeze(0).cpu().numpy(),
                 float(out["logp"].item()), float(out["value"].item()))
 
-    def save(self, path: str | PathLike[str]) -> None:
+    def save(
+        self,
+        path: str | PathLike[str],
+        *,
+        source_scenarios: Sequence[str] | None = None,
+    ) -> None:
         """Веса + конфиг + слепок нормировки (включая gain-пространство) одним артефактом."""
-        torch.save({"state_dict": self.state_dict(), "config": self.cfg.to_dict(),
-                    "normalization": norm.snapshot()}, path)
+        sources = self.source_scenarios if source_scenarios is None else tuple(source_scenarios)
+        torch.save({
+            "state_dict": self.state_dict(),
+            "config": self.cfg.to_dict(),
+            "aircraft_profile": self.gain_space.aircraft_profile,
+            "gain_space": self.gain_space.snapshot(),
+            "source_scenarios": list(sources),
+            "normalization": norm.snapshot(self.gain_space),
+        }, path)
 
     @classmethod
     def load(
         cls,
         path: str | PathLike[str],
         map_location: str | torch.device | dict[str, str] | None = None,
+        *,
+        aircraft_profile: str | None = None,
+        gain_space: GainSpace | None = None,
+        legacy_aircraft_profile: str | None = None,
     ) -> "NPGS":
         ckpt = torch.load(path, map_location=map_location, weights_only=False)
-        model = cls(NPGSConfig.from_dict(ckpt["config"]))
+        stored_profile = ckpt.get("aircraft_profile") or ckpt.get("config", {}).get("aircraft_profile")
+        is_legacy = stored_profile is None
+        if is_legacy:
+            if legacy_aircraft_profile is None:
+                raise ValueError(
+                    "legacy checkpoint has no aircraft profile; pass legacy_aircraft_profile explicitly"
+                )
+            stored_profile = legacy_aircraft_profile
+        expected_profile = aircraft_profile or stored_profile
+        if expected_profile != stored_profile:
+            raise ValueError(
+                f"checkpoint profile {stored_profile!r} does not match requested {expected_profile!r}"
+            )
+        space = gain_space or gain_space_for(expected_profile)
+        if space.aircraft_profile != expected_profile:
+            raise ValueError("requested aircraft profile does not match supplied gain space")
+        saved_space = ckpt.get("gain_space") or ckpt.get("normalization", {}).get("gain_space")
+        if saved_space is None:
+            raise ValueError("checkpoint has no gain-space snapshot")
+        if is_legacy and "aircraft_profile" not in saved_space:
+            saved_space = dict(saved_space)
+            saved_space["aircraft_profile"] = expected_profile
+        if not space.compatible_with(saved_space):
+            raise ValueError("checkpoint gain space is incompatible with the selected aircraft profile")
+        model_cfg = NPGSConfig.from_dict({**ckpt["config"], "aircraft_profile": expected_profile})
+        model = cls(
+            model_cfg,
+            gain_space=space,
+            source_scenarios=ckpt.get("source_scenarios", ()),
+        )
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
         return model

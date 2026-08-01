@@ -6,6 +6,7 @@ import pytest
 
 from ismpu.config.aircraft_profiles import A330_300, get_aircraft_profile
 from ismpu.config.runway_profiles import UUEE_06R, parse_ils_station
+from ismpu.config.scenarios import SCENARIOS, SegmentConditions
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.flight import FlightSegment
@@ -77,8 +78,14 @@ class MockXPlaneConnector:
     def send_position(self, **kwargs):
         self.positions.append(kwargs)
 
+    def sendCTRL(self, **kwargs):
+        self.commands.append(("CTRL", kwargs))
+
     def send_command(self, command):
         self.commands.append(command)
+
+    def sendCMND(self, command):
+        self.commands.append(("CMND", command))
 
     def reload_aircraft(self):
         self.commands.append("reload")
@@ -140,8 +147,9 @@ def test_rref_subscription_packet_and_freshness():
 
 
 def test_profile_rejects_unknown_aircraft_and_clamps_commands():
-    with pytest.raises(ValueError, match="неизвестный профиль"):
-        get_aircraft_profile("mc21")
+    mc21 = get_aircraft_profile("mc21")
+    with pytest.raises(ValueError, match="не имеет привязки X-Plane"):
+        XPlaneSim(connector=MockXPlaneConnector(), aircraft_profile=mc21)
     command = ControlsState(
         cmd_aileron=100.0,
         cmd_elevator=-2.0,
@@ -325,13 +333,15 @@ def test_scripted_xplane_full_approach_rollout_taxi_chain(tmp_path):
         frame(100.0, 72.0, gear_air),
         frame(5.0, 70.0, gear_ground),
         frame(2.0, 40.0, gear_ground),
-        frame(2.0, 4.0, gear_ground),
+        # X-Plane publishes groundspeed in m/s; 0.4 m/s is below the
+        # configured 2-knot taxi termination threshold.
+        frame(2.0, 0.4, gear_ground),
     ]
     mock = ScriptedXPlaneConnector(frames)
     sim = _xplane(mock, xplane_root=tmp_path)
     scenario = Scenario.from_preset("default")
     controller = ControllingSystem(sim)
-    scenario.apply_control(controller)
+    scenario.apply_control(controller, "a330-300")
 
     first = sim.reset(scenario, start="approach")
     assert controller.begin_flight(first) is FlightSegment.APPROACH
@@ -352,3 +362,54 @@ def test_scripted_xplane_full_approach_rollout_taxi_chain(tmp_path):
     assert controller.hand_over_to_taxi()
     assert sim._mode == "taxi"
     sim.close()
+
+
+def test_segment_conditions_are_applied_as_a_delta_without_repeating_weather():
+    mock = MockXPlaneConnector()
+    sim = _xplane(mock)
+    scenario = SCENARIOS["b_4_2_through_engine_out"]
+    left = A330_300.engine_indices[0]
+    engine_ref = f"{dr.FAIL_ENGINE}[{left}]"
+    reverse_ref = f"{dr.FAIL_REVERSER}[{left}]"
+
+    sim.enter_segment(scenario, FlightSegment.APPROACH)
+    assert sim.active_failures == frozenset({FailureMode.ENGINE_OUT_LEFT})
+    approach_writes = list(mock.writes)
+    assert approach_writes.count((engine_ref, float(dr.FAILURE_ENUM_INOP))) == 1
+
+    boundary = len(mock.writes)
+    sim.enter_segment(scenario, FlightSegment.ROLLOUT)
+    transition_writes = mock.writes[boundary:]
+    assert sim.active_failures == frozenset({
+        FailureMode.ENGINE_OUT_LEFT,
+        FailureMode.REVERSE_LEFT_FAIL,
+    })
+    assert (reverse_ref, float(dr.FAILURE_ENUM_INOP)) in transition_writes
+    assert all(name != engine_ref for name, _ in transition_writes)
+    assert all(name != dr.WX_CHANGE_MODE for name, _ in transition_writes)
+
+
+def test_ignored_xplane_failure_participates_in_segment_delta_and_is_cleared():
+    mock = MockXPlaneConnector()
+    sim = _xplane(mock)
+    base = SCENARIOS["default"]
+    gear = SegmentConditions(
+        weather=base.conditions_for(FlightSegment.APPROACH).weather,
+        failures=frozenset({FailureMode.GEAR_CONFIG}),
+    )
+    scenario = Scenario(
+        scenario_id="unsupported-delta",
+        seed=0,
+        aircraft_controls=base.aircraft_controls,
+        conditions={
+            FlightSegment.APPROACH: gear,
+            FlightSegment.ROLLOUT: gear,
+            FlightSegment.TAXI: base.conditions_for(FlightSegment.TAXI),
+        },
+    )
+
+    sim.enter_segment(scenario, FlightSegment.APPROACH)
+    sim.enter_segment(scenario, FlightSegment.ROLLOUT)
+    assert sim.ignored_failures == frozenset({FailureMode.GEAR_CONFIG})
+    sim.enter_segment(scenario, FlightSegment.TAXI)
+    assert sim.ignored_failures == frozenset()

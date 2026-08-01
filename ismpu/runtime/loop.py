@@ -16,10 +16,9 @@
 import argparse
 import logging
 import time
-from dataclasses import replace
 
 from ismpu.control.system import ControllingSystem
-from ismpu.control.flight import FlightSegment
+from ismpu.control.flight import FlightSegment, initial_segment
 from ismpu.config.constants import DT
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.envs.backend_factory import build_sim
@@ -28,8 +27,8 @@ from ismpu.envs.sim_interface import (
 )
 from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE
-from ismpu.envs.scenario import (
-    Scenario, SCENARIO_PRESETS, select_for_telemetry, resolve_preset,
+from ismpu.config.scenarios import (
+    SCENARIOS, Scenario, resolve_scenario, select_for_telemetry,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,6 +126,8 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                     "tolerances": controller.tolerance_report,
                     "approach_criteria_a11": controller.approach_criteria.verdict(),
                     "stop_reason": reason.value,
+                    "conditions_valid": getattr(sim, "conditions_valid", True),
+                    "condition_matches": getattr(sim, "condition_matches", ()),
                     "shutdown": shutdown_report,
                 })
             except Exception:
@@ -159,7 +160,7 @@ def main(
     backend: str = "ics",
     start: str | None = None,
     xplane_root: str | None = None,
-    aircraft_profile: str = "a330-300",
+    aircraft_profile: str | None = None,
     runway_profile: str = "uuee-06r",
     dashboard: bool = False,
     dashboard_tune: bool = False,
@@ -171,7 +172,7 @@ def main(
     рабочий режим поставки: конфигурацию борта задаёт Заказчик, и угадывать её именем в
     командной строке незачем.
 
-    Явное имя (`"default"`, `"nws_fail"`, …, см. `SCENARIO_PRESETS`), **шифр матрицы прогонов**
+    Явное имя (`"default"`, `"nws_fail"`, …, см. `SCENARIOS`), **шифр матрицы прогонов**
     (`"Б.3.1"`, `"А.1.2"` — см. `config/run_matrix.py`) или готовый `Scenario` перекрывает подбор.
     Ручная проверка по матрице выглядит так:
 
@@ -189,43 +190,42 @@ def main(
         runway_profile=runway_profile,
     )
     controller = ControllingSystem(sim)
+    profile_name = sim.aircraft_profile_name
 
     if isinstance(preset, Scenario):
         scenario = preset
     elif preset is None and backend == "ics":
-        scenario = select_for_telemetry(sim.read_telemetry())
+        frame = sim.read_telemetry()
+        scenario = select_for_telemetry(
+            frame,
+            aircraft_profile=profile_name,
+            segment=initial_segment(frame),
+        )
         print(f"Сценарий подобран по телеметрии стенда: {scenario.scenario_id}")
     elif preset is None:
-        scenario = SCENARIO_PRESETS["default"]
+        scenario = SCENARIOS["default"]
     else:
-        scenario = resolve_preset(preset)
-
-    if backend == "xplane":
-        from ismpu.config.xplane_presets import xplane_ground_preset
-        scenario = replace(scenario, control=xplane_ground_preset(scenario.control.name))
+        scenario = resolve_scenario(preset)
 
     if scenario.matrix_code:
         case = CASE_BY_CODE.get(scenario.matrix_code)
         print(f"Прогон матрицы {scenario.matrix_code}: {case.title if case else ''}")
-        if scenario.control.draft:
+        requested_segment = (
+            FlightSegment.APPROACH if start == "approach" else FlightSegment.ROLLOUT)
+        if scenario.is_draft(profile_name, requested_segment):
             print("ВНИМАНИЕ: пресет черновой — коэффициенты под этот шифр ещё не настроены.")
         if case and case.ambiguous_with:
             print(f"По телеметрии неотличим от {', '.join(case.ambiguous_with)} — "
                   f"убедитесь, что на стенде выставлен именно этот прогон.")
 
-    scenario.apply_control(controller)   # PID пресета (отказы уточняются по телеметрии)
-    if backend == "xplane":
-        # ``ScenarioConfig.apply`` настраивает связанный стендовый воздушный пресет;
-        # для A330 возвращаем отдельный черновой набор после наземной настройки.
-        from ismpu.config.xplane_presets import XPLANE_A330_APPROACH
-        controller.setup_approach(XPLANE_A330_APPROACH)
+    controller.bind_scenario(scenario, profile_name)
     recorder = RunRecorder(
         backend=sim.backend_name,
         aircraft_profile=sim.aircraft_profile_name,
         scenario=scenario,
         start=start,
     )
-    print(f"Журнал прогона: {recorder.directory}")
+    print(f"Журнал прогона будет сохранён в: {recorder.directory}")
     dashboard_server = None
     dashboard_state = None
     if dashboard or dashboard_tune:
@@ -259,27 +259,75 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ИСМПУ: стенд ICS или X-Plane 12")
-    parser.add_argument("preset", nargs="?", default=None)
-    parser.add_argument("--backend", choices=("ics", "xplane"), default="ics")
-    parser.add_argument("--start", choices=("approach", "rollout"), default=None)
-    parser.add_argument("--ip", default=None)
-    parser.add_argument("--port", type=int, default=None)
-    parser.add_argument("--xplane-root", default=None)
-    parser.add_argument("--aircraft-profile", default="a330-300")
-    parser.add_argument("--runway-profile", default="uuee-06r")
-    parser.add_argument("--dashboard", action="store_true")
-    parser.add_argument("--dashboard-tune", action="store_true")
-    args = parser.parse_args()
+    # time.sleep(2)
+    # sim = build_sim(
+    #     "ics",
+    #     aircraft_profile="a330-300",
+    #     runway_profile="uuee-06r",
+    # )
+    # controller = ControllingSystem(sim)
+    # scenario = SCENARIOS["default"]
+    # scenario.apply_control(controller)
+    #
+    # try:
+    #     telemetry = sim.reset(scenario, start="approach")
+    #
+    #     segment = controller.begin_flight(telemetry)
+    #     print(f"Участок по телеметрии стенда: {segment.value}")
+    #
+    #     print("Прогрев (ожидание, пока стенд примет управление)...")
+    #     sim.warm_up()
+    #     controller.last_telemetry = sim.read_telemetry()
+    #     run_started = time.monotonic()
+    #
+    #     last_time = time.monotonic()
+    #     while True:
+    #         current_time = time.monotonic()
+    #         dt = current_time - last_time
+    #
+    #         if dt >= DT:
+    #             finished = controller.control_step(dt)
+    #             if finished:
+    #                 if controller.segment is FlightSegment.ROLLOUT:
+    #                     # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
+    #                     controller.hand_over_to_taxi()
+    #                     reason = RunStopReason.COMPLETED
+    #                 elif controller.go_around_reason is not None:
+    #                     # Уход на второй круг: заявка каналов снимается ниже (control_exception),
+    #                     # руление не запрашиваем — ВС в воздухе, управление уходит пилоту.
+    #                     print(f"[loop] уход на второй круг: {controller.go_around_reason}")
+    #                     reason = RunStopReason.GO_AROUND
+    #                     details = controller.go_around_reason
+    #                 else:
+    #                     reason = RunStopReason.COMPLETED
+    #                 break
+    #
+    #             if _lost_engagement(controller, sim):
+    #                 reason = RunStopReason.ENGAGEMENT_LOST
+    #                 details = f"{sim.backend_name}: {controller.segment.value}"
+    #                 break
+    #
+    #             last_time = current_time
+    #
+    #         time.sleep(0.01)  # Снижение нагрузки на CPU
+    # finally:
+    #     sim.close()
+
+    # parser = argparse.ArgumentParser(description="ИСМПУ: стенд ICS или X-Plane 12")
+    # parser.add_argument("preset", nargs="?", default=None)
+    # parser.add_argument("--backend", choices=("ics", "xplane"), default="xplane")
+    # parser.add_argument("--start", choices=("approach", "rollout"), default=None)
+    # parser.add_argument("--ip", default=None)
+    # parser.add_argument("--port", type=int, default=None)
+    # parser.add_argument("--xplane-root", default=None)
+    # parser.add_argument("--aircraft-profile", default="a330-300")
+    # parser.add_argument("--runway-profile", default="uuee-06r")
+    # parser.add_argument("--dashboard", action="store_true")
+    # parser.add_argument("--dashboard-tune", action="store_true")
+    # args = parser.parse_args()
     main(
-        args.preset,
-        ip=args.ip,
-        port=args.port,
-        backend=args.backend,
-        start=args.start,
-        xplane_root=args.xplane_root,
-        aircraft_profile=args.aircraft_profile,
-        runway_profile=args.runway_profile,
-        dashboard=args.dashboard,
-        dashboard_tune=args.dashboard_tune,
+        backend="ics",
+        start="approach",
+        aircraft_profile="mc21",
+        runway_profile="uuee-06r",
     )

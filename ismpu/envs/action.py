@@ -2,10 +2,10 @@
 
 Действие: вектор `(17,)` = `[gains×15, w_lon, w_lat]` (тот же layout, что `GainCommand`):
 `gains` — абсолютные `(kp, ki, kd)` пяти регуляторов в порядке `REGULATOR_ORDER`; `w_lon/w_lat`
-— веса влияния каналов. Границы `ACTION_LOW/HIGH` = физический диапазон gain-пространства
+— веса влияния каналов. `action_low(space)` / `action_high(space)` возвращают физический диапазон
 (`agent.gain_space`) + `[0, 2]` для весов.
 
-`REFERENCE_ACTION` = коэффициенты DEFAULT + веса 1 (аналог прежнего identity: старт-референс).
+`reference_action(space)` = коэффициенты DEFAULT выбранного профиля + веса 1.
 Для точного воспроизведения классики конкретного сценария — `preset_action(preset_gains)`.
 
 Применение: `apply_corrections` пишет абсолютные gain'ы в `controller.pids` и веса в каналы;
@@ -18,7 +18,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ismpu.agent.shield import GainCommand, Shield, ShieldReport, ACTION_DIM, apply_gains_to_pids
-from ismpu.agent import gain_space
+from ismpu.agent.gain_space import GainSpace
 from ismpu.config.regulators import GainMap
 
 if TYPE_CHECKING:
@@ -26,11 +26,18 @@ if TYPE_CHECKING:
 
 WEIGHT_LOW, WEIGHT_HIGH = 0.0, 2.0
 
-ACTION_LOW = np.concatenate([gain_space.GAIN_LO, [WEIGHT_LOW, WEIGHT_LOW]]).astype(np.float32)
-ACTION_HIGH = np.concatenate([gain_space.GAIN_HI, [WEIGHT_HIGH, WEIGHT_HIGH]]).astype(np.float32)
-REFERENCE_ACTION = np.concatenate([gain_space.GAIN_DEFAULT, [1.0, 1.0]]).astype(np.float32)
+def action_low(space: GainSpace) -> NDArray[np.float32]:
+    return np.concatenate([space.lo, [WEIGHT_LOW, WEIGHT_LOW]]).astype(np.float32)
 
-assert len(REFERENCE_ACTION) == ACTION_DIM
+
+def action_high(space: GainSpace) -> NDArray[np.float32]:
+    return np.concatenate([space.hi, [WEIGHT_HIGH, WEIGHT_HIGH]]).astype(np.float32)
+
+
+def reference_action(space: GainSpace) -> NDArray[np.float32]:
+    result = np.concatenate([space.default, [1.0, 1.0]]).astype(np.float32)
+    assert len(result) == ACTION_DIM
+    return result
 
 
 def decode(action: ArrayLike) -> GainCommand:

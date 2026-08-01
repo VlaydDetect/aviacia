@@ -15,11 +15,10 @@
   среда обучения работают именно на таких кадрах.
 """
 
-from enum import Enum
-
 from ismpu.config.ics import (
     ENGAGE_MIN_RADIO_ALTITUDE_FT, TERMINAL_RADIO_ALTITUDE_FT, FlightPhase,
 )
+from ismpu.config.segments import FlightSegment
 from ismpu.config.requirements import (
     GO_AROUND_DECISION_HEIGHT_FT, GO_AROUND_LATERAL_GATE_BAND_FT,
 )
@@ -32,13 +31,6 @@ class ApproachRefused(RuntimeError):
     Отдельное исключение, а не «молча поедем по земле»: ВС в воздухе, и тихий откат на наземный
     закон был бы хуже отказа. Оператор стенда должен увидеть причину и поправить условия.
     """
-
-
-class FlightSegment(Enum):
-    """Участок полёта, за который отвечает контур."""
-    APPROACH = "approach"   # заход по ILS и выравнивание — воздушный канал
-    ROLLOUT = "rollout"     # пробег после касания — тормоза, реверс, удержание оси
-    TAXI = "taxi"           # скорость руления достигнута, управление передано
 
 
 def is_airborne(telemetry: "Telemetry | None", *, min_radio_altitude_ft: float = ENGAGE_MIN_RADIO_ALTITUDE_FT) -> bool:
@@ -92,10 +84,11 @@ def approach_blocker(telemetry: "Telemetry | None") -> "str | None":
     """
     if telemetry is None or not telemetry.airborne_data_available:
         return "нет воздушных сигналов backend"
-    if telemetry.landing_flaps is None:
-        angle = telemetry.approach_inputs.FlapsAngle
-        return (f"механизация не в посадочной конфигурации (закрылки {angle:.1f}°): таблицы "
-                f"захода МС-21 к ней неприменимы")
+    ## TODO:
+    # if telemetry.landing_flaps is None:
+    #     angle = telemetry.approach_inputs.FlapsAngle
+    #     return (f"механизация не в посадочной конфигурации (закрылки {angle:.1f}°): таблицы "
+    #             f"захода МС-21 к ней неприменимы")
     return None
 
 

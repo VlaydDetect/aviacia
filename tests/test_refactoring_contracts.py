@@ -1,5 +1,6 @@
 import importlib
 import struct
+from copy import deepcopy
 
 import pytest
 
@@ -9,6 +10,7 @@ from ismpu.config.json_config import (
     scenario_to_document,
 )
 from ismpu.config.runway_profiles import UUEE_06R
+from ismpu.config.segments import FlightSegment
 from ismpu.control.failures import FailureMode
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
@@ -78,7 +80,7 @@ def test_legacy_subscription_starts_at_zero_and_retries_with_diagnostics():
 
 def test_ics_shutdown_is_idempotent_and_releases_every_channel():
     connector = FakeConnector()
-    sim = ICSSim(connector=connector)
+    sim = ICSSim(connector=connector, aircraft_profile="mc21")
     first = sim.shutdown(frames=2, dt=0.0)
     second = sim.shutdown(frames=50, dt=0.0)
     assert first is second
@@ -89,15 +91,80 @@ def test_ics_shutdown_is_idempotent_and_releases_every_channel():
     assert all(int(packet.ControlMode) == 0 for packet in connector.sent_outputs)
 
 
-def test_scenario_json_v1_supports_unregistered_control_roundtrip():
+def test_scenario_json_v2_supports_unregistered_profile_roundtrip():
     original = Scenario.from_preset("default", scenario_id="external-json", seed=17)
     document = scenario_to_document(original)
-    document["control"]["name"] = "external-control"
+    document["aircraft_controls"]["experimental"] = deepcopy(
+        document["aircraft_controls"]["mc21"]
+    )
+    document["aircraft_controls"]["experimental"]["rollout"]["pids"]["brake_l"]["kp"] = 0.123
     restored = scenario_from_document(document)
     assert restored.scenario_id == "external-json"
-    assert restored.control.name == "external-control"
-    assert restored.control.runway_center == original.control.runway_center
+    assert restored.control_for("experimental", FlightSegment.ROLLOUT).brake_l["kp"] == 0.123
     assert scenario_to_document(restored) == document
+
+
+@pytest.mark.parametrize("profile", ["mc21", "a330-300"])
+def test_scenario_json_v1_requires_an_explicit_legacy_profile_override_for_a330(profile):
+    v2 = scenario_to_document(Scenario.from_preset("default"))
+    rollout = v2["aircraft_controls"]["mc21"]["rollout"]
+    legacy = {
+        "schema_version": 1,
+        "scenario_id": "legacy",
+        "seed": 5,
+        "control": {
+            "name": "external-control",
+            "draft": False,
+            "pids": rollout["pids"],
+            "guidance": rollout["guidance"],
+            "mixing": rollout["mixing"],
+            "trajectory": rollout["trajectory"],
+            "approach": "default",
+        },
+        "weather": v2["conditions"]["rollout"]["weather"],
+        "failures": [],
+        "approach": {},
+        "touchdown": {},
+        "sensor_noise": {},
+    }
+    restored = scenario_from_document(legacy, legacy_aircraft_profile=profile)
+    assert set(restored.aircraft_controls) == {profile}
+    assert restored.control_for(profile, FlightSegment.ROLLOUT).brake_l == rollout["pids"]["brake_l"]
+    if profile == "a330-300":
+        assert restored.control_for(profile, FlightSegment.APPROACH).name == \
+            "xplane_a330_approach"
+
+
+def test_scenario_from_dict_exposes_v1_profile_override_and_preserves_matrix_metadata():
+    v2 = scenario_to_document(Scenario.from_preset("default"))
+    rollout = v2["aircraft_controls"]["mc21"]["rollout"]
+    legacy = {
+        "schema_version": 1,
+        "scenario_id": "legacy-matrix",
+        "seed": 7,
+        "control": {
+            "name": "external-control",
+            "failure": "ENGINE_OUT_LEFT",
+            "draft": True,
+            "matrix_code": "Б.4.2",
+            "pids": rollout["pids"],
+            "guidance": rollout["guidance"],
+            "mixing": rollout["mixing"],
+            "trajectory": rollout["trajectory"],
+            "approach": "a_4_1_engine_out_high",
+        },
+        "weather": v2["conditions"]["rollout"]["weather"],
+    }
+    restored = Scenario.from_dict(legacy, legacy_aircraft_profile="mc21")
+    assert restored.control_for("mc21", FlightSegment.APPROACH).name == \
+        "a_4_1_engine_out_high"
+    assert restored.matrix_codes == {
+        FlightSegment.APPROACH: "Б.4.2",
+        FlightSegment.ROLLOUT: "Б.4.2",
+    }
+    assert restored.conditions_for(FlightSegment.APPROACH).failures == frozenset({
+        FailureMode.ENGINE_OUT_LEFT,
+    })
 
 
 def test_scenario_json_rejects_unknown_fields():
@@ -141,7 +208,7 @@ def test_one_shield_report_flows_through_both_levels():
 def test_dashboard_http_queue_applies_only_at_tick_boundary(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
-    scenario.apply_control(controller)
+    scenario.apply_control(controller, "mc21")
     state = DashboardState(
         controller, scenario=scenario, tune_enabled=True, export_root=tmp_path)
     old = controller.approach_channel.roll_pid.kp

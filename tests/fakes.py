@@ -170,7 +170,7 @@ def decode_airborne(outputs) -> tuple:
 def engaged_sim(**overrides):
     """(sim, connector) с завершённым рукопожатием: стенд подтвердил `AgentIsActive = 1`."""
     conn = FakeConnector(engaged_inputs(**overrides))
-    sim = ICSSim(connector=conn)
+    sim = ICSSim(connector=conn, aircraft_profile="mc21", validate_conditions=False)
     sim.read_telemetry()          # снимаем подтверждение стенда + подхват пробега
     assert sim.engaged
     return sim, conn
@@ -278,7 +278,7 @@ class ScriptedFlightBench(FakeConnector):
 def flight_sim(radio_altitude_ft=1000.0, **kwargs):
     """(sim, bench) на сценарном заходе. Рукопожатие ещё не выполнено."""
     bench = ScriptedFlightBench(radio_altitude_ft=radio_altitude_ft, **kwargs)
-    sim = ICSSim(connector=bench)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21", validate_conditions=False)
     return sim, bench
 
 
@@ -337,6 +337,6 @@ class KinematicBench(FakeConnector):
 def kinematic_sim(speed=60.0, lateral=0.0, **input_overrides):
     """(sim, bench) на кинематической модели — стенд уже принял управление."""
     bench = KinematicBench(speed=speed, lateral=lateral, **input_overrides)
-    sim = ICSSim(connector=bench)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21", validate_conditions=False)
     sim.read_telemetry()
     return sim, bench

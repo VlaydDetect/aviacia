@@ -6,7 +6,7 @@ from ismpu.agent.shield import (
     Shield, ShieldConfig, GainCommand, RuntimeState, ACTION_DIM, REGULATOR_ORDER,
     base_gains_from_pids, apply_gains_to_pids,
 )
-from ismpu.agent import gain_space as gs
+from ismpu.agent.gain_space import gain_space_for
 from ismpu.control.channels import ControlsState
 from ismpu.control.pid import PIDController
 
@@ -19,7 +19,8 @@ PRESET = {
     "pid_rev_l": {"kp": 0.03, "ki": 0.002, "kd": 0.01},
     "pid_rev_r": {"kp": 0.03, "ki": 0.002, "kd": 0.01},
 }
-BRAKE_HI = gs.GAIN_HI_MAP["pid_brake_l"]["kp"]   # физический потолок brake kp (0.24)
+SPACE = gain_space_for("mc21")
+BRAKE_HI = SPACE.hi_map["pid_brake_l"]["kp"]
 
 
 def _cmd(**overrides) -> GainCommand:

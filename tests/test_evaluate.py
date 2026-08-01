@@ -12,7 +12,7 @@ from ismpu.config.requirements import (
     XTE_ROLLOUT_MAX_M, XTE_TAXI_MAX_M, XTE_NWS_FAIL_MAX_M, HEADING_FAULT_MAX_DEG,
 )
 from ismpu.control.failures import FailureMode
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.runtime.evaluate import (
     PASS, FAIL, SKIP, evaluate_tz, verdict_of, admit_checkpoint, render_report,
     compare_policies, run_episode, DefaultGainsPolicy, PresetPolicy,
@@ -48,7 +48,7 @@ def _battery(diagnostics_list, *, beats_preset=True):
     """Сводка прогона под одной политикой из списка диагностик."""
     episodes = []
     for i, d in enumerate(diagnostics_list):
-        criteria = evaluate_tz(d, SCENARIO_PRESETS["default"])
+        criteria = evaluate_tz(d, SCENARIOS["default"])
         episodes.append({
             "scenario_id": f"s{i}", "policy": "test", "steps": 100,
             "total_loss": 1.0, "reward": -1.0, "components": {},
@@ -71,7 +71,7 @@ def _battery(diagnostics_list, *, beats_preset=True):
 
 def test_clean_episode_passes_every_criterion():
     """Сценарий с отказом реверса — тот, где применимы все три критерия сразу."""
-    criteria = evaluate_tz(_diagnostics(), SCENARIO_PRESETS["left_reverse_fail"])
+    criteria = evaluate_tz(_diagnostics(), SCENARIOS["left_reverse_fail"])
     assert verdict_of(criteria) == PASS
     assert all(c.verdict == PASS for c in criteria)
 
@@ -79,7 +79,7 @@ def test_clean_episode_passes_every_criterion():
 def test_each_criterion_is_reported_separately():
     """Единый сводный вердикт скрыл бы, какое именно требование нарушено."""
     criteria = evaluate_tz(_diagnostics(xte_rollout_max_m=9.0),
-                           SCENARIO_PRESETS["left_reverse_fail"])
+                           SCENARIOS["left_reverse_fail"])
     assert _by_name(criteria, "xte_rollout_max").verdict == FAIL
     assert _by_name(criteria, "xte_taxi_max").verdict == PASS
     assert _by_name(criteria, "heading_max").verdict == PASS
@@ -88,7 +88,7 @@ def test_each_criterion_is_reported_separately():
 
 def test_missing_measurement_fails_it_does_not_pass_conditionally():
     """Ключевое правило из tz_compliance_audit.md: отсутствие измерения — это FAIL."""
-    criteria = evaluate_tz(_diagnostics(xte_rollout_max_m=None), SCENARIO_PRESETS["default"])
+    criteria = evaluate_tz(_diagnostics(xte_rollout_max_m=None), SCENARIOS["default"])
     c = _by_name(criteria, "xte_rollout_max")
     assert c.verdict == FAIL
     assert c.measured is None
@@ -97,14 +97,14 @@ def test_missing_measurement_fails_it_does_not_pass_conditionally():
 
 def test_non_finite_measurement_also_fails():
     criteria = evaluate_tz(_diagnostics(heading_max_deg=float("nan")),
-                           SCENARIO_PRESETS["left_reverse_fail"])
+                           SCENARIOS["left_reverse_fail"])
     assert _by_name(criteria, "heading_max").verdict == FAIL
 
 
 def test_inapplicable_criterion_is_skipped_with_a_visible_reason():
     """Эпизод не дошёл до руления → допуск ±1 м неприменим. Это SKIP, а не тихий пропуск."""
     criteria = evaluate_tz(_diagnostics(xte_taxi_max_m=None, final_speed_kts=70.0),
-                           SCENARIO_PRESETS["default"])
+                           SCENARIOS["default"])
     c = _by_name(criteria, "xte_taxi_max")
     assert c.verdict == SKIP
     assert c.reason      # причина обязана быть указана
@@ -115,13 +115,13 @@ def test_no_samples_at_all_fails_rather_than_skips():
     """Пустой эпизод — это отсутствие данных, а не неприменимость требования."""
     empty = _diagnostics(samples=0, xte_rollout_max_m=None, heading_max_deg=None,
                          final_speed_kts=None, xte_taxi_max_m=None)
-    criteria = evaluate_tz(empty, SCENARIO_PRESETS["left_reverse_fail"])
+    criteria = evaluate_tz(empty, SCENARIOS["left_reverse_fail"])
     assert _by_name(criteria, "xte_rollout_max").verdict == FAIL
     assert _by_name(criteria, "heading_max").verdict == FAIL
     assert verdict_of(criteria) == FAIL
 
     # В штатном сценарии курс не нормируется вообще — но осевая линия всё равно FAIL.
-    nominal = evaluate_tz(empty, SCENARIO_PRESETS["default"])
+    nominal = evaluate_tz(empty, SCENARIOS["default"])
     assert _by_name(nominal, "xte_rollout_max").verdict == FAIL
     assert verdict_of(nominal) == FAIL
 
@@ -129,8 +129,8 @@ def test_no_samples_at_all_fails_rather_than_skips():
 def test_nws_failure_relaxes_the_rollout_tolerance():
     """При отказе NWS руль мёртв, ось держится дифференциальным торможением → ±5 м (5.1.3.2)."""
     d = _diagnostics(xte_rollout_max_m=4.0)     # вне ±3 м, но внутри ±5 м
-    nominal = evaluate_tz(d, SCENARIO_PRESETS["default"])
-    nws = evaluate_tz(d, SCENARIO_PRESETS["nws_fail"])
+    nominal = evaluate_tz(d, SCENARIOS["default"])
+    nws = evaluate_tz(d, SCENARIOS["nws_fail"])
 
     assert _by_name(nominal, "xte_rollout_max").verdict == FAIL
     assert _by_name(nominal, "xte_rollout_max").limit == XTE_ROLLOUT_MAX_M
@@ -138,13 +138,13 @@ def test_nws_failure_relaxes_the_rollout_tolerance():
     assert _by_name(nws, "xte_rollout_max").verdict == PASS
     assert _by_name(nws, "xte_rollout_max").limit == XTE_NWS_FAIL_MAX_M
     assert "NWS" in _by_name(nws, "xte_rollout_max").tz_ref
-    assert FailureMode.NWS_FAIL in SCENARIO_PRESETS["nws_fail"].failures
+    assert FailureMode.NWS_FAIL in SCENARIOS["nws_fail"].failures
 
 
 def test_taxi_tolerance_is_stricter_than_rollout():
     """Одно и то же отклонение проходит на пробеге и валится на рулении (±3 м против ±1 м)."""
     criteria = evaluate_tz(_diagnostics(xte_rollout_max_m=2.0, xte_taxi_max_m=2.0),
-                           SCENARIO_PRESETS["default"])
+                           SCENARIOS["default"])
     assert _by_name(criteria, "xte_rollout_max").verdict == PASS
     assert _by_name(criteria, "xte_taxi_max").verdict == FAIL
     assert XTE_TAXI_MAX_M < XTE_ROLLOUT_MAX_M
@@ -152,7 +152,7 @@ def test_taxi_tolerance_is_stricter_than_rollout():
 
 def test_heading_limit_comes_from_requirements():
     criteria = evaluate_tz(_diagnostics(heading_max_deg=HEADING_FAULT_MAX_DEG + 0.5),
-                           SCENARIO_PRESETS["left_reverse_fail"])
+                           SCENARIOS["left_reverse_fail"])
     c = _by_name(criteria, "heading_max")
     assert c.limit == HEADING_FAULT_MAX_DEG
     assert c.verdict == FAIL
@@ -166,18 +166,18 @@ def test_heading_criterion_applies_only_to_thrust_and_reverse_faults():
     """
     bad_heading = _diagnostics(heading_max_deg=9.0)
 
-    nominal = _by_name(evaluate_tz(bad_heading, SCENARIO_PRESETS["default"]), "heading_max")
+    nominal = _by_name(evaluate_tz(bad_heading, SCENARIOS["default"]), "heading_max")
     assert nominal.verdict == SKIP
     assert "5.1.3.1" in nominal.reason
 
-    reverse = _by_name(evaluate_tz(bad_heading, SCENARIO_PRESETS["left_reverse_fail"]),
+    reverse = _by_name(evaluate_tz(bad_heading, SCENARIOS["left_reverse_fail"]),
                        "heading_max")
     assert reverse.verdict == FAIL
     assert reverse.tz_ref == "5.1.3.3"
 
 
 def test_heading_criterion_records_what_it_measured_against():
-    c = _by_name(evaluate_tz(_diagnostics(), SCENARIO_PRESETS["left_reverse_fail"]), "heading_max")
+    c = _by_name(evaluate_tz(_diagnostics(), SCENARIOS["left_reverse_fail"]), "heading_max")
     assert c.evaluation_basis == "runway_relative_true_heading"
     assert c.as_dict()["evaluation_basis"] == "runway_relative_true_heading"
 
@@ -189,14 +189,14 @@ def test_nws_failure_does_not_stack_the_taxi_tolerance():
     """
     d = _diagnostics(xte_taxi_max_m=3.0)      # вне ±1 м, но внутри послабления ±5 м
 
-    nominal = _by_name(evaluate_tz(d, SCENARIO_PRESETS["default"]), "xte_taxi_max")
+    nominal = _by_name(evaluate_tz(d, SCENARIOS["default"]), "xte_taxi_max")
     assert nominal.verdict == FAIL
 
-    nws = _by_name(evaluate_tz(d, SCENARIO_PRESETS["nws_fail"]), "xte_taxi_max")
+    nws = _by_name(evaluate_tz(d, SCENARIOS["nws_fail"]), "xte_taxi_max")
     assert nws.verdict == SKIP
     assert "до полной остановки" in nws.reason
     # ...но послабление ±5 м на пробеге при этом продолжает проверяться
-    assert _by_name(evaluate_tz(d, SCENARIO_PRESETS["nws_fail"]),
+    assert _by_name(evaluate_tz(d, SCENARIOS["nws_fail"]),
                     "xte_rollout_max").limit == XTE_NWS_FAIL_MAX_M
 
 
@@ -226,7 +226,7 @@ def test_missing_metric_blocks_admission():
 def test_sustained_saturation_blocks_admission_even_when_tz_passes():
     """Формально в допуске, но авторитет исчерпан — режим держится на грани."""
     d = _diagnostics(saturation_ratio=MAX_SATURATION_RATIO + 0.1)
-    assert verdict_of(evaluate_tz(d, SCENARIO_PRESETS["default"])) == PASS
+    assert verdict_of(evaluate_tz(d, SCENARIOS["default"])) == PASS
     result = admit_checkpoint(_battery([d]))
     assert not result.admitted
     assert any("насыщение" in r for r in result.reasons)
@@ -296,7 +296,7 @@ def _scripted_env(window=4):
 
 def test_run_episode_produces_criteria_and_diagnostics():
     env = _scripted_env()
-    result = run_episode(env, SCENARIO_PRESETS["default"], PresetPolicy(), max_steps=400)
+    result = run_episode(env, SCENARIOS["default"], PresetPolicy(), max_steps=400)
 
     assert result["policy"] == "scenario_preset"
     assert result["verdict"] in (PASS, FAIL)
@@ -310,7 +310,7 @@ def test_run_episode_produces_criteria_and_diagnostics():
 
 def test_compare_policies_flags_which_baseline_each_policy_beats():
     env = _scripted_env()
-    scenarios = [SCENARIO_PRESETS["default"], SCENARIO_PRESETS["nws_fail"]]
+    scenarios = [SCENARIOS["default"], SCENARIOS["nws_fail"]]
     comparison = compare_policies(env, scenarios,
                                   [DefaultGainsPolicy(), PresetPolicy()],
                                   max_steps=300, log=None)

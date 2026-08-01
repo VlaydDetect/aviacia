@@ -11,6 +11,7 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,7 +74,10 @@ def _jsonable(value):
     if is_dataclass(value):
         return _jsonable(asdict(value))
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {
+            (key.value if isinstance(key, Enum) else str(key)): _jsonable(item)
+            for key, item in value.items()
+        }
     if isinstance(value, (tuple, list, set, frozenset)):
         return [_jsonable(item) for item in value]
     return getattr(value, "value", str(value))
@@ -304,6 +308,9 @@ class DashboardState:
                 self.sim, "aircraft_profile_name", "unknown"
             ),
             "scenario": getattr(self.scenario, "scenario_id", None),
+            "scenario_definition": (
+                self.scenario.to_dict() if self.scenario is not None else None
+            ),
             "label": label,
             "gains": gains_snapshot(self.controller),
         }
@@ -352,6 +359,13 @@ class DashboardState:
                 self.sim, "aircraft_profile_name", "recorded"
             ),
             "scenario": scenario_id,
+            "segment_sources": _jsonable(
+                getattr(self.scenario, "provenance", None)),
+            "segment_conditions": _jsonable(
+                getattr(self.scenario, "conditions", None)),
+            "conditions_valid": getattr(self.sim, "conditions_valid", True),
+            "condition_matches": _jsonable(
+                getattr(self.sim, "condition_matches", ())),
             "segment": getattr(
                 getattr(self.controller, "segment", None), "value", None
             ),

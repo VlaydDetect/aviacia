@@ -8,9 +8,12 @@ from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
 from ismpu.control.system import ControllingSystem
 from ismpu.control.channels import ControlsState
 from ismpu.envs.ics_sim import ICSSim, Telemetry
-from ismpu.envs.scenario import SCENARIO_PRESETS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.envs.observation import ObservationBuilder, OBS_DIM, FEATURE_NAMES, ObserverEstimate
-from ismpu.envs.action import decode, apply_corrections, preset_action, REFERENCE_ACTION, ACTION_LOW, ACTION_HIGH
+from ismpu.envs.action import (
+    decode, apply_corrections, preset_action, action_low, action_high, reference_action,
+)
+from ismpu.agent.gain_space import gain_space_for
 from ismpu.envs.reward import (
     compute_reward, RewardWeights, EpisodeObjective, saturation_fraction,
     graded, excess, xte_limit_for, SHAPING_SLOPE, SPEED_TOL_MS, OVERSPEED_FACTOR,
@@ -30,14 +33,14 @@ from fakes import static_sim, make_ics_inputs, telemetry as _telemetry
 # --------------------------------------------------------------------------- #
 
 def test_env_preset_action_parity_matches_classical_control_step():
-    scenario = SCENARIO_PRESETS["default"]     # пресет default → preset_action == REFERENCE_ACTION
+    scenario = SCENARIOS["default"]
     n_steps = 6
 
     # (A) чистая классика. Телеметрию читаем тем же стендом, что и среда, — иначе парити
     # проверяло бы заодно и совпадение двух разных способов собрать кадр.
     sim_a, conn_a = static_sim()
     ctrl_a = ControllingSystem(sim_a)
-    scenario.apply_control(ctrl_a)
+    scenario.apply_control(ctrl_a, "mc21")
     for _ in range(n_steps):
         ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
     classical = conn_a.commands()
@@ -58,7 +61,7 @@ def test_env_preset_action_parity_matches_classical_control_step():
 
 def test_preset_action_leaves_scenario_gains_unchanged():
     ctrl = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["nws_fail"].apply_control(ctrl)
+    SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
     preset = base_gains_from_pids(ctrl.pids)
 
     # действие = абсолютные коэффициенты пресета → gain'ы не меняются
@@ -78,7 +81,7 @@ def test_preset_action_leaves_scenario_gains_unchanged():
 
 def _ready_controller(preset="nws_fail"):
     ctrl = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS[preset].apply_control(ctrl)
+    SCENARIOS[preset].apply_control(ctrl, "mc21")
     ctrl.control_step(DT, _telemetry(), send=True)   # заполнить state/PID-внутренности/traveled
     return ctrl
 
@@ -92,7 +95,7 @@ def test_observation_in_normalized_range():
     ctrl = _ready_controller()
     telem = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=50.0,
                       heading_true_deg=float(RWY_HEADING_TRUE), roll_deg=2.0, accel_long_g=-0.3)
-    obs = ObservationBuilder().build(telem, ctrl, SCENARIO_PRESETS["nws_fail"].weather, ObserverEstimate())
+    obs = ObservationBuilder().build(telem, ctrl, SCENARIOS["nws_fail"].weather, ObserverEstimate())
     assert obs.shape == (OBS_DIM,)
     assert obs.dtype == np.float32
     assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
@@ -101,7 +104,7 @@ def test_observation_in_normalized_range():
 def test_observation_invalid_telemetry_is_zeros():
     ctrl = _ready_controller()
     telem = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
-    obs = ObservationBuilder().build(telem, ctrl, SCENARIO_PRESETS["default"].weather)
+    obs = ObservationBuilder().build(telem, ctrl, SCENARIOS["default"].weather)
     assert np.count_nonzero(obs) == 0
 
 
@@ -110,16 +113,18 @@ def test_observation_invalid_telemetry_is_zeros():
 # --------------------------------------------------------------------------- #
 
 def test_reference_action_decodes_to_default_gains():
-    from ismpu.agent import gain_space as gs
-    cmd = decode(REFERENCE_ACTION)
-    for i, (reg, key) in enumerate(gs.SLOTS):
-        assert cmd.gains[reg][key] == pytest.approx(gs.GAIN_DEFAULT[i])
+    space = gain_space_for("mc21")
+    cmd = decode(reference_action(space))
+    for i, (reg, key) in enumerate(space.slots):
+        assert cmd.gains[reg][key] == pytest.approx(space.default[i])
     assert cmd.w_lon == 1.0 and cmd.w_lat == 1.0
 
 
 def test_action_bounds_shape():
-    assert ACTION_LOW.shape == (17,) and ACTION_HIGH.shape == (17,)
-    assert np.all(ACTION_LOW <= REFERENCE_ACTION) and np.all(REFERENCE_ACTION <= ACTION_HIGH)
+    space = gain_space_for("mc21")
+    low, high, reference = action_low(space), action_high(space), reference_action(space)
+    assert low.shape == (17,) and high.shape == (17,)
+    assert np.all(low <= reference) and np.all(reference <= high)
 
 
 # --------------------------------------------------------------------------- #
@@ -166,10 +171,10 @@ def test_break_control_is_cleared_when_a_scenario_is_applied():
     руления). Без сброса при настройке сценария следующий эпизод завершался бы на первом такте —
     в обучении PPO это давало бы эпизоды длиной 1."""
     ctrl = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["default"].apply_control(ctrl)
+    SCENARIOS["default"].apply_control(ctrl, "mc21")
 
     ctrl.state.break_control = True          # имитируем завершившийся эпизод
-    SCENARIO_PRESETS["default"].apply_control(ctrl)
+    SCENARIOS["default"].apply_control(ctrl, "mc21")
     assert ctrl.state.break_control is False
 
     # ...и такт после сброса действительно выполняется, а не завершается сразу
@@ -177,7 +182,7 @@ def test_break_control_is_cleared_when_a_scenario_is_applied():
 
 
 def test_env_reset_clears_a_latched_break_control():
-    scenario = SCENARIO_PRESETS["default"]
+    scenario = SCENARIOS["default"]
     sim, _conn = static_sim()
     ctrl = ControllingSystem(sim)
     env = RolloutEnv(sim, ctrl, shield=None)
@@ -205,7 +210,12 @@ class _WarmUpSim(ICSSim):
 
     def __init__(self, warm_ticks=5):
         sim, conn = static_sim()
-        super().__init__(connector=conn, engagement=sim.engagement)
+        super().__init__(
+            connector=conn,
+            engagement=sim.engagement,
+            aircraft_profile="mc21",
+            validate_conditions=False,
+        )
         self.warm_ticks = warm_ticks
         self.warm_frames = 0
         self._forced_engaged = False
@@ -231,7 +241,7 @@ def test_warm_up_runs_before_the_episode_and_is_not_counted():
     sim = _WarmUpSim(warm_ticks=5)
     env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
 
-    env.reset(SCENARIO_PRESETS["default"])
+    env.reset(SCENARIOS["default"])
 
     assert sim.engaged is True              # прогрев отработал внутри reset
     assert sim.warm_frames == 5
@@ -242,7 +252,7 @@ def test_warm_up_runs_before_the_episode_and_is_not_counted():
 def test_env_reports_engagement_state_in_info():
     sim = _WarmUpSim(warm_ticks=2)
     env = RolloutEnv(sim, ControllingSystem(sim), shield=None)
-    env.reset(SCENARIO_PRESETS["default"])
+    env.reset(SCENARIOS["default"])
 
     action = preset_action(base_gains_from_pids(env.controller.pids))
     _obs, _r, _term, _trunc, info = env.step(action)
@@ -320,7 +330,7 @@ def test_tz_gate_verdicts_flip_to_correct_after_the_fix():
         diagnostics = {"samples": 100, "xte_rollout_max_m": abs(offset_m),
                        "xte_taxi_max_m": None, "final_speed_kts": 70.0,
                        "heading_max_deg": abs(heading_deviation_deg(telem))}
-        criteria = evaluate_tz(diagnostics, SCENARIO_PRESETS["left_reverse_fail"])
+        criteria = evaluate_tz(diagnostics, SCENARIOS["left_reverse_fail"])
         return next(c.verdict for c in criteria if c.name == "heading_max")
 
     assert verdict(offset_m=5.0, yaw_deg=0.0) == PASS    # курс выдержан, смещение не при чём
@@ -413,7 +423,7 @@ def test_heading_gate_uses_tz_threshold():
 
 def test_saturation_fraction_counts_commands_pegged_at_their_pid_bounds():
     controller = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     pids = controller.pids
 
     cmd = ControlsState()
@@ -434,7 +444,7 @@ def test_zero_bound_is_not_counted_as_saturation():
     т.е. в начале почти любого пробега.
     """
     controller = ControllingSystem(static_sim()[0])
-    SCENARIO_PRESETS["default"].apply_control(controller)
+    SCENARIOS["default"].apply_control(controller, "mc21")
     pids = controller.pids
 
     cmd = ControlsState()
@@ -508,7 +518,7 @@ def test_episode_objective_p95_rate_is_robust_to_a_single_spike():
 # --------------------------------------------------------------------------- #
 
 def test_env_reset_and_step_shapes_and_history():
-    scenario = SCENARIO_PRESETS["default"]
+    scenario = SCENARIOS["default"]
     sim, _conn = static_sim()
     ctrl = ControllingSystem(sim)
     env = RolloutEnv(sim, ctrl, history_len=3, shield=None)
@@ -517,7 +527,7 @@ def test_env_reset_and_step_shapes_and_history():
     assert obs.shape == (3, OBS_DIM)        # окно истории как последовательность (T, 56)
     assert info == {}
 
-    obs, reward, terminated, truncated, info = env.step(REFERENCE_ACTION)
+    obs, reward, terminated, truncated, info = env.step(env.reference_action)
     assert obs.shape == (3, OBS_DIM)
     assert isinstance(reward, float)
     assert not terminated and not truncated
@@ -527,12 +537,12 @@ def test_env_reset_and_step_shapes_and_history():
 def test_env_with_shield_at_preset_still_parity():
     # Действие = пресет → Shield no-op (пресет внутри всех границ), команды = классика.
     from ismpu.agent.shield import Shield
-    scenario = SCENARIO_PRESETS["default"]
+    scenario = SCENARIOS["default"]
     n = 4
 
     sim_a, conn_a = static_sim()
     ctrl_a = ControllingSystem(sim_a)
-    scenario.apply_control(ctrl_a)
+    scenario.apply_control(ctrl_a, "mc21")
     for _ in range(n):
         ctrl_a.control_step(DT, sim_a.read_telemetry(), send=True)
 
