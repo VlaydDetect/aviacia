@@ -9,7 +9,9 @@
 ситуации — из `config/criticality.py` (Приложение 1). Команды монитор не трогает.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ismpu.utils.converts import Converts
 from ismpu.config.requirements import (
@@ -19,6 +21,11 @@ from ismpu.config.requirements import (
 )
 from ismpu.config.criticality import SpecialSituation, lateral_situation, RUNWAY_WIDTH_M
 from ismpu.control.failures import FailureMode
+from ismpu.control.approach import ApproachResult, ApproachTelemetry
+from ismpu.config.envelope import ApproachLimits
+
+if TYPE_CHECKING:
+    from ismpu.envs.ics_sim import Telemetry
 
 DEFAULT_RUNWAY_WIDTH_M = RUNWAY_WIDTH_M["A"]
 """Ширина ВПП по умолчанию (UUEE — класс A, 60 м), если стенд ширину не публикует. Влияет только
@@ -42,11 +49,14 @@ class ToleranceReport:
     lateral_m: "float | None"
     lateral_ok_at_gate: "bool | None"
     situation: SpecialSituation
-    violations: tuple
+    violations: tuple[str, ...]
     landing_allowed: bool
 
 
-def _glideslope_tolerance_deg(inp, faults) -> float:
+def _glideslope_tolerance_deg(
+    inp: ApproachTelemetry | None,
+    faults: Iterable[FailureMode],
+) -> float:
     """Допуск по глиссаде с учётом отказа (ТЗ 5.1.2.1–5.1.2.3), самый мягкий из применимых.
 
     Отказ стабилизатора (`FaultLeftStab`/`FaultRightStab`) → ± 1°; отказ/неполная конфигурация
@@ -56,12 +66,12 @@ def _glideslope_tolerance_deg(inp, faults) -> float:
     tol = GLIDESLOPE_DEVIATION_MAX_DEG
     if FailureMode.GEAR_CONFIG in (faults or ()):
         tol = max(tol, GLIDESLOPE_GEAR_FAULT_MAX_DEG)
-    if inp is not None and (getattr(inp, "FaultLeftStab", 0) or getattr(inp, "FaultRightStab", 0)):
+    if inp is not None and (inp.FaultLeftStab or inp.FaultRightStab):
         tol = max(tol, GLIDESLOPE_STAB_FAULT_MAX_DEG)
     return tol
 
 
-def _speed_situation(speed_kt: float, limits) -> SpecialSituation:
+def _speed_situation(speed_kt: float, limits: ApproachLimits) -> SpecialSituation:
     """Диагностическая градация приборной скорости по огибающей механизации."""
     if speed_kt <= limits.vsr1_kt:
         return SpecialSituation.HAZARDOUS       # ниже опорной скорости сваливания
@@ -72,8 +82,14 @@ def _speed_situation(speed_kt: float, limits) -> SpecialSituation:
     return SpecialSituation.NORMAL
 
 
-def evaluate_approach_tolerances(telemetry, result, limits, faults, *,
-                                 at_decision_gate: bool) -> ToleranceReport:
+def evaluate_approach_tolerances(
+    telemetry: "Telemetry | None",
+    result: ApproachResult,
+    limits: ApproachLimits,
+    faults: Iterable[FailureMode],
+    *,
+    at_decision_gate: bool,
+) -> ToleranceReport:
     """Проверить допуски захода по текущему такту. Команды не трогает.
 
     `result` — диагностика воздушного закона (`ApproachResult`) с уже посчитанными отклонениями;
@@ -81,7 +97,7 @@ def evaluate_approach_tolerances(telemetry, result, limits, faults, *,
     (`Telemetry.faults`). `at_decision_gate` — активен ли гейт совмещения с осью ± 5 м (у высоты
     решения 30 м): выше него боковое отклонение допуском не ограничивается (за него отвечает курс).
     """
-    inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
+    inp = telemetry.approach_inputs if telemetry is not None else None
     violations = []
 
     course_deg = abs(result.course_deg)
@@ -115,7 +131,7 @@ def evaluate_approach_tolerances(telemetry, result, limits, faults, *,
         situation = max(situation, SpecialSituation.MAJOR)
     situation = max(situation, _speed_situation(speed_kt, limits))
     if lateral_m is not None:
-        gs_kts = (getattr(telemetry, "groundspeed_ms", 0.0) or 0.0) * Converts.MS_TO_KTS
+        gs_kts = (telemetry.groundspeed_ms if telemetry is not None else 0.0) * Converts.MS_TO_KTS
         width = (telemetry.runway_width_m or DEFAULT_RUNWAY_WIDTH_M) if telemetry is not None \
             else DEFAULT_RUNWAY_WIDTH_M
         situation = max(situation, lateral_situation(lateral_m, gs_kts, width))

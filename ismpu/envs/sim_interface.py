@@ -88,6 +88,9 @@ class ApproachData:
     BodyYawRate: float = 0.0
     BodyNormAccel: float = 0.0
     AirfieldTemp: float = 15.0
+    # X-Plane does not model these bench flags yet; zero means "fault absent".
+    FaultLeftStab: int = 0
+    FaultRightStab: int = 0
 
 
 @runtime_checkable
@@ -128,4 +131,9 @@ class SimInterface(Protocol):
 
     def __enter__(self) -> "SimInterface": ...
 
-    def __exit__(self, exc_type, exc, traceback) -> bool: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool: ...

@@ -15,25 +15,28 @@
 """
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ismpu.control.trajectory import VelocityLaw
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
 
 if TYPE_CHECKING:
+    from ismpu.control.pid import PIDController
     from ismpu.control.system import ControllingSystem
+
+PidConfig = dict[str, Any]
 
 
 @dataclass(frozen=True)
 class ScenarioConfig:
     name: str
     failure: FailureMode
-    runway_center: dict
-    brake_l: dict
-    brake_r: dict
-    rev_l: dict
-    rev_r: dict
+    runway_center: PidConfig
+    brake_l: PidConfig
+    brake_r: PidConfig
+    rev_l: PidConfig
+    rev_r: PidConfig
     weather: WeatherState = field(default_factory=lambda: WEATHER_PRESETS["clear_dry"])
     lookahead_min: float = 10.0
     lookahead_gain: float = 1.8
@@ -49,7 +52,7 @@ class ScenarioConfig:
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
-    def build_pids(self):
+    def build_pids(self) -> dict[str, "PIDController"]:
         """Создаёт свежий набор из 5 регуляторов (по имени аргументов setup())."""
         from ismpu.factories.control import build_pids
         return build_pids(self)

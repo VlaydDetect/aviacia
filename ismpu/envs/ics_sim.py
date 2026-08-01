@@ -40,7 +40,7 @@ from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.envs.weather import WeatherState
-from ismpu.envs.sim_interface import ApproachData, ShutdownReport
+from ismpu.envs.sim_interface import ApproachData, ShutdownReport, SimInterface, StartMode
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +360,7 @@ def _faults_from_inputs(inp: ICSInputs) -> frozenset:
     return frozenset(active)
 
 
-class ICSSim:
+class ICSSim(SimInterface):
     """Обмен со стендом заказчика: телеметрия внутрь, команды наружу.
 
     Управление включается **только** после рукопожатия (`io/ics_engagement.py`). Факт включения
@@ -389,7 +389,12 @@ class ICSSim:
 
     # --- жизненный цикл эпизода ---
 
-    def reset(self, scenario=None, *, start: str | None = None) -> Telemetry:
+    def reset(
+            self,
+            scenario: "Scenario | None" = None,
+            *,
+            start: StartMode | None = None,
+    ) -> "Telemetry":
         """Начало эпизода: сброс рукопожатия и первый кадр со стенда.
 
         Средой распоряжается Заказчик, поэтому сбрасывать здесь нечего — ни телепорта, ни

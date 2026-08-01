@@ -1,4 +1,4 @@
-"""Action Space — АБСОЛЮТНЫЕ коэффициенты PID от актора → классический контур.
+"""Применение абсолютных коэффициентов PID, выданных NPGS.
 
 Действие: вектор `(17,)` = `[gains×15, w_lon, w_lat]` (тот же layout, что `GainCommand`):
 `gains` — абсолютные `(kp, ki, kd)` пяти регуляторов в порядке `REGULATOR_ORDER`; `w_lon/w_lat`
@@ -12,10 +12,17 @@
 при переданном `shield` проходит через `guard_coefficients` (пресет — якорь безопасности).
 """
 
-import numpy as np
+from typing import TYPE_CHECKING
 
-from ismpu.agent.shield import GainCommand, ACTION_DIM, apply_gains_to_pids
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
+
+from ismpu.agent.shield import GainCommand, Shield, ShieldReport, ACTION_DIM, apply_gains_to_pids
 from ismpu.agent import gain_space
+from ismpu.config.regulators import GainMap
+
+if TYPE_CHECKING:
+    from ismpu.control.system import ControllingSystem
 
 WEIGHT_LOW, WEIGHT_HIGH = 0.0, 2.0
 
@@ -26,12 +33,12 @@ REFERENCE_ACTION = np.concatenate([gain_space.GAIN_DEFAULT, [1.0, 1.0]]).astype(
 assert len(REFERENCE_ACTION) == ACTION_DIM
 
 
-def decode(action) -> GainCommand:
+def decode(action: ArrayLike) -> GainCommand:
     """Плоский вектор действия → `GainCommand` (абсолютные gain'ы)."""
     return GainCommand.from_vector(np.asarray(action, dtype=float))
 
 
-def preset_action(preset_gains: dict) -> np.ndarray:
+def preset_action(preset_gains: GainMap) -> NDArray[np.float64]:
     """17-мерное действие, точно воспроизводящее коэффициенты пресета (веса = 1).
 
     Возвращает **float64** (не float32) — точный путь записи для парити с классикой:
@@ -41,7 +48,12 @@ def preset_action(preset_gains: dict) -> np.ndarray:
     return np.asarray(GainCommand.from_gains(preset_gains).to_vector(), dtype=np.float64)
 
 
-def apply_corrections(command: GainCommand, preset_gains: dict, controller, shield=None):
+def apply_corrections(
+    command: GainCommand,
+    preset_gains: GainMap,
+    controller: "ControllingSystem",
+    shield: Shield | None = None,
+) -> tuple[GainMap, ShieldReport | None]:
     """Применяет абсолютные gain'ы к контуру. Возвращает `(effective_gains, shield_report|None)`.
 
     С `shield` — эффективные gain'ы и клип весов берутся из `guard_coefficients` (пресет —

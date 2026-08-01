@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ismpu.io import datarefs as dr
+
+if TYPE_CHECKING:
+    from ismpu.control.channels import ControlsState
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -33,23 +37,24 @@ class AircraftProfile:
         return (*dr.COMMON_SUBSCRIPTIONS, *engine_refs, *gear_refs)
 
     @property
-    def throttle_refs(self) -> tuple[str, str]:
+    def throttle_refs(self) -> tuple[str, ...]:
         """Command refs retained under the historical public name."""
         return self.throttle_command_refs
 
     @property
-    def throttle_command_refs(self) -> tuple[str, str]:
+    def throttle_command_refs(self) -> tuple[str, ...]:
         return tuple(f"{dr.THROTTLE_COMMAND}[{i}]" for i in self.engine_indices)
 
     @property
-    def throttle_feedback_refs(self) -> tuple[str, str]:
+    def throttle_feedback_refs(self) -> tuple[str, ...]:
         return tuple(f"{dr.THROTTLE_RATIO}[{i}]" for i in self.engine_indices)
 
     @property
-    def gear_refs(self) -> tuple[str, str, str]:
+    def gear_refs(self) -> tuple[str, ...]:
         return tuple(f"{dr.GEAR_ON_GROUND}[{i}]" for i in self.gear_indices)
 
-    def airborne_commands(self, command) -> dict[str, float]:
+    def airborne_commands(self, command: "ControlsState") -> dict[str, float]:
+        """Преобразовать воздушные команды ICD в нормированные DataRef X-Plane."""
         left, right = self.throttle_command_refs
         return {
             dr.YOKE_ROLL_RATIO: clamp(
@@ -61,7 +66,8 @@ class AircraftProfile:
             right: clamp(command.cmd_throttle_norm, 0.0, 1.0),
         }
 
-    def ground_commands(self, command) -> dict[str, float]:
+    def ground_commands(self, command: "ControlsState") -> dict[str, float]:
+        """Преобразовать нормированные команды пробега в DataRef X-Plane."""
         left, right = self.throttle_command_refs
         return {
             dr.LEFT_BRAKE_RATIO: clamp(command.cmd_brake_l, 0.0, 1.0),
@@ -80,11 +86,11 @@ A330_300 = AircraftProfile(
     flap_full_deg=40.0,
     aileron_full_scale_deg=25.0,
     elevator_full_scale_g=0.5,
-    # Профиль намеренно помечается калибровочным на уровне пресета захода:
-    # знаки здесь описывают только проводку штатного планера.
+    # Признак готовности к полётной калибровке хранится в пресете захода;
+    # этот профиль описывает только индексы и знаки проводки штатного планера.
 )
 
-AIRCRAFT_PROFILES = {A330_300.name: A330_300}
+AIRCRAFT_PROFILES: dict[str, AircraftProfile] = {A330_300.name: A330_300}
 
 
 def get_aircraft_profile(name: str) -> AircraftProfile:

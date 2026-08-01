@@ -32,17 +32,26 @@ hard-bounds и rate-limit — вокруг пресета, fallback — прям
 """
 
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Optional
 
 from ismpu.control.channels import ControlsState
-from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS, N_GAINS, ACTION_DIM
+from ismpu.config.regulators import (
+    ACTION_DIM,
+    GAIN_KEYS,
+    N_GAINS,
+    REGULATOR_ORDER,
+    GainMap,
+    PidMap,
+    RegulatorKey,
+)
 from ismpu.agent import gain_space
 
 # Обратная совместимость имён (ранее объявлялись здесь).
 N_ALPHA = N_GAINS   # 15 коэффициентов (kp, ki, kd) × 5 регуляторов
 
 
-def _clip(x, lo, hi):
+def _clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
 
 
@@ -57,17 +66,21 @@ class GainCommand:
     `gains[reg] = {'kp','ki','kd'}` — абсолютные коэффициенты регулятора `reg`.
     `w_lon`, `w_lat` — веса влияния продольного/латерального каналов.
     """
-    gains: dict
+    gains: GainMap
     w_lon: float = 1.0
     w_lat: float = 1.0
 
     @classmethod
-    def from_gains(cls, gains: dict, w_lon: float = 1.0, w_lat: float = 1.0) -> "GainCommand":
+    def from_gains(cls, gains: GainMap, w_lon: float = 1.0, w_lat: float = 1.0) -> "GainCommand":
         """Построение из словаря коэффициентов (напр. пресета сценария)."""
         return cls(gains={reg: dict(g) for reg, g in gains.items()}, w_lon=w_lon, w_lat=w_lat)
 
     @classmethod
-    def from_vector(cls, vec, regulators=REGULATOR_ORDER) -> "GainCommand":
+    def from_vector(
+        cls,
+        vec: Sequence[float],
+        regulators: Sequence[RegulatorKey] = REGULATOR_ORDER,
+    ) -> "GainCommand":
         """Плоский вектор действия (17,) → GainCommand. Layout: [gains×15, w_lon, w_lat]."""
         gains, i = {}, 0
         for reg in regulators:
@@ -75,8 +88,8 @@ class GainCommand:
             i += len(GAIN_KEYS)
         return cls(gains=gains, w_lon=float(vec[i]), w_lat=float(vec[i + 1]))
 
-    def to_vector(self, regulators=REGULATOR_ORDER) -> list:
-        vec = []
+    def to_vector(self, regulators: Sequence[RegulatorKey] = REGULATOR_ORDER) -> list[float]:
+        vec: list[float] = []
         for reg in regulators:
             vec.extend(self.gains[reg][k] for k in GAIN_KEYS)
         vec.extend((self.w_lon, self.w_lat))
@@ -101,9 +114,9 @@ class ShieldReport:
     fallback: bool = False
     l_shield: float = 0.0
     l_smooth: float = 0.0
-    rules: list = field(default_factory=list)
+    rules: list[str] = field(default_factory=list)
 
-    def _mark_level(self, level: int):
+    def _mark_level(self, level: int) -> None:
         if level == 1:
             self.level1_active = True
         elif level == 2:
@@ -177,12 +190,12 @@ class ShieldConfig:
 # Вспомогательные функции интеграции
 # --------------------------------------------------------------------------- #
 
-def base_gains_from_pids(pids: dict) -> dict:
+def base_gains_from_pids(pids: PidMap) -> GainMap:
     """Снимок (kp, ki, kd) регуляторов — пресет-якорь для Shield и т.п."""
     return {reg: {"kp": p.kp, "ki": p.ki, "kd": p.kd} for reg, p in pids.items()}
 
 
-def apply_gains_to_pids(pids: dict, gains: dict) -> None:
+def apply_gains_to_pids(pids: PidMap, gains: GainMap) -> None:
     """Записывает эффективные gain'ы обратно в регуляторы (перед control_step)."""
     for reg, g in gains.items():
         pids[reg].kp = g["kp"]
@@ -197,18 +210,22 @@ def apply_gains_to_pids(pids: dict, gains: dict) -> None:
 class Shield:
     """Защитный контур. Детерминирован; хранит состояние прошлого такта для rate-лимитов."""
 
-    def __init__(self, config: Optional[ShieldConfig] = None):
-        self.config = config or ShieldConfig()
+    def __init__(self, config: Optional[ShieldConfig] = None) -> None:
+        self.config: ShieldConfig = config or ShieldConfig()
         self.reset()
 
     def reset(self) -> None:
-        self._prev_gains: Optional[dict] = None
-        self._prev_brakes: Optional[tuple] = None
-        self._fallback_latched = False
+        self._prev_gains: Optional[GainMap] = None
+        self._prev_brakes: Optional[tuple[float, float]] = None
+        self._fallback_latched: bool = False
 
     # --- Уровни 1–2: абсолютные коэффициенты → безопасные эффективные gain'ы ---- #
 
-    def guard_coefficients(self, command: GainCommand, preset_gains: dict) -> tuple:
+    def guard_coefficients(
+        self,
+        command: GainCommand,
+        preset_gains: GainMap,
+    ) -> tuple[GainMap, GainCommand, ShieldReport]:
         """Уровни 1–2. Возвращает `(effective_gains, safe_command, report)`.
 
         `effective_gains[reg] = {'kp','ki','kd'}` — после clip к физдиапазону, hard-bounds
@@ -267,7 +284,7 @@ class Shield:
                 return True
         return False
 
-    def _enforce_bounds(self, eff: dict, preset: dict, report: ShieldReport) -> None:
+    def _enforce_bounds(self, eff: GainMap, preset: GainMap, report: ShieldReport) -> None:
         cfg = self.config
         for reg, g in eff.items():
             for k in GAIN_KEYS:
@@ -283,7 +300,7 @@ class Shield:
                     v = cv
                 g[k] = v
 
-    def _enforce_rate_limit(self, eff: dict, preset: dict, report: ShieldReport) -> None:
+    def _enforce_rate_limit(self, eff: GainMap, preset: GainMap, report: ShieldReport) -> None:
         cfg = self.config
         if self._prev_gains is None:
             return
@@ -303,7 +320,7 @@ class Shield:
     # --- Уровень 3: поведенческие проверки итоговых команд ------------------ #
 
     def guard_command(self, command: ControlsState, runtime: RuntimeState,
-                      report: Optional[ShieldReport] = None) -> tuple:
+                      report: Optional[ShieldReport] = None) -> tuple[ControlsState, ShieldReport]:
         """Уровень 3. Правит небезопасные команды и возвращает `(command, report)`."""
         cfg = self.config
         report = report or ShieldReport()

@@ -26,42 +26,63 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
-from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS, N_GAINS
-from ismpu.config.scenarios import SCENARIOS, DEFAULT
+from ismpu.config.regulators import (
+    GAIN_KEYS,
+    N_GAINS,
+    REGULATOR_ORDER,
+    GainKey,
+    GainMap,
+    RegulatorKey,
+)
+from ismpu.config.scenarios import DEFAULT, SCENARIOS, PidConfig, ScenarioConfig
 EXPAND = 2.0        # расширение физического диапазона за пределы наблюдённого в пресетах
 _EPS = 1e-6         # отступ от ±1 при atanh (устойчивость на краях полосы)
 
-# Регулятор (по REGULATOR_ORDER) → имя поля-словаря в ScenarioConfig.
-_REG_TO_FIELD = {
-    "runway_center_pid": "runway_center",
-    "pid_brake_l": "brake_l",
-    "pid_brake_r": "brake_r",
-    "pid_rev_l": "rev_l",
-    "pid_rev_r": "rev_r",
-}
-
-
-def _slot_order() -> list[tuple[str, str]]:
+def _slot_order() -> list[tuple[RegulatorKey, GainKey]]:
     """15 слотов в каноническом порядке: REGULATOR_ORDER × (kp, ki, kd)."""
     return [(reg, k) for reg in REGULATOR_ORDER for k in GAIN_KEYS]
 
 
-def _collect_preset_values(reg: str, key: str) -> list[float]:
+def _regulator_config(config: ScenarioConfig, regulator: RegulatorKey) -> PidConfig:
+    """Возвращает PID-секцию сценария без динамического доступа к полям dataclass."""
+    if regulator == "runway_center_pid":
+        return config.runway_center
+    if regulator == "pid_brake_l":
+        return config.brake_l
+    if regulator == "pid_brake_r":
+        return config.brake_r
+    if regulator == "pid_rev_l":
+        return config.rev_l
+    if regulator == "pid_rev_r":
+        return config.rev_r
+    raise ValueError(f"Неизвестный регулятор: {regulator}")
+
+
+def _collect_preset_values(reg: RegulatorKey, key: GainKey) -> list[float]:
     """Все значения gain'а `key` регулятора `reg` по всем пресетам SCENARIOS."""
-    field = _REG_TO_FIELD[reg]
-    vals = []
+    vals: list[float] = []
     for cfg in SCENARIOS.values():
-        d = getattr(cfg, field)
+        d = _regulator_config(cfg, reg)
         v = d.get(key)
         if v is not None and v > 0.0:
             vals.append(float(v))
     return vals
 
 
-def _build_table():
+def _build_table() -> tuple[
+    list[tuple[RegulatorKey, GainKey]],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
     slots = _slot_order()
     ref = np.empty(N_GAINS, dtype=np.float64)
     s = np.empty(N_GAINS, dtype=np.float64)
@@ -76,14 +97,14 @@ def _build_table():
         hi[i] = vmax * EXPAND
         ref[i] = math.sqrt(vmin * vmax)                  # геометрическая середина
         s[i] = math.log(EXPAND * math.sqrt(vmax / vmin))  # = log(hi/ref) = log(ref/lo)
-        default[i] = float(getattr(DEFAULT, _REG_TO_FIELD[reg])[key])
+        default[i] = float(_regulator_config(DEFAULT, reg)[key])
     return slots, ref, s, lo, hi, default
 
 
 SLOTS, GAIN_REF, GAIN_S, GAIN_LO, GAIN_HI, GAIN_DEFAULT = _build_table()
 
 
-def _by_reg(arr) -> dict:
+def _by_reg(arr: Sequence[float]) -> GainMap:
     """Плоский массив (15,) → вложенный словарь {reg: {kp/ki/kd: value}} (для Shield/obs)."""
     return {reg: {k: float(arr[SLOTS.index((reg, k))]) for k in GAIN_KEYS} for reg in REGULATOR_ORDER}
 
@@ -95,7 +116,7 @@ GAIN_HI_MAP = _by_reg(GAIN_HI)
 GAIN_DEFAULT_MAP = _by_reg(GAIN_DEFAULT)
 
 
-def gain_norm_scalar(value: float, reg: str, key: str) -> float:
+def gain_norm_scalar(value: float, reg: RegulatorKey, key: GainKey) -> float:
     """Скалярная нормировка одного коэффициента в [−1, 1]: `clip(log(value/ref)/s)`."""
     ref = GAIN_REF_MAP[reg][key]
     s = GAIN_S_MAP[reg][key]
@@ -107,36 +128,50 @@ def gain_norm_scalar(value: float, reg: str, key: str) -> float:
 # Прямое/обратное отображение z ↔ gain (numpy; тензорные версии — в gain_scheduler)
 # --------------------------------------------------------------------------- #
 
-def to_gain(z, ref=GAIN_REF, s=GAIN_S) -> np.ndarray:
+def to_gain(
+    z: ArrayLike,
+    ref: ArrayLike = GAIN_REF,
+    s: ArrayLike = GAIN_S,
+) -> NDArray[np.float64]:
     """z → абсолютный gain: `ref · exp(s · tanh(z))`."""
-    return ref * np.exp(s * np.tanh(np.asarray(z, dtype=np.float64)))
+    ref_arr = np.asarray(ref, dtype=np.float64)
+    s_arr = np.asarray(s, dtype=np.float64)
+    return ref_arr * np.exp(s_arr * np.tanh(np.asarray(z, dtype=np.float64)))
 
 
-def inv_gain(gain, ref=GAIN_REF, s=GAIN_S) -> np.ndarray:
+def inv_gain(
+    gain: ArrayLike,
+    ref: ArrayLike = GAIN_REF,
+    s: ArrayLike = GAIN_S,
+) -> NDArray[np.float64]:
     """Абсолютный gain → z (инверсия `to_gain`). Клип log-отношения к (−1, 1) перед atanh."""
     gain = np.maximum(np.asarray(gain, dtype=np.float64), 1e-12)
-    ratio = np.log(gain / ref) / s
+    ratio = np.log(gain / np.asarray(ref, dtype=np.float64)) / np.asarray(s, dtype=np.float64)
     ratio = np.clip(ratio, -1.0 + _EPS, 1.0 - _EPS)
     return np.arctanh(ratio)
 
 
-def gain_norm(gain, ref=GAIN_REF, s=GAIN_S) -> np.ndarray:
+def gain_norm(
+    gain: ArrayLike,
+    ref: ArrayLike = GAIN_REF,
+    s: ArrayLike = GAIN_S,
+) -> NDArray[np.float64]:
     """Нормировка gain'а в [−1, 1] для Observation: `clip(log(gain/ref)/s)` (= tanh(z))."""
     gain = np.asarray(gain, dtype=np.float64)
-    ratio = np.log(np.maximum(gain, 1e-12) / ref) / s
+    ratio = np.log(np.maximum(gain, 1e-12) / np.asarray(ref, dtype=np.float64)) / np.asarray(s, dtype=np.float64)
     return np.clip(ratio, -1.0, 1.0)
 
 
-def default_bias() -> np.ndarray:
+def default_bias() -> NDArray[np.float64]:
     """Bias голов (15,), при котором z→bias даёт выход ≈ GAIN_DEFAULT (безопасный старт)."""
     return inv_gain(GAIN_DEFAULT)
 
 
-def slot_index(reg: str, key: str) -> int:
+def slot_index(reg: RegulatorKey, key: GainKey) -> int:
     return SLOTS.index((reg, key))
 
 
-def snapshot() -> dict:
+def snapshot() -> dict[str, Any]:
     """Сериализуемый слепок gain-пространства (входит в normalization.snapshot / чекпоинт)."""
     return {
         "slots": [f"{reg}:{key}" for reg, key in SLOTS],

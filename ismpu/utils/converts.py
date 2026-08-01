@@ -1,25 +1,32 @@
 from dataclasses import dataclass
+from typing import ClassVar, Literal
 
 
 @dataclass
 class Converts:
-    KTS_TO_MS = 0.51444444444
-    MS_TO_KTS = 1.94384449244
+    """Коэффициенты перевода единиц на границе телеметрии и управления."""
 
-    FT_TO_M = 0.3048
+    KTS_TO_MS: ClassVar[float] = 0.51444444444
+    MS_TO_KTS: ClassVar[float] = 1.94384449244
 
-    FTM_TO_MS = FT_TO_M / 60.0   # фут/мин → м/с, точно (стенд шлёт VerticalSpeed в фут/мин)
-    KTS_TO_FTM = 101.2686
+    FT_TO_M: ClassVar[float] = 0.3048
 
-    SM_TO_M = 1609.344       # статутная миля → метры
-    M_TO_SM = 1.0 / 1609.344  # метры → статутные мили
+    FTM_TO_MS: ClassVar[float] = FT_TO_M / 60.0  # VerticalSpeed: фут/мин → м/с
+    KTS_TO_FTM: ClassVar[float] = 101.2686
+
+    SM_TO_M: ClassVar[float] = 1609.344
+    M_TO_SM: ClassVar[float] = 1.0 / 1609.344
 
     @staticmethod
-    def dms_to_float(degrees, minutes, seconds, direction='N'):
-        # Базовый расчет
+    def dms_to_float(
+        degrees: float,
+        minutes: float,
+        seconds: float,
+        direction: Literal["N", "S", "E", "W", "С", "Ю", "В", "З"] = "N",
+    ) -> float:
+        """Преобразовать координату из градусов, минут и секунд в signed degrees."""
         float_val = degrees + (minutes / 60.0) + (seconds / 3600.0)
 
-        # Меняем знак для Южной широты и Западной долготы
         if direction in ['S', 'W', 'Ю', 'З']:
             float_val = -float_val
 

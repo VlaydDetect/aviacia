@@ -11,15 +11,20 @@
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from termcolor import cprint
 
 from ismpu.utils.converts import Converts
 from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import ReferenceTrajectory
-from ismpu.control.runway_tracker import RunwayTracker
+from ismpu.control.runway_tracker import GuidanceState, RunwayTracker
 from ismpu.control.failures import FailureState
 from ismpu.config.requirements import HEADING_HOLD_UNTIL_KTS
+from ismpu.config.regulators import PidMap
+
+if TYPE_CHECKING:
+    from ismpu.envs.ics_sim import Telemetry
 
 ROLLOUT_STARTED_KTS = HEADING_HOLD_UNTIL_KTS
 """Порог, выше которого считаем, что пробег начался. Та же граница (30 узлов), на которой ТЗ
@@ -71,7 +76,7 @@ class ControlsState:
     quality_heading: float = 0.0
     quality_speed: float = 0.0
 
-    def reset(self):
+    def reset(self) -> None:
         """Сброс к нейтральным командам — новый эпизод начинается с чистого состояния.
 
         Критично для `break_control`: он выставляется в конце КАЖДОГО нормального пробега
@@ -85,7 +90,7 @@ class ControlsState:
         self.neutralize_airborne()
         self.quality_lateral = self.quality_heading = self.quality_speed = 0.0
 
-    def neutralize_airborne(self):
+    def neutralize_airborne(self) -> None:
         """Обнулить только воздушные команды.
 
         Нужно, когда воздушный канал не может считать закон (нет пакета стенда): оставить
@@ -96,7 +101,7 @@ class ControlsState:
         self.cmd_throttle_l_rate = self.cmd_throttle_r_rate = 0.0
         self.cmd_throttle_norm = 0.0
 
-    def apply_failures(self, failures_state: FailureState):
+    def apply_failures(self, failures_state: FailureState) -> None:
         """Деградация команд по эффективности актуаторов — **только наземные органы**.
 
         Воздушные команды не трогаются: модель отказов описывает потерю авторитета органов
@@ -114,7 +119,7 @@ class ControlsState:
         self.cmd_rev_r *= failures_state.reverse_right_eff
         self.cmd_rev_r *= failures_state.thrust_right_eff
 
-    def clamp_all(self, pids: dict[str, PIDController]):
+    def clamp_all(self, pids: PidMap) -> None:
         """Финальные пределы наземных команд — после дифференциального микса.
 
         Воздушные команды сюда не входят: их зажимают собственные регуляторы захода
@@ -128,7 +133,7 @@ class ControlsState:
         self.cmd_rev_l = pids['pid_rev_l'].clamp(self.cmd_rev_l)
         self.cmd_rev_r = pids['pid_rev_r'].clamp(self.cmd_rev_r)
 
-    def neutralize(self):
+    def neutralize(self) -> None:
         """Обнуляет все органы управления. Отправку делает вызывающий через `ICSSim.step`.
 
         Нейтральная команда, а не молчание: если просто перестать слать, последнее отклонение
@@ -146,18 +151,19 @@ class LongitudinalChannel:
     """Управление скоростью по эталонной кривой. Телеметрию получает параметром, не читает сам."""
 
     def __init__(self, pid_brake_l: PIDController, pid_brake_r: PIDController,
-                 pid_rev_l: PIDController, pid_rev_r: PIDController, trajectory: ReferenceTrajectory):
-        self.trajectory = trajectory
+                 pid_rev_l: PIDController, pid_rev_r: PIDController,
+                 trajectory: ReferenceTrajectory) -> None:
+        self.trajectory: ReferenceTrajectory = trajectory
 
-        self.pid_brake_l = pid_brake_l
-        self.pid_brake_r = pid_brake_r
-        self.pid_rev_l = pid_rev_l
-        self.pid_rev_r = pid_rev_r
+        self.pid_brake_l: PIDController = pid_brake_l
+        self.pid_brake_r: PIDController = pid_brake_r
+        self.pid_rev_l: PIDController = pid_rev_l
+        self.pid_rev_r: PIDController = pid_rev_r
 
-        self.traveled_distance_m = 0.0
-        self.last_diagnostics = {}
-        self.w_lon = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
-        self.rollout_started = False
+        self.traveled_distance_m: float = 0.0
+        self.last_diagnostics: dict[str, float] = {}
+        self.w_lon: float = 1.0
+        self.rollout_started: bool = False
         """Защёлка «пробег действительно начался».
 
         Без неё условие «скорость руления достигнута» тривиально истинно у неподвижного ВС
@@ -167,7 +173,7 @@ class LongitudinalChannel:
 
         print("[LongitudinalChannel] Запуск продольного канала.")
 
-    def calc_commands(self, dt: float, state: ControlsState, telemetry):
+    def calc_commands(self, dt: float, state: ControlsState, telemetry: "Telemetry") -> None:
         # `valid` проверяется ПЕРВЫМ и отдельно от полей: бэкенд стенда при обрыве связи отдаёт
         # нули, а не None, и проверка «поле is None» пропустила бы groundspeed = 0.0 дальше —
         # где оно тут же выглядело бы как «достигнута скорость руления».
@@ -233,21 +239,27 @@ class LongitudinalChannel:
 class LateralChannel:
     """Удержание оси ВПП. Телеметрию получает параметром, не читает сам."""
 
-    def __init__(self, pid: PIDController, tracker: RunwayTracker, steering_brake_gain=0.4,
-                 steering_rev_gain=0.0):
-        self.pid = pid
+    def __init__(self, pid: PIDController, tracker: RunwayTracker,
+                 steering_brake_gain: float = 0.4,
+                 steering_rev_gain: float = 0.0) -> None:
+        self.pid: PIDController = pid
 
-        self.tracker = tracker
-        self.steering_brake_gain = steering_brake_gain
-        self.steering_rev_gain = steering_rev_gain
-        self.w_lat = 1.0  # вес влияния канала (актор, §6); 1.0 = классика
-        self.last_diagnostics = {}
-        self.last_guidance = None
+        self.tracker: RunwayTracker = tracker
+        self.steering_brake_gain: float = steering_brake_gain
+        self.steering_rev_gain: float = steering_rev_gain
+        self.w_lat: float = 1.0
+        self.last_diagnostics: dict[str, float] = {}
+        self.last_guidance: GuidanceState | None = None
         self._last_guidance_telemetry_id: int | None = None
 
         print("[LateralChannel] Запуск латерального канала.")
 
-    def _guidance(self, telemetry, heading, groundspeed_ms):
+    def _guidance(
+        self,
+        telemetry: "Telemetry",
+        heading: float,
+        groundspeed_ms: float,
+    ) -> GuidanceState | None:
         """Guidance по тому, что даёт стенд. → словарь guidance или None, если данных нет.
 
         Стенд сообщает курс ВПП и боковое отклонение напрямую — тогда собственная геодезия не
@@ -259,12 +271,12 @@ class LateralChannel:
         """
         if self._last_guidance_telemetry_id == id(telemetry):
             return self.last_guidance
-        runway_heading = getattr(telemetry, "runway_heading_true_deg", None)
-        lateral_deviation = getattr(telemetry, "lateral_deviation_m", None)
+        runway_heading = telemetry.runway_heading_true_deg
+        lateral_deviation = telemetry.lateral_deviation_m
         # Совместимость синтетических кадров: production backend всегда
         # заполняет runway_heading_true_deg общими константами UUEE 06R.
         if runway_heading is None and lateral_deviation is not None:
-            runway_heading = getattr(telemetry, "runway_heading_deg", None)
+            runway_heading = telemetry.runway_heading_deg
             if runway_heading is not None:
                 return self.tracker.guidance_from_deviation(
                     heading, runway_heading, lateral_deviation, groundspeed_ms)
@@ -277,14 +289,14 @@ class LateralChannel:
         self._last_guidance_telemetry_id = id(telemetry)
         return result
 
-    def guidance_for(self, telemetry):
+    def guidance_for(self, telemetry: "Telemetry") -> GuidanceState | None:
         """Единый GuidanceState текущего кадра для control/observation/reward."""
         if not telemetry.valid:
             return None
         return self._guidance(
             telemetry, telemetry.heading_true_deg, telemetry.groundspeed_ms)
 
-    def calc_commands(self, dt: float, state: ControlsState, telemetry):
+    def calc_commands(self, dt: float, state: ControlsState, telemetry: "Telemetry") -> None:
         heading = telemetry.heading_true_deg
         groundspeed_ms = telemetry.groundspeed_ms
         # `valid` — первым: см. комментарий в LongitudinalChannel.calc_commands.

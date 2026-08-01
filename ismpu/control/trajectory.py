@@ -28,21 +28,23 @@ class ReferenceTrajectory:
     """Генератор эталонной кривой скорости (Колокол Гаусса)."""
 
     def __init__(self, v_start_kts: float, v_target_kts: float, braking_distance_m: float,
-                 law: VelocityLaw = VelocityLaw.GAUSS_BELL):
-        self.v_start_ms = v_start_kts * Converts.KTS_TO_MS
-        self.v_target_ms = v_target_kts * Converts.KTS_TO_MS
-        self.distance = braking_distance_m
+                 law: VelocityLaw = VelocityLaw.GAUSS_BELL) -> None:
+        self.v_start_ms: float = v_start_kts * Converts.KTS_TO_MS
+        self.v_target_ms: float = v_target_kts * Converts.KTS_TO_MS
+        self.distance: float = braking_distance_m
 
-        self.law = law
+        self.law: VelocityLaw = law
+        self.two_b_squared: float
+        self.a_req: float
 
         match law:
             case VelocityLaw.GAUSS_BELL:
+                # Параметр выбран так, чтобы кривая прошла через v_target на distance.
                 # f(x) = v_start * exp(-x^2 / (2 * b^2))
-                # Математический расчет коэффициента 2*b^2 для точного прохождения через точку v_target на дистанции distance
                 self.two_b_squared = (self.distance ** 2) / np.log(self.v_start_ms / self.v_target_ms)
 
             case VelocityLaw.EQUALLY_SLOW:
-                # Вычисление требуемого постоянного отрицательного ускорения (модуль)
+                # Постоянное замедление из v² = v₀² - 2as.
                 # Формула: a = (v_start^2 - v_tgt^2) / (2 * S)
                 self.a_req = (self.v_start_ms ** 2 - self.v_target_ms ** 2) / (2.0 * self.distance)
 

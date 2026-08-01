@@ -24,7 +24,9 @@ annealing LR, KL-early-stop. Логирование по каждому терм
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, asdict
+from typing import Any, TypeAlias
 
 import numpy as np
 import torch
@@ -34,10 +36,15 @@ import torch.nn.functional as F
 from ismpu.agent.gain_scheduler import NPGS, POLICY_DIM, N_GAIN_OUT, phase_labels_from_groundspeed_kts
 from ismpu.agent.normalization import SPEED_SCALE
 from ismpu.envs.observation import FEATURE_NAMES, GAIN_FEATURE_INDICES
+from ismpu.envs.rollout_env import RolloutEnv
+from ismpu.envs.scenario import Scenario
 from ismpu.utils.converts import Converts
 
 _GS_IDX = FEATURE_NAMES.index("ground_speed")   # индекс путевой скорости в кадре obs
 _GAIN_FEAT_IDX = GAIN_FEATURE_INDICES           # gain-признаки (лог-норма прошлых коэффициентов)
+
+PPOMetrics: TypeAlias = dict[str, float | int | bool]
+ScenarioProvider: TypeAlias = Callable[[], Scenario]
 
 
 @dataclass
@@ -64,26 +71,33 @@ class PPOConfig:
     lambda_phase: float = 0.0       # вспом. задача фазы движения (§10)
     device: str = "cuda"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class RolloutBuffer:
     """Плоский буфер одного env: obs-окна, сырые действия, logp/value/reward/done."""
 
-    def __init__(self, size: int, window: int, obs_dim: int, act_dim: int, device):
-        self.device = device
-        self.obs = torch.zeros((size, window, obs_dim), device=device)
-        self.actions = torch.zeros((size, act_dim), device=device)     # сырые u (до ограничения)
-        self.logp = torch.zeros(size, device=device)
-        self.values = torch.zeros(size, device=device)
-        self.rewards = torch.zeros(size, device=device)
-        self.dones = torch.zeros(size, device=device)
-        self.advantages = torch.zeros(size, device=device)
-        self.returns = torch.zeros(size, device=device)
-        self.size = size
+    def __init__(
+        self,
+        size: int,
+        window: int,
+        obs_dim: int,
+        act_dim: int,
+        device: torch.device,
+    ) -> None:
+        self.device: torch.device = device
+        self.obs: torch.Tensor = torch.zeros((size, window, obs_dim), device=device)
+        self.actions: torch.Tensor = torch.zeros((size, act_dim), device=device)  # сырые u
+        self.logp: torch.Tensor = torch.zeros(size, device=device)
+        self.values: torch.Tensor = torch.zeros(size, device=device)
+        self.rewards: torch.Tensor = torch.zeros(size, device=device)
+        self.dones: torch.Tensor = torch.zeros(size, device=device)
+        self.advantages: torch.Tensor = torch.zeros(size, device=device)
+        self.returns: torch.Tensor = torch.zeros(size, device=device)
+        self.size: int = size
 
-    def compute_gae(self, next_value: float, next_done: float, gamma: float, lam: float):
+    def compute_gae(self, next_value: float, next_done: float, gamma: float, lam: float) -> None:
         adv, lastgaelam = self.advantages, 0.0
         for t in reversed(range(self.size)):
             if t == self.size - 1:
@@ -100,29 +114,37 @@ class RolloutBuffer:
 class PPOTrainer:
     """Собирает rollout из среды и обновляет NPGS многокомпонентным PPO-loss."""
 
-    def __init__(self, net: NPGS, config: PPOConfig | None = None, total_updates: int | None = None):
-        self.cfg = config or PPOConfig()
+    def __init__(
+        self,
+        net: NPGS,
+        config: PPOConfig | None = None,
+        total_updates: int | None = None,
+    ) -> None:
+        self.cfg: PPOConfig = config or PPOConfig()
         if self.cfg.device == "cuda" and not torch.cuda.is_available():
             self.cfg.device = "cpu"
-        self.device = torch.device(self.cfg.device)
-        self.net = net.to(self.device)
-        self.optimizer = torch.optim.AdamW(self.net.parameters(), lr=self.cfg.lr, eps=1e-5)
-        self.total_updates = total_updates
-        self.window = net.cfg.window
-        self.obs_dim = net.cfg.obs_dim
-        self.global_step = 0
-        self.update_idx = 0
-        self.history: list[dict] = []
+        self.device: torch.device = torch.device(self.cfg.device)
+        self.net: NPGS = net.to(self.device)
+        self.optimizer: torch.optim.AdamW = torch.optim.AdamW(
+            self.net.parameters(), lr=self.cfg.lr, eps=1e-5
+        )
+        self.total_updates: int | None = total_updates
+        self.window: int = net.cfg.window
+        self.obs_dim: int = net.cfg.obs_dim
+        self.global_step: int = 0
+        self.update_idx: int = 0
+        self.history: list[PPOMetrics] = []
         self.sft_reference: NPGS | None = None   # замороженная SFT-копия для L_anchor (Stage C)
         # Состояние потоковой среды (между rollout'ами не теряем эпизод).
         self._next_obs: np.ndarray | None = None
         self._next_done: float = 1.0
+        self._buffer: RolloutBuffer | None = None
 
     # ------------------------------------------------------------------ #
     # Сбор rollout
     # ------------------------------------------------------------------ #
 
-    def collect(self, env, scenario_provider) -> dict:
+    def collect(self, env: RolloutEnv, scenario_provider: ScenarioProvider) -> PPOMetrics:
         """Шагает средой `rollout_len` тактов (сброс по завершению эпизода). → статистика."""
         cfg = self.cfg
         buf = RolloutBuffer(cfg.rollout_len, self.window, self.obs_dim, POLICY_DIM, self.device)
@@ -151,7 +173,7 @@ class PPOTrainer:
             self.global_step += 1
 
             rep = info.get("shield")
-            if rep is not None and getattr(rep, "active", False):
+            if rep is not None and rep.active:
                 shield_hits += 1
             comp = info.get("reward_components")
             if comp is not None:
@@ -173,7 +195,6 @@ class PPOTrainer:
         buf.compute_gae(float(next_value.item()), self._next_done, cfg.gamma, cfg.gae_lambda)
         self._buffer = buf
 
-        n = max(1, len(ep_returns))
         denom = max(1, cfg.rollout_len)
         return {
             "ep_return_mean": float(np.mean(ep_returns)) if ep_returns else float("nan"),
@@ -187,8 +208,10 @@ class PPOTrainer:
     # Обновление политики
     # ------------------------------------------------------------------ #
 
-    def update(self) -> dict:
+    def update(self) -> PPOMetrics:
         cfg, buf = self.cfg, self._buffer
+        if buf is None:
+            raise RuntimeError("Сначала необходимо собрать rollout методом collect()")
         self.net.train()
 
         if cfg.anneal_lr and self.total_updates:
@@ -303,14 +326,20 @@ class PPOTrainer:
     # Одна итерация PPO (сбор + апдейт) и цикл обучения
     # ------------------------------------------------------------------ #
 
-    def step(self, env, scenario_provider) -> dict:
+    def step(self, env: RolloutEnv, scenario_provider: ScenarioProvider) -> PPOMetrics:
         roll = self.collect(env, scenario_provider)
         upd = self.update()
         metrics = {"update": self.update_idx, "global_step": self.global_step, **roll, **upd}
         self.history.append(metrics)
         return metrics
 
-    def train(self, env, scenario_provider, total_updates: int, callback=None) -> list[dict]:
+    def train(
+        self,
+        env: RolloutEnv,
+        scenario_provider: ScenarioProvider,
+        total_updates: int,
+        callback: Callable[[PPOMetrics], None] | None = None,
+    ) -> list[PPOMetrics]:
         self.total_updates = total_updates
         for _ in range(total_updates):
             metrics = self.step(env, scenario_provider)

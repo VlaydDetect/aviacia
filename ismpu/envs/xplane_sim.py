@@ -20,7 +20,7 @@ from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.envs.ics_sim import Telemetry, TelemetryExtensions
 from ismpu.envs.scenario import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
 from ismpu.envs.sim_interface import (
-    ApproachData, ShutdownReport, XPlaneDiagnostics,
+    ApproachData, ShutdownReport, XPlaneDiagnostics, SimInterface, StartMode,
 )
 from ismpu.envs.weather import WeatherState
 from ismpu.io import datarefs as dr
@@ -38,24 +38,24 @@ SUPPORTED_XPLANE_ROLLOUT_FAILURES = frozenset({
 })
 
 
-class XPlaneSim:
+class XPlaneSim(SimInterface):
     backend_name = "xplane"
 
     def __init__(
-        self,
-        connector: XPlaneConnector | None = None,
-        *,
-        ip: str = "127.0.0.1",
-        port: int = 49000,
-        xplane_root: str | Path | None = None,
-        aircraft_profile: AircraftProfile = A330_300,
-        runway_profile: RunwayProfile = UUEE_06R,
-        stale_after_s: float = 0.35,
-        subscription_timeout_s: float = 0.0,
-        reload_each_reset: bool = True,
-        ready_timeout_s: float = 25.0,
-        ils_verify_timeout_s: float = 3.0,
-        settle_s: float = 0.2,
+            self,
+            connector: XPlaneConnector | None = None,
+            *,
+            ip: str = "127.0.0.1",
+            port: int = 49000,
+            xplane_root: str | Path | None = None,
+            aircraft_profile: AircraftProfile = A330_300,
+            runway_profile: RunwayProfile = UUEE_06R,
+            stale_after_s: float = 0.35,
+            subscription_timeout_s: float = 0.0,
+            reload_each_reset: bool = True,
+            ready_timeout_s: float = 25.0,
+            ils_verify_timeout_s: float = 3.0,
+            settle_s: float = 0.2,
     ) -> None:
         self.connector = connector or XPlaneConnector(ip=ip, port=port)
         self.profile = aircraft_profile
@@ -114,11 +114,11 @@ class XPlaneSim:
         )
 
     def reset(
-        self,
-        scenario: Scenario | None = None,
-        *,
-        start: str | None = None,
-    ) -> Telemetry:
+            self,
+            scenario: "Scenario | None" = None,
+            *,
+            start: StartMode | None = None,
+    ) -> "Telemetry":
         if self._closed:
             raise RuntimeError("XPlaneSim уже закрыт")
         scenario = scenario or Scenario.from_preset("default")
@@ -177,8 +177,8 @@ class XPlaneSim:
             self._last_telemetry = Telemetry.invalid()
             return self._last_telemetry
         if (
-            self._sensor_noise.dropout_prob > 0.0
-            and self._random.random() < self._sensor_noise.dropout_prob
+                self._sensor_noise.dropout_prob > 0.0
+                and self._random.random() < self._sensor_noise.dropout_prob
         ):
             self._last_telemetry = Telemetry.invalid()
             return self._last_telemetry
@@ -368,8 +368,8 @@ class XPlaneSim:
     def teleport_approach(self, setup: ApproachSetup) -> None:
         altitude_m = setup.radio_altitude_ft * Converts.FT_TO_M
         actual_glideslope_deg = (
-            setup.glideslope_deg
-            + setup.gs_offset_dots * APPROACH_DEFAULT.gs_full_scale_deg
+                setup.glideslope_deg
+                + setup.gs_offset_dots * APPROACH_DEFAULT.gs_full_scale_deg
         )
         distance_m = altitude_m / math.tan(math.radians(actual_glideslope_deg))
         lat, lon = self.runway.point_on_centerline(distance_m)
@@ -391,17 +391,17 @@ class XPlaneSim:
         )
 
     def _set_position_and_velocity(
-        self,
-        *,
-        lat: float,
-        lon: float,
-        elevation_m: float,
-        heading_deg: float,
-        pitch_deg: float,
-        speed_knots: float,
-        vertical_speed_fpm: float,
-        flap_ratio: float,
-        speedbrakes_ratio: float,
+            self,
+            *,
+            lat: float,
+            lon: float,
+            elevation_m: float,
+            heading_deg: float,
+            pitch_deg: float,
+            speed_knots: float,
+            vertical_speed_fpm: float,
+            flap_ratio: float,
+            speedbrakes_ratio: float,
     ) -> None:
         self.connector.send_position(
             lat=lat,
@@ -515,15 +515,15 @@ class XPlaneSim:
 
     def _capture_overrides(self) -> None:
         for name in (
-            dr.OVERRIDE_ROLL, dr.OVERRIDE_PITCH, dr.OVERRIDE_HEADING,
-            dr.OVERRIDE_THROTTLES, dr.OVERRIDE_TOE_BRAKES,
+                dr.OVERRIDE_ROLL, dr.OVERRIDE_PITCH, dr.OVERRIDE_HEADING,
+                dr.OVERRIDE_THROTTLES, dr.OVERRIDE_TOE_BRAKES,
         ):
             self.connector.send_dref(name, 1.0)
 
     def _release_overrides(self) -> None:
         for name in (
-            dr.OVERRIDE_ROLL, dr.OVERRIDE_PITCH, dr.OVERRIDE_HEADING,
-            dr.OVERRIDE_THROTTLES, dr.OVERRIDE_TOE_BRAKES,
+                dr.OVERRIDE_ROLL, dr.OVERRIDE_PITCH, dr.OVERRIDE_HEADING,
+                dr.OVERRIDE_THROTTLES, dr.OVERRIDE_TOE_BRAKES,
         ):
             self.connector.send_dref(name, 0.0)
 

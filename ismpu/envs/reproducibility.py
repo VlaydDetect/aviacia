@@ -19,6 +19,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
+from typing import Any
+
+from ismpu.envs.scenario import Scenario
+from ismpu.envs.weather import WeatherState
 
 BENCH_WIND = "bench_wind_realization"
 BENCH_PRECIPITATION = "bench_precipitation"
@@ -32,19 +36,19 @@ DEFAULT_MIN_REPLICAS = 3
 реплик» отличается от «единственной попытки»; это порог отчётности, а не статистика."""
 
 
-def stochastic_sources(weather) -> tuple[str, ...]:
+def stochastic_sources(weather: WeatherState) -> tuple[str, ...]:
     """Источники случайности на стороне стенда, активные при данных условиях.
 
     Мы задаём (точнее — просим Заказчика выставить) их **интенсивность**, но не реализацию:
     сам процесс разыгрывает модель стенда.
     """
     sources: list[str] = []
-    if abs(getattr(weather, "wind_speed_kts", 0.0)) >= WIND_STOCHASTIC_KTS:
+    if abs(weather.wind_speed_kts) >= WIND_STOCHASTIC_KTS:
         sources.append(BENCH_WIND)
-    if getattr(weather, "rain_pct", 0.0) > 0.0:
+    if weather.rain_pct > 0.0:
         sources.append(BENCH_PRECIPITATION)
-    if getattr(weather, "runway_friction", 0.0) > 0.0:
-        # Скользкая полоса — срыв сцепления, а он по своей природе разыгрывается, а не считается.
+    if weather.runway_friction > 0.0:
+        # Реализацию потери сцепления разыгрывает модель стенда, а не код сценария.
         sources.append(BENCH_LOW_FRICTION)
     return tuple(sources)
 
@@ -53,8 +57,8 @@ def stochastic_sources(weather) -> tuple[str, ...]:
 class ReproducibilityContract:
     """Что в эпизоде детерминировано, что нет, и сколько реплик из-за этого нужно."""
     scenario_id: str
-    deterministic_inputs: dict = field(default_factory=dict)
-    external_stochastic_sources: tuple = ()
+    deterministic_inputs: dict[str, Any] = field(default_factory=dict)
+    external_stochastic_sources: tuple[str, ...] = ()
     replica_validation_required: bool = False
     min_replicas: int = 1
 
@@ -63,24 +67,28 @@ class ReproducibilityContract:
         """Даст ли повторный прогон с тем же сидом ту же траекторию."""
         return not self.external_stochastic_sources
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def contract_for(scenario, *, min_replicas: int = DEFAULT_MIN_REPLICAS) -> ReproducibilityContract:
+def contract_for(
+    scenario: Scenario,
+    *,
+    min_replicas: int = DEFAULT_MIN_REPLICAS,
+) -> ReproducibilityContract:
     """Строит контракт воспроизводимости для сценария."""
-    weather = getattr(scenario, "weather", None)
-    sources = stochastic_sources(weather) if weather is not None else ()
+    weather = scenario.weather
+    sources = stochastic_sources(weather)
 
     deterministic = {
-        "scenario_seed": getattr(scenario, "seed", None),
+        "scenario_seed": scenario.seed,
         "expected_weather": _as_dict(weather),
-        "failures": [f.name for f in (getattr(scenario, "failures", ()) or ())],
-        "control_preset": getattr(getattr(scenario, "control", None), "name", None),
+        "failures": [failure.name for failure in scenario.failures],
+        "control_preset": scenario.control.name,
     }
 
     return ReproducibilityContract(
-        scenario_id=getattr(scenario, "scenario_id", "?"),
+        scenario_id=scenario.scenario_id,
         deterministic_inputs=deterministic,
         external_stochastic_sources=sources,
         replica_validation_required=bool(sources),
@@ -88,12 +96,16 @@ def contract_for(scenario, *, min_replicas: int = DEFAULT_MIN_REPLICAS) -> Repro
     )
 
 
-def required_replicas(scenario, *, min_replicas: int = DEFAULT_MIN_REPLICAS) -> int:
+def required_replicas(scenario: Scenario, *, min_replicas: int = DEFAULT_MIN_REPLICAS) -> int:
     """Сколько раз прогнать сценарий, чтобы результат приёмки что-то значил."""
     return contract_for(scenario, min_replicas=min_replicas).min_replicas
 
 
-def worst_replica(results: list[dict], *, key: str = "total_loss") -> dict | None:
+def worst_replica(
+    results: list[dict[str, Any]],
+    *,
+    key: str = "total_loss",
+) -> dict[str, Any] | None:
     """Худшая реплика по заданной метрике.
 
     Приёмка смотрит именно на худшую, а не на среднюю: ТЗ задаёт пределы как границы, и
@@ -105,7 +117,7 @@ def worst_replica(results: list[dict], *, key: str = "total_loss") -> dict | Non
     return max(finite, key=lambda r: r[key])
 
 
-def _as_dict(value):
+def _as_dict(value: object) -> dict[str, Any] | str | None:
     if value is None:
         return None
     try:

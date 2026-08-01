@@ -16,6 +16,7 @@
 
 from enum import Enum
 from dataclasses import dataclass
+from collections.abc import Iterable
 
 
 class FailureMode(Enum):
@@ -59,13 +60,15 @@ class FailureState:
 
 
 class FailureManager:
-    def __init__(self):
+    """Проецирует набор дискретных отказов в эффективности исполнительных органов."""
+
+    def __init__(self) -> None:
+        self.state: FailureState = FailureState()
+
+    def reset(self) -> None:
         self.state = FailureState()
 
-    def reset(self):
-        self.state = FailureState()
-
-    def sync(self, modes) -> FailureState:
+    def sync(self, modes: Iterable[FailureMode]) -> FailureState:
         """Привести состояние ровно к набору `modes` (то, что сообщил стенд).
 
         Пересборка с нуля, а не доначисление: отказ может быть **снят** (борт восстановил канал),
@@ -76,7 +79,7 @@ class FailureManager:
             self.activate(mode)
         return self.state
 
-    def activate(self, mode):
+    def activate(self, mode: FailureMode) -> None:
         match mode:
             case FailureMode.NWS_FAIL:
                 self.state.steering_eff = 0.0

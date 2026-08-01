@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ismpu.config.aircraft_profiles import get_aircraft_profile
 from ismpu.config.runway_profiles import get_runway_profile
 from ismpu.io.ics_connector import LISTEN_IP_ANY
+from ismpu.envs.sim_interface import SimInterface
 
 
 def build_sim(
@@ -17,8 +19,9 @@ def build_sim(
     xplane_root: str | Path | None = None,
     aircraft_profile: str = "a330-300",
     runway_profile: str = "uuee-06r",
-    **kwargs,
-):
+    **kwargs: Any,
+) -> SimInterface:
+    """Создать явно выбранный backend с общим контрактом :class:`SimInterface`."""
     kind = backend.lower()
     if kind == "ics":
         from ismpu.envs.ics_sim import ICSSim

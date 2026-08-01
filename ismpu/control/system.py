@@ -15,7 +15,7 @@
 (`approach_channel.pids`) и настраиваются статически.
 """
 
-from typing import Optional
+from typing import ClassVar, Optional
 from dataclasses import dataclass
 
 from ismpu.control.pid import PIDController
@@ -24,7 +24,7 @@ from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
 from ismpu.control.approach import ApproachChannel
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
-from ismpu.control.tolerance import evaluate_approach_tolerances
+from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerances
 from ismpu.control.failures import FailureManager, FailureMode
 from ismpu.control.flight import (
     FlightSegment, ApproachRefused, initial_segment, segment_is_decidable, touched_down,
@@ -34,6 +34,9 @@ from ismpu.config.approach import ApproachConfig
 from ismpu.config.constants import INITIAL_SPEED_KTS, TARGET_SPEED_KTS
 from ismpu.config.requirements import GO_AROUND_CONFIRM_TICKS
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
+from ismpu.envs.ics_sim import Telemetry
+from ismpu.envs.sim_interface import SimInterface
+from ismpu.config.regulators import PidMap
 
 
 @dataclass
@@ -65,34 +68,48 @@ class ControllingSystem:
     пакета стенда нельзя.
     """
 
-    def __init__(self, sim=None, approach_config: Optional[ApproachConfig] = None):
-        self.sim = sim
+    def __init__(
+        self,
+        sim: SimInterface | None = None,
+        approach_config: Optional[ApproachConfig] = None,
+    ) -> None:
+        self.sim: SimInterface | None = sim
 
-        self.failures = FailureManager()
+        self.failures: FailureManager = FailureManager()
 
-        self.pids = dict()
-        self.state = ControlsState()
-        self.last_telemetry = None
+        self.pids: PidMap = {}
+        self.state: ControlsState = ControlsState()
+        self.last_telemetry: Telemetry | None = None
+        # Каналы создаются в setup(); аннотации фиксируют их публичный контракт.
+        self.lateral_channel: LateralChannel
+        self.longitudinal_channel: LongitudinalChannel
 
-        self.segment = FlightSegment.ROLLOUT
-        self._segment_decided = True
+        self.segment: FlightSegment = FlightSegment.ROLLOUT
+        self._segment_decided: bool = True
         """Определён ли участок окончательно. `False` только между `begin_flight` по
         непригодному кадру и первым пригодным — см. `begin_flight`."""
-        self.approach_channel = ApproachChannel(approach_config)
+        self.approach_channel: ApproachChannel = ApproachChannel(approach_config)
         self.abort_reason: Optional[str] = None
 
         # Уход на второй круг (fallback в воздухе). `go_around` активен → заход не ведётся.
         self.go_around: Optional[GoAroundManeuver] = None
         self.go_around_reason: Optional[str] = None
-        self.tolerance_report = None
-        self.approach_criteria = ApproachCriteriaMonitor()
+        self.tolerance_report: ToleranceReport | None = None
+        self.approach_criteria: ApproachCriteriaMonitor = ApproachCriteriaMonitor()
         """Отчёт монитора допусков за последний такт захода (диагностика/логи)."""
-        self._violation_ticks = 0
+        self._violation_ticks: int = 0
         """Дебаунс триггера ухода: сколько тактов подряд допуски не выполняются."""
 
-    def setup(self, pids: dict[str, PIDController],
-              lookahead_min=15.0, lookahead_gain=1.5, xte_gain=1.0,
-              steering_brake_gain=0.4, steering_rev_gain=0.0, law: VelocityLaw = VelocityLaw.GAUSS_BELL):
+    def setup(
+        self,
+        pids: PidMap,
+        lookahead_min: float = 15.0,
+        lookahead_gain: float = 1.5,
+        xte_gain: float = 1.0,
+        steering_brake_gain: float = 0.4,
+        steering_rev_gain: float = 0.0,
+        law: VelocityLaw = VelocityLaw.GAUSS_BELL,
+    ) -> None:
         self.pids = pids
 
         # Настройка сценария = начало эпизода: команды сбрасываются вместе с PID и каналами.
@@ -128,27 +145,36 @@ class ControllingSystem:
         self.approach_channel = ApproachChannel(config)
         return self.approach_channel
 
-    def set_longitudinal_params(self, lookahead_min: float, lookahead_gain: float, xte_gain: float):
-        self.longitudinal_channel.lookahead_min = lookahead_min
-        self.longitudinal_channel.lookahead_gain = lookahead_gain
-        self.longitudinal_channel.xte_gain = xte_gain
+    def set_longitudinal_params(
+        self,
+        lookahead_min: float,
+        lookahead_gain: float,
+        xte_gain: float,
+    ) -> None:
+        """Обновить параметры геометрического наведения латерального канала.
 
-    def set_lateral_params(self, steering_brake_gain: float, steering_rev_gain: float):
+        Имя сохранено для совместимости с ранним API конфигурации.
+        """
+        self.lateral_channel.tracker.lookahead_min = lookahead_min
+        self.lateral_channel.tracker.lookahead_gain = lookahead_gain
+        self.lateral_channel.tracker.xte_gain = xte_gain
+
+    def set_lateral_params(self, steering_brake_gain: float, steering_rev_gain: float) -> None:
         self.lateral_channel.steering_brake_gain = steering_brake_gain
         self.lateral_channel.steering_rev_gain = steering_rev_gain
 
-    def set_channel_weights(self, w_lon: float, w_lat: float):
+    def set_channel_weights(self, w_lon: float, w_lat: float) -> None:
         """Веса влияния каналов (актор, §6): множители к выходам каналов. 1.0 = классика."""
         self.longitudinal_channel.w_lon = w_lon
         self.lateral_channel.w_lat = w_lat
 
-    def set_velocity_law(self, law: VelocityLaw):
+    def set_velocity_law(self, law: VelocityLaw) -> None:
         self.longitudinal_channel.trajectory.law = law
 
-    def apply_failure(self, mode: FailureMode):
+    def apply_failure(self, mode: FailureMode) -> None:
         self.failures.activate(mode)
 
-    def sync_failures(self, telemetry) -> None:
+    def sync_failures(self, telemetry: Telemetry | None) -> None:
         """Привести модель отказов к тому, что сообщает борт (`ICSInputs.Fault*`).
 
         Отказы читаются, а не задаются: их источник — стенд. Пресет сценария выставляет лишь
@@ -165,11 +191,11 @@ class ControllingSystem:
         """
         if telemetry is None or not telemetry.valid:
             return
-        if not getattr(telemetry, "faults_available", False):
+        if not telemetry.faults_available:
             return
         self.failures.sync(telemetry.faults)
 
-    def begin_flight(self, telemetry) -> FlightSegment:
+    def begin_flight(self, telemetry: Telemetry | None) -> FlightSegment:
         """Определить стартовый участок по кадру стенда. → выбранный участок.
 
         Вызывается в начале прогона. Если стенд сообщает, что ВС в воздухе и выше порога приёма
@@ -195,7 +221,7 @@ class ControllingSystem:
             self.approach_channel.reset()
         return self.segment
 
-    def _settle_segment(self, telemetry) -> None:
+    def _settle_segment(self, telemetry: Telemetry) -> None:
         """Досчитать отложенное решение об участке на первом пригодном кадре."""
         if self._segment_decided or not segment_is_decidable(telemetry):
             return
@@ -208,7 +234,12 @@ class ControllingSystem:
         self.segment = FlightSegment.APPROACH
         self.approach_channel.reset()
 
-    def control_step(self, dt: float, telemetry=None, send: bool = True) -> bool:
+    def control_step(
+        self,
+        dt: float,
+        telemetry: Telemetry | None = None,
+        send: bool = True,
+    ) -> bool:
         """Такт управления. → True, если управление окончено (или телеметрия невалидна).
 
         `telemetry=None` — кадр берётся сам: сначала результат прошлого `sim.step` (он уже свежий),
@@ -236,7 +267,7 @@ class ControllingSystem:
 
         return False
 
-    def _approach_step(self, dt: float, telemetry) -> bool:
+    def _approach_step(self, dt: float, telemetry: Telemetry) -> bool:
         """Такт воздушного участка. → True, если управлять больше нечем.
 
         Касание проверяется **до** расчёта закона: после обжатия основных стоек воздушный закон
@@ -248,8 +279,8 @@ class ControllingSystem:
         if self.go_around is not None:
             return self._go_around_step(dt, telemetry)
 
-        criteria_ra = getattr(
-            getattr(telemetry, "approach_inputs", None), "RadioAltitude", None)
+        approach = telemetry.approach_inputs
+        criteria_ra = approach.RadioAltitude if approach is not None else None
         if (
             criteria_ra is not None
             and criteria_ra <= self.approach_criteria.config.cutoff_radio_altitude_ft
@@ -310,7 +341,11 @@ class ControllingSystem:
         """
         return self.state.cmd_rev_l == 0.0 and self.state.cmd_rev_r == 0.0
 
-    def _should_go_around(self, telemetry, report) -> Optional[str]:
+    def _should_go_around(
+        self,
+        telemetry: Telemetry,
+        report: ToleranceReport | None,
+    ) -> Optional[str]:
         """Нужно ли уходить на второй круг по этому такту. → причина или `None`.
 
         Только **в воздухе** (участок захода) и только **выше высоты решения** (30 м): на земле и
@@ -333,7 +368,7 @@ class ControllingSystem:
             return None
         return f"допуски захода не выполнены ({', '.join(report.violations)})"
 
-    def _start_go_around(self, reason: str, telemetry) -> None:
+    def _start_go_around(self, reason: str, telemetry: Telemetry) -> None:
         """Начать уход: зафиксировать состояние манёвра и высоту входа."""
         ra = telemetry.radio_altitude_ft if telemetry is not None else None
         self.go_around = GoAroundManeuver(reason=reason, entry_radio_altitude_ft=ra or 0.0)
@@ -341,7 +376,7 @@ class ControllingSystem:
         self._violation_ticks = 0
         print(f"[ControllingSystem] Уход на второй круг: {reason}")
 
-    def _go_around_step(self, dt: float, telemetry) -> bool:
+    def _go_around_step(self, dt: float, telemetry: Telemetry) -> bool:
         """Такт манёвра ухода. → True, когда набор устойчив (пора отдать управление пилоту).
 
         Взлётный режим + кабрирование + крылья в горизонт (`ApproachChannel.go_around_command`).
@@ -350,6 +385,8 @@ class ControllingSystem:
         останавливается, и `control_exception` снимает заявку каналов — это и есть передача пилоту.
         """
         maneuver = self.go_around
+        if maneuver is None:
+            raise RuntimeError("манёвр ухода не инициализирован")
         maneuver.elapsed_s += dt
         cfg = self.approach_channel.config
         if telemetry is None or not telemetry.valid:
@@ -363,12 +400,15 @@ class ControllingSystem:
             return True
         return False
 
-    def _climb_established(self, telemetry) -> bool:
+    def _climb_established(self, telemetry: Telemetry) -> bool:
         """Набор устойчив: есть и вертикальная скорость вверх, и прирост радиовысоты над входом."""
         inp = telemetry.approach_inputs
         cfg = self.approach_channel.config
         climbing = inp.VerticalSpeed >= cfg.go_around_min_climb_fpm
-        gained = ((telemetry.radio_altitude_ft or 0.0) - self.go_around.entry_radio_altitude_ft
+        maneuver = self.go_around
+        if maneuver is None:
+            return False
+        gained = ((telemetry.radio_altitude_ft or 0.0) - maneuver.entry_radio_altitude_ft
                   >= cfg.go_around_min_gain_ft)
         return bool(climbing and gained)
 
@@ -405,7 +445,7 @@ class ControllingSystem:
         if self.sim is not None:
             self.sim.request_rollout()
 
-    TAXI_HANDOVER_FRAMES = 4
+    TAXI_HANDOVER_FRAMES: ClassVar[int] = 4
     """Сколько кадров передать после перехода `3 → 4`. Транспорт — UDP: одиночный кадр с новым
     режимом может потеряться, и стенд не увидит фронта, по которому только и переключается."""
 
@@ -430,10 +470,10 @@ class ControllingSystem:
             sim.step(self.state)
         return True
 
-    def _read(self):
+    def _read(self) -> Telemetry:
         return self._require_sim().read_telemetry()
 
-    def _require_sim(self):
+    def _require_sim(self) -> SimInterface:
         if self.sim is None:
             raise RuntimeError(
                 "контуру не задан стенд: без него он не может ни прочитать телеметрию, ни "
@@ -444,18 +484,21 @@ class ControllingSystem:
     # Фактически применённая команда ≠ выходу PID: её меняют вес канала, дифференциальный микс,
     # `clamp_all` и деградация отказов. Без обратной связи интегратор копит на отказавший
     # актуатор (при `steering_eff = 0` — классический windup).
-    _TRACKED = (("runway_center_pid", "rudder_cmd"),
-                ("pid_brake_l", "cmd_brake_l"), ("pid_brake_r", "cmd_brake_r"),
-                ("pid_rev_l", "cmd_rev_l"), ("pid_rev_r", "cmd_rev_r"))
-
     def _track_applied(self, dt: float) -> None:
         """Back-calculation по итоговым командам. No-op, пока у PID не задан `tracking_tau_s`."""
-        for regulator, command_field in self._TRACKED:
+        applied = (
+            ("runway_center_pid", self.state.rudder_cmd),
+            ("pid_brake_l", self.state.cmd_brake_l),
+            ("pid_brake_r", self.state.cmd_brake_r),
+            ("pid_rev_l", self.state.cmd_rev_l),
+            ("pid_rev_r", self.state.cmd_rev_r),
+        )
+        for regulator, command in applied:
             pid = self.pids.get(regulator)
             if pid is not None:
-                pid.track(getattr(self.state, command_field), dt)
+                pid.track(command, dt)
 
-    def control_exception(self):
+    def control_exception(self) -> None:
         """Аварийная остановка: обнулить органы и **снять заявку каналов**.
 
         Именно отправить, а не замолчать: молчание оставит последнее отклонение приложенным до

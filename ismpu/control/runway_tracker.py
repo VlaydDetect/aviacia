@@ -25,7 +25,14 @@ class GuidanceState(Mapping[str, float | None]):
 
     def __getitem__(self, key: str) -> float | None:
         """Совместимость со старым словарным API."""
-        return getattr(self, key)
+        values = {
+            "xte": self.xte,
+            "along": self.along,
+            "lookahead": self.lookahead,
+            "heading_error_deg": self.heading_error_deg,
+            "desired_heading_deg": self.desired_heading_deg,
+        }
+        return values[key]
 
     def __iter__(self) -> Iterator[str]:
         return iter((
@@ -38,27 +45,35 @@ class GuidanceState(Mapping[str, float | None]):
 
 
 class RunwayTracker:
-    def __init__(self, lookahead_min=15.0, lookahead_gain=1.5, xte_gain=1.0):
-        self.R = 6371008.7714  # Средний радиус Земли в метрах
+    """Геодезическое наведение на ось ВПП с упреждением по скорости."""
 
-        self.theta_rwy = self.bearing(RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
+    def __init__(
+        self,
+        lookahead_min: float = 15.0,
+        lookahead_gain: float = 1.5,
+        xte_gain: float = 1.0,
+    ) -> None:
+        self.R: float = 6371008.7714  # средний радиус Земли, м
 
-        self.lookahead_min = lookahead_min
-        self.lookahead_gain = lookahead_gain
-        self.xte_gain = xte_gain
+        self.theta_rwy: float = self.bearing(
+            RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
 
-        self.rwy_heading = np.radians(RWY_HEADING_TRUE)
+        self.lookahead_min: float = lookahead_min
+        self.lookahead_gain: float = lookahead_gain
+        self.xte_gain: float = xte_gain
+
+        self.rwy_heading: float = float(np.radians(RWY_HEADING_TRUE))
 
     @staticmethod
-    def wrap_pi(angle):
-        return (angle + np.pi) % (2 * np.pi) - np.pi
+    def wrap_pi(angle: float) -> float:
+        return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
     @staticmethod
-    def wrap_deg(angle):
-        return (angle + 180.0) % 360.0 - 180.0
+    def wrap_deg(angle: float) -> float:
+        return float((angle + 180.0) % 360.0 - 180.0)
 
     @staticmethod
-    def bearing(lat1: float, lon1: float, lat2: float, lon2: float):
+    def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         phi1 = np.radians(lat1)
         phi2 = np.radians(lat2)
 
@@ -67,9 +82,9 @@ class RunwayTracker:
         y = np.sin(dlon) * np.cos(phi2)
         x = (np.cos(phi1) * np.sin(phi2) - np.sin(phi1) * np.cos(phi2) * np.cos(dlon))
 
-        return np.arctan2(y, x)
+        return float(np.arctan2(y, x))
 
-    def haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float):
+    def haversine_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         phi1 = np.radians(lat1)
         phi2 = np.radians(lat2)
 
@@ -78,12 +93,16 @@ class RunwayTracker:
 
         a = np.sin(dphi / 2.0) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlon / 2.0) ** 2
 
-        return self.R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+        return float(self.R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a)))
 
-    def destination(self, lat, lon, bearing, distance):
-        """
-        Решение прямой геодезической задачи.
-        """
+    def destination(
+        self,
+        lat: float,
+        lon: float,
+        bearing: float,
+        distance: float,
+    ) -> tuple[float, float]:
+        """Решить прямую геодезическую задачу на сферической Земле."""
 
         phi1 = np.radians(lat)
         lam1 = np.radians(lon)
@@ -100,13 +119,13 @@ class RunwayTracker:
             np.cos(delta) - np.sin(phi1) * np.sin(phi2)
         )
 
-        return np.degrees(phi2), np.degrees(lam2)
+        return float(np.degrees(phi2)), float(np.degrees(lam2))
 
     def guidance(self,
-                 aircraft_lat,
-                 aircraft_lon,
-                 aircraft_heading_deg,
-                 ground_speed):
+                 aircraft_lat: float,
+                 aircraft_lon: float,
+                 aircraft_heading_deg: float,
+                 ground_speed: float) -> GuidanceState:
         d13 = self.haversine_distance(
             RWY_START_LAT,
             RWY_START_LON,
@@ -176,7 +195,13 @@ class RunwayTracker:
             desired_heading_deg=float(np.degrees(desired_heading)),
         )
 
-    def guidance_from_deviation(self, aircraft_heading_deg, runway_heading_deg, xte_m, ground_speed):
+    def guidance_from_deviation(
+        self,
+        aircraft_heading_deg: float,
+        runway_heading_deg: float,
+        xte_m: float,
+        ground_speed: float,
+    ) -> GuidanceState:
         """Guidance по курсу ВПП и измеренному отклонению — без собственной геодезии.
 
         Нужна для стенда заказчика: он сообщает `RunwayHeading` и `LateralDeviation`, но **не**
@@ -204,13 +229,13 @@ class RunwayTracker:
             desired_heading_deg=float(runway_heading_deg),
         )
 
-    def get_cross_track_error(self, lat_ac: float, lon_ac: float):
+    def get_cross_track_error(self, lat_ac: float, lon_ac: float) -> float:
         """Возвращает отклонение от осевой линии в метрах. >0 - правее оси, <0 - левее."""
         d_ac = self.haversine_distance(RWY_START_LAT, RWY_START_LON, lat_ac, lon_ac) / self.R
         theta_ac = self.bearing(RWY_START_LAT, RWY_START_LON, lat_ac, lon_ac)
 
         xte = np.asin(np.sin(d_ac) * np.sin(theta_ac - self.theta_rwy)) * self.R
-        return xte
+        return float(xte)
 
     def runway_length_m(self) -> float:
         return float(self.haversine_distance(

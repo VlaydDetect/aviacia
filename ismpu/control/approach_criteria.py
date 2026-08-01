@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ismpu.envs.ics_sim import Telemetry
 
 
 def angular_error_deg(reference_deg: float, actual_deg: float) -> float:
@@ -44,20 +48,24 @@ class ApproachCriteriaMonitor:
     """Захватывает А.1.1 после входа в допуск и завершает оценку на 300 ft."""
 
     def __init__(self, config: ApproachCriteriaConfig | None = None) -> None:
-        self.config = config or ApproachCriteriaConfig()
-        self.sample_count = 0
-        self.start_radio_altitude_ft = None
-        self.end_radio_altitude_ft = None
-        self.max_course_error_deg = 0.0
-        self.max_glideslope_error_deg = 0.0
+        self.config: ApproachCriteriaConfig = config or ApproachCriteriaConfig()
+        self.sample_count: int = 0
+        self.start_radio_altitude_ft: float | None = None
+        self.end_radio_altitude_ft: float | None = None
+        self.max_course_error_deg: float = 0.0
+        self.max_glideslope_error_deg: float = 0.0
         self.invalid_reasons: set[str] = set()
-        self.cutoff_reached = False
+        self.cutoff_reached: bool = False
 
-    def observe(self, telemetry, flight_path_angle_deg: float) -> ApproachCriteriaSample:
+    def observe(
+        self,
+        telemetry: "Telemetry",
+        flight_path_angle_deg: float,
+    ) -> ApproachCriteriaSample:
         if self.cutoff_reached:
             return ApproachCriteriaSample(None, None, "COMPLETE")
-        state = getattr(telemetry, "approach_inputs", None)
-        if state is None or not getattr(telemetry, "valid", False):
+        state = telemetry.approach_inputs
+        if state is None or not telemetry.valid:
             self.invalid_reasons.add("airborne telemetry unavailable")
             return ApproachCriteriaSample(None, None, "INVALID")
         ra = state.RadioAltitude

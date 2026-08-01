@@ -51,10 +51,17 @@ def _finite_tree(value: Any, where: str = "config") -> None:
 
 
 def control_to_dict(config: ScenarioConfig) -> dict[str, Any]:
+    pids = {
+        "runway_center": dict(config.runway_center),
+        "brake_l": dict(config.brake_l),
+        "brake_r": dict(config.brake_r),
+        "rev_l": dict(config.rev_l),
+        "rev_r": dict(config.rev_r),
+    }
     return {
         "name": config.name,
         "failure": config.failure.name,
-        "pids": {name: dict(getattr(config, name)) for name in _PID_NAMES},
+        "pids": pids,
         "guidance": {
             "lookahead_min": config.lookahead_min,
             "lookahead_gain": config.lookahead_gain,

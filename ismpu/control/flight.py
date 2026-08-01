@@ -23,6 +23,7 @@ from ismpu.config.ics import (
 from ismpu.config.requirements import (
     GO_AROUND_DECISION_HEIGHT_FT, GO_AROUND_LATERAL_GATE_BAND_FT,
 )
+from ismpu.envs.ics_sim import Telemetry
 
 
 class ApproachRefused(RuntimeError):
@@ -40,16 +41,16 @@ class FlightSegment(Enum):
     TAXI = "taxi"           # скорость руления достигнута, управление передано
 
 
-def is_airborne(telemetry, *, min_radio_altitude_ft: float = ENGAGE_MIN_RADIO_ALTITUDE_FT) -> bool:
+def is_airborne(telemetry: "Telemetry | None", *, min_radio_altitude_ft: float = ENGAGE_MIN_RADIO_ALTITUDE_FT) -> bool:
     """Сообщает ли стенд, что ВС в воздухе и достаточно высоко для приёма захода.
 
     Требуется **вся** совокупность: пакет стенда есть, ни одна основная стойка не обжата, и
     радиовысота объявлена валидной и выше порога. Отсутствующая радиовысота — не ноль и не
     «высоко»: это «стенд не сообщил», и включаться по ней нельзя.
     """
-    if telemetry is None or not getattr(telemetry, "valid", False):
+    if telemetry is None or not telemetry.valid:
         return False
-    if not getattr(telemetry, "airborne_data_available", False):
+    if not telemetry.airborne_data_available:
         return False
     if telemetry.main_gear_contact:
         return False
@@ -57,7 +58,7 @@ def is_airborne(telemetry, *, min_radio_altitude_ft: float = ENGAGE_MIN_RADIO_AL
     return ra is not None and ra > min_radio_altitude_ft
 
 
-def segment_is_decidable(telemetry) -> bool:
+def segment_is_decidable(telemetry: "Telemetry | None") -> bool:
     """Можно ли вообще судить об участке по этому кадру.
 
     Кадр без пакета стенда (таймаут приёма на старте, синтетическая телеметрия) участок не
@@ -65,16 +66,16 @@ def segment_is_decidable(telemetry) -> bool:
     а машина участков движется только вперёд, так что ошибка стала бы необратимой на весь заход.
     """
     return (telemetry is not None
-            and getattr(telemetry, "valid", False)
-            and getattr(telemetry, "airborne_data_available", False))
+            and telemetry.valid
+            and telemetry.airborne_data_available)
 
 
-def initial_segment(telemetry, **kwargs) -> FlightSegment:
+def initial_segment(telemetry: "Telemetry | None", **kwargs: float) -> FlightSegment:
     """С какого участка начинать. Пробег — ответ по умолчанию (см. модуль)."""
     return FlightSegment.APPROACH if is_airborne(telemetry, **kwargs) else FlightSegment.ROLLOUT
 
 
-def approach_blocker(telemetry) -> "str | None":
+def approach_blocker(telemetry: "Telemetry | None") -> "str | None":
     """Почему нельзя вести заход по этому кадру. `None` — можно.
 
     Пока проверка одна, но принципиальная: **посадочная конфигурация механизации**. Весь
@@ -89,7 +90,7 @@ def approach_blocker(telemetry) -> "str | None":
     с заказанной конфигурацией, мы же запрещаем только «не посадочная вовсе» — иначе штатная
     посадка в FULL отвергалась бы при настройке FLAPS 3.
     """
-    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+    if telemetry is None or not telemetry.airborne_data_available:
         return "нет воздушных сигналов backend"
     if telemetry.landing_flaps is None:
         angle = telemetry.approach_inputs.FlapsAngle
@@ -98,13 +99,13 @@ def approach_blocker(telemetry) -> "str | None":
     return None
 
 
-def in_terminal_window(telemetry, *, limit_ft: float = TERMINAL_RADIO_ALTITUDE_FT) -> bool:
+def in_terminal_window(telemetry: "Telemetry | None", *, limit_ft: float = TERMINAL_RADIO_ALTITUDE_FT) -> bool:
     """Последние футы перед касанием, где прерывать заход опаснее, чем доработать.
 
     Внутри окна не действуют прерывания по потере валидности ILS и активности стенда: до земли
     остаются секунды, и отпустить органы здесь — худший из вариантов.
     """
-    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+    if telemetry is None or not telemetry.airborne_data_available:
         return False
     if telemetry.main_gear_contact:
         return True
@@ -112,14 +113,14 @@ def in_terminal_window(telemetry, *, limit_ft: float = TERMINAL_RADIO_ALTITUDE_F
     return ra is not None and ra <= limit_ft
 
 
-def above_decision_height(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT) -> bool:
+def above_decision_height(telemetry: "Telemetry | None", *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT) -> bool:
     """ВС выше высоты решения ухода на второй круг (30 м по ТЗ 5.1.1.2). → уход разрешён.
 
     Требует **положительно известной** радиовысоты выше порога: без неё уход не инициируется —
     выставлять взлётный режим и набирать вслепую хуже, чем довести заход. Обжатая основная стойка
     — уже не воздух: на земле ухода нет даже при козлении.
     """
-    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+    if telemetry is None or not telemetry.airborne_data_available:
         return False
     if telemetry.main_gear_contact:
         return False
@@ -127,7 +128,7 @@ def above_decision_height(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEI
     return ra is not None and ra > limit_ft
 
 
-def at_lateral_alignment_gate(telemetry, *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT,
+def at_lateral_alignment_gate(telemetry: "Telemetry | None", *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT,
                               band_ft: float = GO_AROUND_LATERAL_GATE_BAND_FT) -> bool:
     """Полоса подхода к гейту совмещения с осью ± 5 м: `(30 м, 30 м + band]`.
 
@@ -135,13 +136,13 @@ def at_lateral_alignment_gate(telemetry, *, limit_ft: float = GO_AROUND_DECISION
     это последний рубеж перед высотой решения, а выше него боковое положение ограничивает курсовой
     допуск, а не эта планка.
     """
-    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+    if telemetry is None or not telemetry.airborne_data_available:
         return False
     ra = telemetry.radio_altitude_ft
     return ra is not None and limit_ft < ra <= limit_ft + band_ft
 
 
-def ils_blocker(telemetry) -> "str | None":
+def ils_blocker(telemetry: "Telemetry | None") -> "str | None":
     """Почему нельзя продолжать заход по этому кадру. `None` — можно.
 
     Закон читает `LocDeviation`/`GSDeviation` без оглядки на флаги валидности — так же, как
@@ -151,23 +152,23 @@ def ils_blocker(telemetry) -> "str | None":
     """
     if in_terminal_window(telemetry):
         return None
-    if telemetry is None or not getattr(telemetry, "airborne_data_available", False):
+    if telemetry is None or not telemetry.airborne_data_available:
         return None
     if telemetry.ils_valid is False:
         return "стенд снял валидность курсового или глиссадного канала"
     return None
 
 
-def touched_down(telemetry) -> bool:
+def touched_down(telemetry: "Telemetry | None") -> bool:
     """Окончен ли воздушный участок.
 
     Два независимых признака, любой достаточен: обжатие **любой основной** стойки (так же
     определяет касание контур коллеги на стенде) и объявленная стендом фаза пробега. Носовая
     стойка не участвует — она обжимается позже основных.
     """
-    if telemetry is None or not getattr(telemetry, "valid", False):
+    if telemetry is None or not telemetry.valid:
         return False
-    if not getattr(telemetry, "airborne_data_available", False):
+    if not telemetry.airborne_data_available:
         return False
     if telemetry.main_gear_contact:
         return True

@@ -26,8 +26,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, asdict
+from collections.abc import Mapping, Sequence
+from os import PathLike
+from typing import Any, TypedDict
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,24 +61,28 @@ class NPGSConfig:
     attn_heads: int = 4
     trunk_dim: int = 128
     context_dim: int = 128
-    head_hidden: tuple = (64, 32)
+    head_hidden: tuple[int, ...] = (64, 32)
     n_phases: int = N_PHASES
     dropout: float = 0.0
     exploration_frac: float = 0.15   # целевой мультипликативный шаг исследования gain'ов (±15%)
     weight_std: float = 0.3          # std исследования весов каналов
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "NPGSConfig":
+    def from_dict(cls, d: Mapping[str, Any]) -> "NPGSConfig":
         d = dict(d)
         if "head_hidden" in d:
             d["head_hidden"] = tuple(d["head_hidden"])
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-def layer_init(layer: nn.Linear, gain: float = math.sqrt(2.0), bias=0.0) -> nn.Linear:
+def layer_init(
+    layer: nn.Linear,
+    gain: float = math.sqrt(2.0),
+    bias: float | ArrayLike = 0.0,
+) -> nn.Linear:
     nn.init.orthogonal_(layer.weight, gain)
     if isinstance(bias, (int, float)):
         nn.init.constant_(layer.bias, float(bias))
@@ -84,8 +92,15 @@ def layer_init(layer: nn.Linear, gain: float = math.sqrt(2.0), bias=0.0) -> nn.L
     return layer
 
 
-def _mlp_head(in_dim: int, hidden: tuple, out_dim: int, out_gain: float, out_bias=0.0) -> nn.Sequential:
-    layers, d = [], in_dim
+def _mlp_head(
+    in_dim: int,
+    hidden: Sequence[int],
+    out_dim: int,
+    out_gain: float,
+    out_bias: float | ArrayLike = 0.0,
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    d = in_dim
     for h in hidden:
         layers += [layer_init(nn.Linear(d, h)), nn.GELU()]
         d = h
@@ -93,7 +108,7 @@ def _mlp_head(in_dim: int, hidden: tuple, out_dim: int, out_gain: float, out_bia
     return nn.Sequential(*layers)
 
 
-def phase_labels_from_groundspeed_kts(gs_kts) -> np.ndarray:
+def phase_labels_from_groundspeed_kts(gs_kts: ArrayLike) -> NDArray[np.int64]:
     gs = np.asarray(gs_kts, dtype=np.float32)
     label = np.full(gs.shape, PHASE_STOP, dtype=np.int64)
     hi, mid, taxi, stop = _PHASE_BOUNDS_KTS
@@ -116,10 +131,10 @@ def _init_log_std() -> torch.Tensor:
 class NPGS(nn.Module):
     """Neural PID Gain Scheduler: общий энкодер + головы актора (абс. gain'ы) + голова критика."""
 
-    def __init__(self, config: NPGSConfig | None = None):
+    def __init__(self, config: NPGSConfig | None = None) -> None:
         super().__init__()
         cfg = config or NPGSConfig()
-        self.cfg = cfg
+        self.cfg: NPGSConfig = cfg
         d = cfg.d_model
 
         # --- Общий энкодер ---
@@ -159,7 +174,7 @@ class NPGS(nn.Module):
     # Энкодер
     # ------------------------------------------------------------------ #
 
-    def encode(self, obs: torch.Tensor):
+    def encode(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if obs.dim() == 2:
             obs = obs.unsqueeze(0)
         x = self.input_norm(obs)
@@ -183,7 +198,7 @@ class NPGS(nn.Module):
         phase_logits = self.phase_head(c)
         return z_shared, c, phase_logits
 
-    def forward(self, obs: torch.Tensor):
+    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """→ (mean (B,17), value (B,), phase_logits (B,n_phases))."""
         z_shared, c, phase_logits = self.encode(obs)
         head_in = torch.cat([z_shared, c], dim=-1)
@@ -210,11 +225,11 @@ class NPGS(nn.Module):
     # Политика (Gaussian над сырым u; squash — детерминированный `to_gains`)
     # ------------------------------------------------------------------ #
 
-    def _dist(self, mean: torch.Tensor):
+    def _dist(self, mean: torch.Tensor) -> torch.distributions.Normal:
         std = torch.exp(self.log_std).expand_as(mean)
         return torch.distributions.Normal(mean, std)
 
-    def get_action(self, obs: torch.Tensor, deterministic: bool = False):
+    def get_action(self, obs: torch.Tensor, deterministic: bool = False) -> "ActorOutput":
         """Один шаг актора. `action` (…,17) — абс. gain'ы для среды; `raw` (…,17) — сэмпл u для PPO."""
         mean, value, phase_logits = self.forward(obs)
         dist = self._dist(mean)
@@ -225,7 +240,11 @@ class NPGS(nn.Module):
         return {"action": action, "raw": u, "logp": logp, "value": value,
                 "entropy": entropy, "phase_logits": phase_logits, "mean": mean}
 
-    def evaluate_actions(self, obs: torch.Tensor, u: torch.Tensor):
+    def evaluate_actions(
+        self,
+        obs: torch.Tensor,
+        u: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Пересчёт на апдейте PPO. → (logp, entropy, value, mean, phase_logits)."""
         mean, value, phase_logits = self.forward(obs)
         dist = self._dist(mean)
@@ -238,7 +257,11 @@ class NPGS(nn.Module):
     # ------------------------------------------------------------------ #
 
     @torch.no_grad()
-    def act_numpy(self, obs_window: np.ndarray, deterministic: bool = False):
+    def act_numpy(
+        self,
+        obs_window: NDArray[np.floating[Any]],
+        deterministic: bool = False,
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32], float, float]:
         """obs (T,56) np → (action_17 np, raw_17 np, logp float, value float)."""
         device = self.log_std.device
         obs = torch.as_tensor(obs_window, dtype=torch.float32, device=device)
@@ -247,13 +270,17 @@ class NPGS(nn.Module):
                 out["raw"].squeeze(0).cpu().numpy(),
                 float(out["logp"].item()), float(out["value"].item()))
 
-    def save(self, path: str) -> None:
+    def save(self, path: str | PathLike[str]) -> None:
         """Веса + конфиг + слепок нормировки (включая gain-пространство) одним артефактом."""
         torch.save({"state_dict": self.state_dict(), "config": self.cfg.to_dict(),
                     "normalization": norm.snapshot()}, path)
 
     @classmethod
-    def load(cls, path: str, map_location=None) -> "NPGS":
+    def load(
+        cls,
+        path: str | PathLike[str],
+        map_location: str | torch.device | dict[str, str] | None = None,
+    ) -> "NPGS":
         ckpt = torch.load(path, map_location=map_location, weights_only=False)
         model = cls(NPGSConfig.from_dict(ckpt["config"]))
         model.load_state_dict(ckpt["state_dict"])
@@ -265,3 +292,15 @@ def build_npgs(config: NPGSConfig | None = None, device: str = "cpu") -> NPGS:
     model = NPGS(config).to(device)
     assert POLICY_DIM == ACTION_DIM == 17
     return model
+
+
+class ActorOutput(TypedDict):
+    """Тензоры одного прохода актора, до преобразования в NumPy."""
+
+    action: torch.Tensor
+    raw: torch.Tensor
+    logp: torch.Tensor
+    value: torch.Tensor
+    entropy: torch.Tensor
+    phase_logits: torch.Tensor
+    mean: torch.Tensor

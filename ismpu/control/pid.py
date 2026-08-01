@@ -45,37 +45,42 @@ class PIDController:
                  derivative_on_measurement: bool = False,
                  conditional_anti_windup: bool = False,
                  exact_discretization: bool = False,
-                 tracking_tau_s: float | None = None):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.name = name
+                 tracking_tau_s: float | None = None) -> None:
+        self.kp: float = kp
+        self.ki: float = ki
+        self.kd: float = kd
+        self.name: str = name
 
-        self.min_out = min_out
-        self.max_out = max_out
+        self.min_out: float = min_out
+        self.max_out: float = max_out
 
-        self.integral = 0.0
-        # Avoiding differential shock at startup
-        self.prev_error = None
+        self.integral: float = 0.0
+        # Первый такт не имеет предыдущего отсчёта для производной.
+        self.prev_error: float | None = None
 
-        self.anti_windup = anti_windup
-        self.integral_decay = integral_decay  # Коэффициент экспоненциального затухания интеграла
-        self.der_filter_tf = der_filter_tf  # Постоянная времени фильтра низких частот D-составляющей (T_f в секундах)
-        self.filtered_derivative = 0.0  # Накопленное отфильтрованное значение производной
-        self.last_output = 0.0  # Последний зажатый выход (для Observation Space)
-        self.last_error = 0.0
-        self.last_measurement = None
-        self.last_unconstrained = 0.0
-        self.last_p_term = 0.0
-        self.last_i_term = 0.0
-        self.last_d_term = 0.0
+        self.anti_windup: float = anti_windup
+        # Коэффициент экспоненциального затухания интеграла
+        self.integral_decay: float = integral_decay
+        # Постоянная времени фильтра низких частот D-составляющей (T_f в секундах)
+        self.der_filter_tf: float = der_filter_tf
+        # Накопленное отфильтрованное значение производной
+        self.filtered_derivative: float = 0.0
+        # Последний зажатый выход (для Observation Space)
+        self.last_output: float = 0.0
+        self.last_error: float = 0.0
+        self.last_measurement: float | None = None
+        self.last_unconstrained: float = 0.0
+        self.last_p_term: float = 0.0
+        self.last_i_term: float = 0.0
+        self.last_d_term: float = 0.0
 
         # --- опциональная численность (по умолчанию = прежнее поведение) ---
-        self.derivative_on_measurement = derivative_on_measurement
-        self.conditional_anti_windup = conditional_anti_windup
-        self.exact_discretization = exact_discretization
-        self.tracking_tau_s = tracking_tau_s
-        self._prev_deriv_input = None   # вход D-составляющей прошлого такта (ошибка или измерение)
+        self.derivative_on_measurement: bool = derivative_on_measurement
+        self.conditional_anti_windup: bool = conditional_anti_windup
+        self.exact_discretization: bool = exact_discretization
+        self.tracking_tau_s: float | None = tracking_tau_s
+        # вход D-составляющей прошлого такта (ошибка или измерение)
+        self._prev_deriv_input: float | None = None
 
     # ------------------------------------------------------------------ #
     # Внутренние составляющие
@@ -116,7 +121,7 @@ class PIDController:
     # Такт
     # ------------------------------------------------------------------ #
 
-    def compute(self, error: float, dt: float, measurement: float | None = None):
+    def compute(self, error: float, dt: float, measurement: float | None = None) -> float:
         """Такт регулятора. `measurement` обязателен при `derivative_on_measurement=True`."""
         if dt <= 0.0:
             return 0.0
@@ -195,7 +200,7 @@ class PIDController:
     def clamp(self, value: float) -> float:
         return max(self.min_out, min(self.max_out, value))
 
-    def reset(self):
+    def reset(self) -> None:
         """Сброс внутренних состояний (используется при выключении системы)."""
         self.integral = 0.0
         self.prev_error = None

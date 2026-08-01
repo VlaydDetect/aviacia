@@ -17,10 +17,14 @@
 import math
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Optional
 
 from ismpu.utils.converts import Converts
 from ismpu.config.runway import RWY_HEADING_TRUE
+
+if TYPE_CHECKING:
+    from ismpu.io.ics_connector import ICSInputs
 
 
 class RunwayCondition(Enum):
@@ -74,7 +78,7 @@ class FrictionProfile:
 
     segments: tuple[tuple[float, float], ...]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         ordered = tuple(sorted(
             ((float(start), float(value)) for start, value in self.segments),
             key=lambda item: item[0]))
@@ -94,7 +98,7 @@ class FrictionProfile:
         return [[start, friction] for start, friction in self.segments]
 
     @classmethod
-    def from_list(cls, values) -> "FrictionProfile":
+    def from_list(cls, values: Iterable[Iterable[float]]) -> "FrictionProfile":
         return cls(tuple((float(start), float(friction)) for start, friction in values))
 
 
@@ -119,7 +123,7 @@ class WeatherState:
     temperature_c: float = 15.0
 
     @classmethod
-    def from_ics(cls, inp) -> "WeatherState":
+    def from_ics(cls, inp: "ICSInputs") -> "WeatherState":
         """`ICSInputs` → `WeatherState`. Единственный источник фактической погоды.
 
         Стенд шлёт ветер в узлах, видимость — в **футах**; перевод видимости здесь не косметика:
@@ -136,7 +140,8 @@ class WeatherState:
 
     @classmethod
     def from_crosswind(cls, crosswind_kts: float, headwind_kts: float = 0.0,
-                       runway_heading_degt: float = RWY_HEADING_TRUE, **kwargs) -> "WeatherState":
+                       runway_heading_degt: float = RWY_HEADING_TRUE,
+                       **kwargs: Any) -> "WeatherState":
         """Собирает ветер из компонент относительно курса ВПП.
 
         `crosswind_kts` > 0 — ветер справа; `headwind_kts` > 0 — встречный.
@@ -144,7 +149,7 @@ class WeatherState:
         speed, direction = compose_wind(crosswind_kts, headwind_kts, runway_heading_degt)
         return cls(wind_speed_kts=speed, wind_dir_from_degt=direction, **kwargs)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Сериализация в примитивы (для логирования/воспроизводимости сценариев)."""
         return {
             "wind_speed_kts": self.wind_speed_kts,
@@ -161,7 +166,7 @@ class WeatherState:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "WeatherState":
+    def from_dict(cls, d: Mapping[str, Any]) -> "WeatherState":
         values = dict(d)
         profile = values.get("friction_profile")
         values["friction_profile"] = FrictionProfile.from_list(profile) if profile else None

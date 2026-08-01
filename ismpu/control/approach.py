@@ -36,6 +36,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeAlias
 
 from ismpu.config.approach import ApproachConfig, APPROACH_DEFAULT
 from ismpu.config.ics import RUDDER_MAX_DEG
@@ -44,6 +45,14 @@ from ismpu.config.envelope import (
     roll_limit_deg,
 )
 from ismpu.control.pid import PIDController
+from ismpu.envs.sim_interface import ApproachData
+from ismpu.io.ics_connector import ICSInputs
+
+if TYPE_CHECKING:
+    from ismpu.control.channels import ControlsState
+    from ismpu.envs.ics_sim import Telemetry
+
+ApproachTelemetry: TypeAlias = ApproachData | ICSInputs
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -100,7 +109,7 @@ class ApproachResult:
     flare_progress: float = 0.0
     flare_entry_radio_altitude_ft: float = 0.0
     flare_entry_vertical_speed_fpm: float = 0.0
-    envelope_warnings: tuple = ()
+    envelope_warnings: tuple[str, ...] = ()
 
 
 class ApproachChannel:
@@ -111,16 +120,24 @@ class ApproachChannel:
     пространство коэффициентов NPGS, и лишние ключи в нём переопределили бы `ACTION_DIM`.
     """
 
-    def __init__(self, config: ApproachConfig | None = None):
-        self.config = config or APPROACH_DEFAULT
-        self.roll_pid = PIDController(**self.config.roll_pid)
-        self.pitch_pid = PIDController(**self.config.pitch_pid)
-        self.speed_pid = PIDController(**self.config.speed_pid)
-        self.result = ApproachResult()
+    def __init__(self, config: ApproachConfig | None = None) -> None:
+        self.config: ApproachConfig = config or APPROACH_DEFAULT
+        self.roll_pid: PIDController = PIDController(**self.config.roll_pid)
+        self.pitch_pid: PIDController = PIDController(**self.config.pitch_pid)
+        self.speed_pid: PIDController = PIDController(**self.config.speed_pid)
+        self.result: ApproachResult = ApproachResult()
+        self._target_pitch_deg: float | None
+        self._reference_aoa_deg: float | None
+        self._flare_active: bool
+        self._flare_entry_radio_altitude_ft: float | None
+        self._flare_entry_vertical_speed_fpm: float | None
+        self._flare_entry_pitch_target_deg: float | None
+        self._throttle_norm: float | None
+        self._target_ias_kt: float | None
         self.reset()
 
     @property
-    def pids(self) -> dict:
+    def pids(self) -> dict[str, PIDController]:
         """Регуляторы канала по именам — для логов и приёмки, не для `ControllingSystem.pids`."""
         return {"roll_pid": self.roll_pid, "pitch_pid": self.pitch_pid,
                 "speed_pid": self.speed_pid}
@@ -144,14 +161,19 @@ class ApproachChannel:
     # Такт
     # ------------------------------------------------------------------ #
 
-    def calc_commands(self, dt: float, state, telemetry) -> ApproachResult:
+    def calc_commands(
+        self,
+        dt: float,
+        state: "ControlsState",
+        telemetry: "Telemetry | None",
+    ) -> ApproachResult:
         """Такт воздушного управления: пишет команды в `state`, возвращает диагностику.
 
         Кадр без воздушных сигналов (`approach_inputs is None`) или невалидный — команда нейтральная:
         воздушный закон размерный и считать его по нулям значит выдать осмысленно выглядящее
         отклонение по несуществующим данным.
         """
-        inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
+        inp = telemetry.approach_inputs if telemetry is not None else None
         if telemetry is None or not telemetry.valid or inp is None:
             state.neutralize_airborne()
             return self.result
@@ -185,7 +207,12 @@ class ApproachChannel:
         self.result = res
         return res
 
-    def go_around_command(self, dt: float, state, telemetry) -> ApproachResult:
+    def go_around_command(
+        self,
+        dt: float,
+        state: "ControlsState",
+        telemetry: "Telemetry | None",
+    ) -> ApproachResult:
         """Такт ухода на второй круг: взлётный режим, кабрирование, крылья в горизонт.
 
         Заход больше не ведётся — локализатор и глиссаду не отслеживаем. Тангаж ведётся к
@@ -194,7 +221,7 @@ class ApproachChannel:
         темпом. `ControlMode` остаётся `Approach`: смена режима в воздухе сбрасывает автопилот
         стенда. Выравнивание принудительно снимается — на уходе оно неприменимо.
         """
-        inp = getattr(telemetry, "approach_inputs", None) if telemetry is not None else None
+        inp = telemetry.approach_inputs if telemetry is not None else None
         if telemetry is None or not telemetry.valid or inp is None:
             state.neutralize_airborne()
             return self.result
@@ -246,7 +273,7 @@ class ApproachChannel:
     # Составляющие такта
     # ------------------------------------------------------------------ #
 
-    def _limits(self, inp, res: ApproachResult) -> ApproachLimits:
+    def _limits(self, inp: ApproachTelemetry, res: ApproachResult) -> ApproachLimits:
         """Эксплуатационные ограничения по фактической конфигурации и числу Маха."""
         cfg = self.config
         fallback = LandingFlapConfiguration(cfg.landing_flap_fallback)
@@ -260,7 +287,8 @@ class ApproachChannel:
         res.limits = limits
         return limits
 
-    def _speed_setpoint(self, inp, limits: ApproachLimits, dt: float, res: ApproachResult) -> None:
+    def _speed_setpoint(self, inp: ApproachTelemetry, limits: ApproachLimits,
+                        dt: float, res: ApproachResult) -> None:
         """Уставка приборной скорости, сводимая к VAPP ограниченным темпом.
 
         Начальное значение — фактическая скорость: заход, начатый выше VAPP, иначе на первом же
@@ -276,7 +304,8 @@ class ApproachChannel:
         self._target_ias_kt += clamp(limits.vapp_kt - self._target_ias_kt, -step, step)
         res.target_ias_kt = self._target_ias_kt
 
-    def _lateral(self, inp, cfg: ApproachConfig, dt: float, res: ApproachResult) -> None:
+    def _lateral(self, inp: ApproachTelemetry, cfg: ApproachConfig,
+                 dt: float, res: ApproachResult) -> None:
         """Курсовой маяк → угол доворота → уставка крена → элероны.
 
         Руль направления на заходе остаётся нулевым: снос парируется креном, а рыскание рулём
@@ -298,7 +327,8 @@ class ApproachChannel:
         res.aileron_deg = self.roll_pid.compute(roll_error, dt, measurement=inp.RollAngle)
         res.rudder_deg = 0.0
 
-    def _vertical_target(self, inp, cfg: ApproachConfig, res: ApproachResult) -> float:
+    def _vertical_target(self, inp: ApproachTelemetry, cfg: ApproachConfig,
+                         res: ApproachResult) -> float:
         """Уставка вертикальной скорости: глиссада, а после входа — профиль выравнивания."""
         groundspeed_fpm = max(inp.GroundSpeed, 35.0) * 101.268591
         res.groundspeed_fpm = groundspeed_fpm
@@ -331,7 +361,7 @@ class ApproachChannel:
         res.target_vs_fpm = target_vs
         return target_vs
 
-    def _maybe_enter_flare(self, inp, cfg: ApproachConfig) -> None:
+    def _maybe_enter_flare(self, inp: ApproachTelemetry, cfg: ApproachConfig) -> None:
         """Вход в выравнивание: по высоте либо по времени до земли.
 
         Второй признак нужен, потому что при большой вертикальной скорости фиксированные 150
@@ -358,7 +388,8 @@ class ApproachChannel:
             self._target_pitch_deg if self._target_pitch_deg is not None else inp.PitchAngle,
             cfg.flare_min_pitch_target_deg, cfg.flare_max_pitch_target_deg)
 
-    def _pitch(self, inp, cfg: ApproachConfig, limits: ApproachLimits, dt: float,
+    def _pitch(self, inp: ApproachTelemetry, cfg: ApproachConfig,
+               limits: ApproachLimits, dt: float,
                target_vs: float, res: ApproachResult) -> None:
         """Уставка тангажа (заход или выравнивание) → `ElevatorCmd` в g."""
         groundspeed_fpm = res.groundspeed_fpm
@@ -413,7 +444,8 @@ class ApproachChannel:
             raise ValueError("нефинитная команда руля высоты")
         res.elevator_g = cfg.elevator_command_sign * effort
 
-    def _update_reference_aoa(self, inp, cfg: ApproachConfig, limits: ApproachLimits, dt: float,
+    def _update_reference_aoa(self, inp: ApproachTelemetry, cfg: ApproachConfig,
+                              limits: ApproachLimits, dt: float,
                               res: ApproachResult, vs_error: float) -> None:
         """Медленная подстройка опорного угла атаки по фактическому полёту.
 
@@ -447,7 +479,8 @@ class ApproachChannel:
             self._reference_aoa_deg += clamp(configured - self._reference_aoa_deg,
                                              -recovery_step, recovery_step)
 
-    def _throttle(self, inp, cfg: ApproachConfig, dt: float, res: ApproachResult) -> None:
+    def _throttle(self, inp: ApproachTelemetry, cfg: ApproachConfig,
+                  dt: float, res: ApproachResult) -> None:
         """Ошибка скорости → темп РУД → абсолютная уставка → темпы на оба двигателя.
 
         Регулятор выдаёт **темп** нормированного положения, который интегрируется в уставку.
@@ -486,7 +519,8 @@ class ApproachChannel:
         res.throttle_norm = self._throttle_norm
         res.throttle_target_angle_deg = target_angle
 
-    def _envelope_warnings(self, inp, limits: ApproachLimits, res: ApproachResult) -> tuple:
+    def _envelope_warnings(self, inp: ApproachTelemetry, limits: ApproachLimits,
+                           res: ApproachResult) -> tuple[str, ...]:
         """Выход за эксплуатационные границы. Предупреждения, а не вмешательство в управление:
         закон остаётся тем же, а факт выхода попадает в лог и в отчёт приёмки."""
         warnings = []

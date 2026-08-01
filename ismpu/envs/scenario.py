@@ -17,13 +17,19 @@
 батареи.
 """
 
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from ismpu.control.failures import FailureMode
 from ismpu.config.scenarios import ScenarioConfig, SCENARIOS
 from ismpu.config.constants import INITIAL_SPEED_KTS
 from ismpu.envs.weather import WeatherState, decompose_wind
 from ismpu.config.runway import RWY_HEADING_TRUE
+
+if TYPE_CHECKING:
+    from ismpu.control.system import ControllingSystem
+    from ismpu.envs.ics_sim import Telemetry
 
 # Стандартные условия пресетов: ясно, штиль, ВПП сухая (WeatherState() по умолчанию).
 STANDARD_WEATHER = WeatherState()
@@ -80,7 +86,7 @@ class Scenario:
     def primary_failure(self) -> FailureMode:
         return self.failures[0] if self.failures else FailureMode.NONE
 
-    def apply_control(self, controller):
+    def apply_control(self, controller: "ControllingSystem") -> "ControllingSystem":
         """Настраивает контур классическими коэффициентами (PID + отказ пресета).
 
         Отказ пресета — лишь стартовое предположение: на стенде фактическую конфигурацию
@@ -96,7 +102,7 @@ class Scenario:
 
     @classmethod
     def from_preset(cls, name: str, *, weather: WeatherState | None = None,
-                    failures: tuple | None = None,
+                    failures: Iterable[FailureMode] | None = None,
                     approach: ApproachSetup | None = None,
                     touchdown: TouchdownSetup | None = None,
                     sensor_noise: SensorNoise | None = None,
@@ -120,7 +126,7 @@ class Scenario:
             sensor_noise=sensor_noise or SensorNoise(),
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "scenario_id": self.scenario_id,
             "seed": self.seed,
@@ -133,7 +139,7 @@ class Scenario:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Scenario":
+    def from_dict(cls, d: dict[str, Any]) -> "Scenario":
         return cls(
             scenario_id=d["scenario_id"],
             seed=d["seed"],
@@ -223,7 +229,11 @@ def weather_distance(a: WeatherState, b: WeatherState,
     )
 
 
-def scenario_distance(scenario: Scenario, failures, weather: WeatherState | None = None) -> float:
+def scenario_distance(
+    scenario: Scenario,
+    failures: Iterable[FailureMode],
+    weather: WeatherState | None = None,
+) -> float:
     """Насколько сценарий не подходит под фактические условия (0 — точное совпадение).
 
     Отказы сравниваются симметрической разностью: одинаково плохо и тюнинговать под отказ,
@@ -237,8 +247,13 @@ def scenario_distance(scenario: Scenario, failures, weather: WeatherState | None
     return score
 
 
-def select_scenario(failures=(), weather: WeatherState | None = None, *,
-                    scenarios=None, include_draft: bool = False) -> Scenario:
+def select_scenario(
+    failures: Iterable[FailureMode] = (),
+    weather: WeatherState | None = None,
+    *,
+    scenarios: Sequence[Scenario] | None = None,
+    include_draft: bool = False,
+) -> Scenario:
     """Подобрать сценарий под фактические условия стенда.
 
     Черновые пресеты (`ScenarioConfig.draft`) по умолчанию не рассматриваются: они не выверены,
@@ -252,7 +267,12 @@ def select_scenario(failures=(), weather: WeatherState | None = None, *,
     return min(pool, key=lambda s: (scenario_distance(s, failures, weather), s.scenario_id))
 
 
-def select_for_telemetry(telemetry, *, scenarios=None, include_draft: bool = False) -> Scenario:
+def select_for_telemetry(
+    telemetry: "Telemetry | None",
+    *,
+    scenarios: Sequence[Scenario] | None = None,
+    include_draft: bool = False,
+) -> Scenario:
     """Подбор по кадру телеметрии стенда (отказы и погода берутся из `ICSInputs`).
 
     При невалидном кадре подбирать не по чему — возвращается штатный пресет: он единственный

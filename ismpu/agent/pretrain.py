@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 import torch
 import torch.nn.functional as F
 
@@ -27,13 +28,13 @@ from ismpu.agent.gain_scheduler import NPGS, POLICY_DIM, N_GAIN_OUT, phase_label
 from ismpu.agent import gain_space
 from ismpu.agent.normalization import SPEED_SCALE
 from ismpu.envs.observation import GAIN_FEATURE_INDICES, FEATURE_NAMES
-from ismpu.config.regulators import REGULATOR_ORDER, GAIN_KEYS
+from ismpu.config.regulators import GAIN_KEYS, REGULATOR_ORDER, GainMap
 from ismpu.utils.converts import Converts
 
 _GS_IDX = FEATURE_NAMES.index("ground_speed")
 
 
-def target_z_from_gains(gains: dict) -> np.ndarray:
+def target_z_from_gains(gains: GainMap) -> NDArray[np.float32]:
     """Абсолютные коэффициенты пресета → `target_z` (17,): gains через `inv_gain`, веса → 0 (w=1)."""
     vec = np.array([gains[reg][k] for reg in REGULATOR_ORDER for k in GAIN_KEYS], dtype=np.float64)
     z = np.zeros(POLICY_DIM, dtype=np.float32)
@@ -49,11 +50,11 @@ class SFTDataset:
     гейт ТЗ, отбрасываются ещё на захвате (`runtime.capture`). Без этого BC клонирует и
     плохие траектории тоже: пресет вне своего режима даёт метку, которую воспроизводить не надо.
     """
-    obs: np.ndarray        # (N, T, 56) float32
-    target_z: np.ndarray   # (N, 17)   float32
-    weight: np.ndarray | None = None   # (N,) float32; None ≡ все единицы
+    obs: NDArray[np.float32]        # (N, T, 56)
+    target_z: NDArray[np.float32]   # (N, 17)
+    weight: NDArray[np.float32] | None = None   # (N,); None ≡ все единицы
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.weight is None:
             self.weight = np.ones(len(self.obs), dtype=np.float32)
         self.weight = np.asarray(self.weight, dtype=np.float32).reshape(-1)
@@ -90,7 +91,11 @@ def _phase_labels(obs: torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(phase_labels_from_groundspeed_kts(gs_kts), device=obs.device)
 
 
-def pretrain_sft(net: NPGS, dataset: SFTDataset, config: PretrainConfig | None = None) -> list[dict]:
+def pretrain_sft(
+    net: NPGS,
+    dataset: SFTDataset,
+    config: PretrainConfig | None = None,
+) -> list[dict[str, float | int]]:
     """BC-обучение `net` на `dataset` (регрессия mean → target_z). → история по эпохам."""
     cfg = config or PretrainConfig()
     if cfg.device == "cuda" and not torch.cuda.is_available():
@@ -111,7 +116,7 @@ def pretrain_sft(net: NPGS, dataset: SFTDataset, config: PretrainConfig | None =
 
     n = len(obs)
     rng = np.random.default_rng(cfg.seed)
-    history: list[dict] = []
+    history: list[dict[str, float | int]] = []
     for epoch in range(cfg.epochs):
         idx = rng.permutation(n)
         mse_sum, ph_sum, nb = 0.0, 0.0, 0
