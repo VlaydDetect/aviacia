@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from ismpu.config.approach import ApproachConfig, APPROACH_DEFAULT
+from ismpu.config.approach import (
+    APPROACH_DEFAULT,
+    ICS_CLEAR_WEATHER_APPROACH,
+    ApproachConfig,
+)
 from ismpu.config.envelope import (
     LandingFlapConfiguration, approach_limits, detect_landing_flaps, measured_landing_flaps,
     roll_limit_deg,
@@ -408,8 +412,4 @@ def test_config_from_the_colleague_json_matches_our_defaults():
     if not COLLEAGUE_CONFIG.exists():
         pytest.skip("файл настроек второго участника НИР не выложен рядом")
     loaded = ApproachConfig.from_json(COLLEAGUE_CONFIG)
-    assert loaded.roll_pid == APPROACH_DEFAULT.roll_pid
-    assert loaded.pitch_pid == APPROACH_DEFAULT.pitch_pid
-    assert loaded.speed_pid == APPROACH_DEFAULT.speed_pid
-    assert loaded.flare_initial_vs_fpm == APPROACH_DEFAULT.flare_initial_vs_fpm
-    assert loaded.approach_aoa_deg == APPROACH_DEFAULT.approach_aoa_deg
+    assert loaded == ICS_CLEAR_WEATHER_APPROACH == APPROACH_DEFAULT

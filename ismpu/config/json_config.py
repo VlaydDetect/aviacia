@@ -8,7 +8,11 @@ from dataclasses import asdict, fields, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from ismpu.config.approach import APPROACH_CONFIGS, ApproachConfig
+from ismpu.config.approach import (
+    APPROACH_CONFIGS,
+    ICS_CLEAR_WEATHER_APPROACH,
+    ApproachConfig,
+)
 from ismpu.config.scenarios import (
     AircraftControlSet,
     ApproachSetup,
@@ -226,7 +230,11 @@ def _scenario_from_v1(
     except KeyError as exc:
         raise ValueError(f"неизвестный legacy_aircraft_profile {profile!r}") from exc
     if profile == "mc21":
-        configured = APPROACH_CONFIGS.get(approach_key)
+        configured = (
+            ICS_CLEAR_WEATHER_APPROACH
+            if approach_key == "default"
+            else APPROACH_CONFIGS.get(approach_key)
+        )
         approach = _copy_approach(
             configured or profile_default.approach,
             name=approach_key if configured is None else configured.name,

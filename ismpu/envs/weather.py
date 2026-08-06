@@ -48,13 +48,14 @@ class RunwayCondition(Enum):
 
 
 BENCH_RUNWAY_CONDITION = {
-    0: RunwayCondition.DRY,        # DRY
-    1: RunwayCondition.WET,        # WET
-    2: RunwayCondition.ICY,        # ICE
+    1: RunwayCondition.DRY,        # DRY
+    2: RunwayCondition.WET,        # WET
     3: RunwayCondition.PUDDLY,     # FLOODED
-    4: RunwayCondition.WET,        # WET RUBBER
+    4: RunwayCondition.ICY,        # ICE
     5: RunwayCondition.SNOWY,      # SNOW
-    6: RunwayCondition.PUDDLY,     # SLUSH
+    7: RunwayCondition.PUDDLY,     # SLUSH
+    14: RunwayCondition.WET,        # WET RUBBER
+
 }
 """Код `ICSInputs.RunwayCondition` (0…6) → наша шкала скользкости.
 
@@ -119,7 +120,7 @@ class WeatherState:
     friction_profile: Optional[FrictionProfile] = None
 
     rain_pct: float = 0.0               # 0..1, интенсивность осадков
-    visibility_m: float = 16000.0       # ~10 миль (ясно)
+    visibility_m: float = 30100.0       # ~30 km (ясно)
     temperature_c: float = 15.0
 
     @classmethod

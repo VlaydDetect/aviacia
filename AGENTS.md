@@ -89,7 +89,10 @@ Read these before making architectural changes — they define the target design
   `main()` with no argument **picks the preset by telemetry** (`select_for_telemetry`); pass a name
   (`main("nws_fail", aircraft_profile="mc21")`) to force one — see
   `ismpu.config.scenarios.SCENARIOS`. Every scenario contains profile-specific control and conditions for
-  `APPROACH` / `ROLLOUT` / `TAXI`; ICS requires an explicit aircraft profile.
+  `APPROACH` / `ROLLOUT` / `TAXI`; ICS requires an explicit aircraft profile. Matrix rows can be combined
+  into one full-flight object with `compose_matrix_scenario("full", approach_case="А.1.2",
+  ground_case="Б.1.1")`; every MC-21 row A uses the single bench-validated `ics_clear_weather` airborne
+  preset, while row B supplies the ground control.
 - **Run against X-Plane:** `python -m ismpu.runtime.loop --backend xplane --start approach
   --xplane-root C:\X-Plane 12`. For fast rollout reset use `--start rollout`. X-Plane is never selected
   implicitly by the delivery loop.
@@ -448,16 +451,16 @@ telemetry.
 
 ## Run matrix (`ismpu/config/run_matrix.py`)
 
-The customer's tuning matrix as data: **22 codes ("шифр") × a condition catalogue = 280 runs**. One code =
-**one set of coefficients** — that's how the matrix is meant to be worked ("коэффициенты предыдущего
-прогона — начальное приближение следующего"), so presets are per code, not per row.
+The customer's tuning matrix as data: **22 codes ("шифр") × a condition catalogue = 280 runs**. Matrix A
+uses the single bench-validated airborne law `ics_clear_weather`; its codes name test modes and conditions,
+not separate coefficient sets. On matrix B, one code = **one ground coefficient set** ("коэффициенты
+предыдущего прогона — начальное приближение следующего"), so ground presets are per code, not per row.
 
-- Every code has a scenario branch in `config/scenarios.py`; airborne branches refer to reusable law
-  configurations in `config/approach.py::APPROACH_CONFIGS`. Draft status is stored per aircraft and segment,
-  and branches are seeded from the nearest **calibrated**
-  parent rather than from zeros — that is the matrix's own method — with the gain dicts copied so tuning a
-  draft can't silently mutate its parent.
-- **Drafts are never picked automatically.** `select_scenario` excludes them; running one is a deliberate
+- Every code has a full-flight scenario branch in `config/scenarios.py`. All MC-21 branches A use the sole
+  entry in `config/approach.py::APPROACH_CONFIGS`; ground branches B are seeded from the nearest
+  **calibrated** parent rather than from zeros, with copied gain dicts so tuning cannot mutate the parent.
+  Draft status remains per aircraft and segment.
+- **Ground drafts are never picked automatically.** `select_scenario` excludes them; running one is a deliberate
   act. `resolve_scenario` accepts the matrix code directly (`main("Б.2.2", aircraft_profile="mc21")`),
   in either alphabet, because
   that's what the operator at the bench console is holding — and it prints the run title, a draft warning,

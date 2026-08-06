@@ -29,6 +29,7 @@ from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE
 from ismpu.config.scenarios import (
     SCENARIOS, Scenario, resolve_scenario, select_for_telemetry,
+    compose_matrix_scenario,
 )
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,13 @@ if __name__ == "__main__":
     # parser.add_argument("--dashboard", action="store_true")
     # parser.add_argument("--dashboard-tune", action="store_true")
     # args = parser.parse_args()
+
     main(
+        preset=compose_matrix_scenario(
+            scenario_id="full",
+            approach_case="А.1.2",
+            ground_case="Б.1.1",
+        ),
         backend="ics",
         start="approach",
         aircraft_profile="mc21",

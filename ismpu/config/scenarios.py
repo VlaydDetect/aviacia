@@ -5,6 +5,8 @@
 реестра готовых пресетов больше нет.
 """
 
+from __future__ import annotations
+
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -12,7 +14,10 @@ from typing import TYPE_CHECKING, Any
 from ismpu.control.trajectory import VelocityLaw
 from ismpu.control.failures import FailureMode
 from ismpu.config.aircraft_profiles import A330_300, MC21, AircraftProfile
-from ismpu.config.approach import ApproachConfig, APPROACH_CONFIGS
+from ismpu.config.approach import (
+    ApproachConfig,
+    ICS_CLEAR_WEATHER_APPROACH,
+)
 from ismpu.config.constants import INITIAL_SPEED_KTS
 from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.config.segments import FlightSegment
@@ -20,6 +25,7 @@ from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
 from ismpu.envs.weather import decompose_wind
 
 if TYPE_CHECKING:
+    from ismpu.config.run_matrix import MatrixCase
     from ismpu.control.pid import PIDController
     from ismpu.control.system import ControllingSystem
     from ismpu.envs.ics_sim import Telemetry
@@ -70,11 +76,7 @@ class _GroundPresetSpec:
     steering_brake_gain: float = 0.4
     steering_rev_gain: float = 0.0
     law: VelocityLaw = VelocityLaw.GAUSS_BELL
-    draft: bool = False  # True = черновой пресет, требует калибровки
-    approach: str = "default"
-    """Имя конфигурации воздушного закона (`config.approach.APPROACH_CONFIGS`). Отдельным полем, а не
-    частью этого набора: воздушные коэффициенты статические и в пространство коэффициентов NPGS
-    не входят, поэтому смешивать их с пятью регуляторами пробега нельзя."""
+    draft: bool = False  # True = черновой наземный пресет, требует калибровки
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
@@ -213,14 +215,14 @@ _ICY_RWY_SPEC = _GroundPresetSpec(
 
 def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
                   failure: FailureMode | None = None,
-                  approach: str = "default", **overrides) -> _GroundPresetSpec:
+                  **overrides) -> _GroundPresetSpec:
     """Черновик под шифр матрицы на базе откалиброванного пресета.
 
     Словари коэффициентов копируются: spec заморожен, но сами словари — нет, и
     общий словарь на два пресета означал бы, что настройка одного молча меняет другой.
     """
     spec = dict(
-        name=name, matrix_code=code, draft=True, approach=approach,
+        name=name, matrix_code=code, draft=True,
         failure=base.failure if failure is None else failure,
         runway_center=dict(base.runway_center), brake_l=dict(base.brake_l),
         brake_r=dict(base.brake_r), rev_l=dict(base.rev_l), rev_r=dict(base.rev_r),
@@ -266,53 +268,16 @@ B_3_3_RESIDUAL_THRUST = _matrix_draft(
 """Остаточная прямая тяга ~30 % на левом. Отличается от отказа реверса знаком возмущения: не
 «нечем тормозить слева», а «слева подталкивает вперёд»."""
 
-B_4_1_THROUGH = _matrix_draft(_DEFAULT_SPEC, "b_4_1_through", "Б.4.1", approach="a_1_2_flare")
+B_4_1_THROUGH = _matrix_draft(_DEFAULT_SPEC, "b_4_1_through", "Б.4.1")
 """Сквозной прогон без отказов: глиссада → касание → пробег. Критерий добавляет то, чего нет ни
 у одного участка по отдельности — отсутствие скачка управляющих воздействий на стыке."""
 
 B_4_2_THROUGH_ENGINE_OUT = _matrix_draft(
-    _LEFT_REVERSE_FAIL_SPEC, "b_4_2_through_engine_out", "Б.4.2",
-    approach="a_4_1_engine_out_high")
+    _LEFT_REVERSE_FAIL_SPEC, "b_4_2_through_engine_out", "Б.4.2")
 """Сквозной, худший случай: отказ левого двигателя на глиссаде + отказ его реверса на пробеге."""
 
 
-# --------------------------------------------------------------------------- #
-# Черновые пресеты под лист А матрицы (заход и посадка)
-# --------------------------------------------------------------------------- #
-#
-# Настраивается там воздушный контур (`config/approach.py`), а не пять регуляторов пробега.
-# Но запускать прогон всё равно нужно чем-то целым, поэтому шифр захода получает сценарий:
-# наземная часть — штатная (после касания прогон обычный), воздушная — своя.
-#
-# В SFT они не идут: обучаемый слой планирует коэффициенты пробега, а не захода, и метки для
-# воздушного участка у него попросту нет.
-
-_APPROACH_MATRIX = (
-    ("a_1_1_track", "А.1.1", FailureMode.NONE),
-    ("a_1_2_flare", "А.1.2", FailureMode.NONE),
-    ("a_2_1_gear_left_up", "А.2.1", FailureMode.GEAR_CONFIG),
-    ("a_2_2_gear_nose_up", "А.2.2", FailureMode.GEAR_CONFIG),
-    ("a_2_3_gear_partial", "А.2.3", FailureMode.GEAR_CONFIG),
-    ("a_3_1_stab_nose_down_high", "А.3.1", FailureMode.NONE),
-    ("a_3_2_stab_nose_up_high", "А.3.2", FailureMode.NONE),
-    ("a_3_3_stab_nose_down_low", "А.3.3", FailureMode.NONE),
-    ("a_3_4_stab_nose_up_low", "А.3.4", FailureMode.NONE),
-    ("a_4_1_engine_out_high", "А.4.1", FailureMode.ENGINE_OUT_LEFT),
-    ("a_4_2_engine_partial", "А.4.2", FailureMode.THRUST_LEFT_DEGRADED),
-    ("a_4_3_engine_out_low", "А.4.3", FailureMode.ENGINE_OUT_LEFT),
-)
-"""Отказ указан тот, каким он **придёт в телеметрии**. Заклинение стабилизатора (А.3.x) остаётся
-`NONE`: `FaultLeftStab`/`FaultRightStab` в ICD есть, но нашей модели отказов такой режим не
-описывает — он меняет балансировку планера, а не эффективность нашего органа, и парируется тем же
-контуром тангажа."""
-
-APPROACH_MATRIX_DRAFTS = tuple(
-    _matrix_draft(_DEFAULT_SPEC, name, code, failure=failure, approach=name)
-    for name, code, failure in _APPROACH_MATRIX
-)
-
-MATRIX_DRAFTS = (
-    *APPROACH_MATRIX_DRAFTS,
+GROUND_MATRIX_DRAFTS = (
     B_1_1_ROLLOUT, B_1_2_TAXI,
     B_2_1_NWS_STUCK_NEUTRAL, B_2_2_NWS_STUCK_OFFSET, B_2_3_NWS_LIMITED,
     B_3_1_REVERSE_LEFT_FAIL, B_3_2_REVERSE_ASYMMETRIC, B_3_3_RESIDUAL_THRUST,
@@ -378,7 +343,7 @@ class ConditionMatch:
 
     @property
     def exact(self) -> bool:
-        return self.failures_match and self.weather_distance <= 1e-12
+        return self.failures_match and self.weather_distance <= 1e-3
 
 
 @dataclass(frozen=True)
@@ -551,38 +516,35 @@ def _copy_approach(config: ApproachConfig, *, name: str, draft: bool) -> Approac
 
 
 _A330_APPROACH_DRAFT = _copy_approach(
-    APPROACH_CONFIGS["default"], name="xplane_a330_approach", draft=True)
+    ICS_CLEAR_WEATHER_APPROACH, name="xplane_a330_approach", draft=True)
 """The existing X-Plane A330 airborne law, deliberately draft until live acceptance."""
 
 
-def _segments_for_spec(spec: _GroundPresetSpec) -> tuple[FlightSegment, ...]:
-    if spec.name.startswith("a_"):
-        return (FlightSegment.APPROACH,)
+def _ground_segments_for_spec(spec: _GroundPresetSpec) -> tuple[FlightSegment, ...]:
     if spec.name == "b_1_2_taxi":
         return (FlightSegment.TAXI,)
-    if spec.name.startswith("b_4_"):
-        return (FlightSegment.APPROACH, FlightSegment.ROLLOUT)
     if spec.name.startswith("b_"):
         return (FlightSegment.ROLLOUT,)
     return (FlightSegment.ROLLOUT, FlightSegment.TAXI)
 
 
-def _scenario_from_spec(spec: _GroundPresetSpec) -> Scenario:
-    affected = _segments_for_spec(spec)
+def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
+    """Полный сценарий с наземной веткой `spec` и рабочим воздушным законом ICS."""
+    affected = _ground_segments_for_spec(spec)
     default_ground = _DEFAULT_SPEC.ground()
     own_ground = spec.ground()
     rollout_ground = own_ground if FlightSegment.ROLLOUT in affected else default_ground
     taxi_ground = own_ground if FlightSegment.TAXI in affected else _copy_ground(rollout_ground)
-    approach_cfg = APPROACH_CONFIGS[spec.approach]
 
     mc21_drafts = frozenset(affected if spec.draft else ())
-    if approach_cfg.draft:
-        mc21_drafts = mc21_drafts | {FlightSegment.APPROACH}
     a330_drafts = mc21_drafts | {FlightSegment.APPROACH}
     controls = {
         MC21.name: AircraftControlSet(
             approach=_copy_approach(
-                approach_cfg, name=approach_cfg.name, draft=approach_cfg.draft),
+                ICS_CLEAR_WEATHER_APPROACH,
+                name=ICS_CLEAR_WEATHER_APPROACH.name,
+                draft=False,
+            ),
             rollout=_copy_ground(rollout_ground), taxi=_copy_ground(taxi_ground),
             draft_segments=frozenset(mc21_drafts),
         ),
@@ -603,8 +565,6 @@ def _scenario_from_spec(spec: _GroundPresetSpec) -> Scenario:
     for segment in affected:
         conditions[segment] = SegmentConditions(weather=spec.weather, failures=failure_set)
     if spec.name == "b_4_2_through_engine_out":
-        conditions[FlightSegment.APPROACH] = SegmentConditions(
-            weather=spec.weather, failures=frozenset({FailureMode.ENGINE_OUT_LEFT}))
         conditions[FlightSegment.ROLLOUT] = SegmentConditions(
             weather=spec.weather,
             failures=frozenset({FailureMode.ENGINE_OUT_LEFT, FailureMode.REVERSE_LEFT_FAIL}),
@@ -623,10 +583,52 @@ def _scenario_from_spec(spec: _GroundPresetSpec) -> Scenario:
 _SPECS = (
     _DEFAULT_SPEC, _NWS_FAIL_SPEC, _LEFT_REVERSE_FAIL_SPEC, _RIGHT_REVERSE_FAIL_SPEC,
     _RIGHT_WIND_SPEC, _FWD_WIND_SPEC, _WET_RWY_SPEC, _PUDDLY_RWY_SPEC, _ICY_RWY_SPEC,
-    *MATRIX_DRAFTS,
+    *GROUND_MATRIX_DRAFTS,
 )
 
-SCENARIOS: dict[str, Scenario] = {spec.name: _scenario_from_spec(spec) for spec in _SPECS}
+SCENARIOS: dict[str, Scenario] = {
+    spec.name: _scenario_from_ground_spec(spec) for spec in _SPECS
+}
+
+
+def _install_approach_scenarios() -> None:
+    """Лист А: один рабочий ICS-пресет, разные условия и матричные шифры."""
+    from ismpu.config.run_matrix import APPROACH_CASES
+
+    base = SCENARIOS["default"]
+    for case in APPROACH_CASES:
+        controls = {
+            profile: AircraftControlSet(
+                approach=_copy_approach(
+                    control.approach,
+                    name=control.approach.name,
+                    draft=control.approach.draft,
+                ),
+                rollout=_copy_ground(control.rollout),
+                taxi=_copy_ground(control.taxi),
+                draft_segments=control.draft_segments,
+            )
+            for profile, control in base.aircraft_controls.items()
+        }
+        conditions_for_case = SegmentConditions(
+            weather=WEATHER_PRESETS["clear_dry"],
+            failures=frozenset(case.bench_faults),
+        )
+        # Отказ, введённый на заходе, физически сохраняется после касания.
+        conditions = {segment: conditions_for_case for segment in FlightSegment}
+        provenance = dict(base.provenance)
+        provenance[FlightSegment.APPROACH] = case.preset
+        SCENARIOS[case.preset] = replace(
+            base,
+            scenario_id=case.preset,
+            aircraft_controls=controls,
+            conditions=conditions,
+            matrix_codes={FlightSegment.APPROACH: case.code},
+            provenance=provenance,
+        )
+
+
+_install_approach_scenarios()
 
 DEFAULT = SCENARIOS["default"]
 NWS_FAIL = SCENARIOS["nws_fail"]
@@ -696,22 +698,77 @@ def compose_scenario(
     )
 
 
+def compose_matrix_scenario(
+    scenario_id: str,
+    *,
+    approach_case: "str | MatrixCase",
+    ground_case: "str | MatrixCase",
+    seed: int = 0,
+) -> Scenario:
+    """Объединить случай листа А и случай листа Б в один полный сценарий.
+
+    Аргументы принимают как шифры (`А.1.2`, `Б.1.1`), так и имена из поля
+    `MatrixCase.preset`. Все варианты листа А используют единственный рабочий
+    `ICS_CLEAR_WEATHER_APPROACH`; матрица задаёт условия, а не копии PID.
+    """
+    from ismpu.config.run_matrix import APPROACH_CASES, GROUND_CASES
+
+    def find_case(key: "str | MatrixCase", cases, sheet: str):
+        if not isinstance(key, str):
+            if key in cases:
+                return key
+            raise KeyError(f"случай {key!r} не относится к листу {sheet}")
+        normalized = key.strip().upper().replace("A", "А").replace("B", "Б")
+        for case in cases:
+            if case.preset == key or case.code.upper() == normalized:
+                return case
+        raise KeyError(f"в листе {sheet} нет случая {key!r}")
+
+    approach = find_case(approach_case, APPROACH_CASES, "А")
+    ground = find_case(ground_case, GROUND_CASES, "Б")
+    if ground.segment == "taxi":
+        rollout_source: str | Scenario = "default"
+        taxi_source: str | Scenario | None = ground.preset
+    else:
+        rollout_source = ground.preset
+        taxi_source = None
+    scenario = compose_scenario(
+        scenario_id,
+        approach=approach.preset,
+        rollout=rollout_source,
+        taxi=taxi_source,
+        seed=seed,
+    )
+    # Отказы листа А не чинятся сами в момент касания. Переносим их на землю;
+    # frozenset одновременно убирает повтор, если лист Б содержит тот же отказ.
+    persistent = scenario.conditions_for(FlightSegment.APPROACH).failures
+    conditions = dict(scenario.conditions)
+    for segment in (FlightSegment.ROLLOUT, FlightSegment.TAXI):
+        current = conditions[segment]
+        conditions[segment] = replace(
+            current, failures=current.failures | persistent)
+    return replace(scenario, conditions=conditions)
+
+
 def _install_through_scenarios() -> None:
-    """Build the matrix through-cases from their real phase sources."""
+    """Собрать штатные сквозные случаи Б.4 из реальных источников листов А и Б."""
     sources = {
-        "b_4_1_through": "a_1_2_flare",
-        "b_4_2_through_engine_out": "a_4_1_engine_out_high",
+        "b_4_1_through": "А.1.2",
+        "b_4_2_through_engine_out": "А.4.1",
     }
-    for scenario_id, approach_id in sources.items():
+    for scenario_id, approach_code in sources.items():
         rollout_source = SCENARIOS[scenario_id]
-        SCENARIOS[scenario_id] = compose_scenario(
+        scenario = compose_matrix_scenario(
             scenario_id,
-            approach=SCENARIOS[approach_id],
-            rollout=rollout_source,
+            approach_case=approach_code,
+            ground_case=rollout_source.matrix_code,
             seed=rollout_source.seed,
         )
-        SCENARIOS[scenario_id] = replace(
-            SCENARIOS[scenario_id], matrix_codes=rollout_source.matrix_codes)
+        code = rollout_source.matrix_code
+        SCENARIOS[scenario_id] = replace(scenario, matrix_codes={
+            FlightSegment.APPROACH: code,
+            FlightSegment.ROLLOUT: code,
+        })
 
 
 _install_through_scenarios()
@@ -720,7 +777,7 @@ _install_through_scenarios()
 FAILURE_MISMATCH_PENALTY = 100.0
 _FRICTION_SCALE = 15.0
 _WIND_SCALE = 20.0
-_VISIBILITY_SCALE = 16000.0
+_VISIBILITY_SCALE = 30100.0
 
 
 def weather_distance(
@@ -730,12 +787,19 @@ def weather_distance(
         a.wind_speed_kts, a.wind_dir_from_degt, runway_heading_degt)
     cross_b, head_b = decompose_wind(
         b.wind_speed_kts, b.wind_dir_from_degt, runway_heading_degt)
+
+    runway_friction_dist = abs(a.runway_friction - b.runway_friction) / _FRICTION_SCALE
+    cross_wind_dist = abs(cross_a - cross_b) / _WIND_SCALE
+    head_wind_dist = 0.5 * abs(head_a - head_b) / _WIND_SCALE
+    rain_pct_dist = abs(a.rain_pct - b.rain_pct)
+    visibility_dist = 0.5 * abs(a.visibility_m - b.visibility_m) / _VISIBILITY_SCALE
+
     return (
-        abs(a.runway_friction - b.runway_friction) / _FRICTION_SCALE
-        + abs(cross_a - cross_b) / _WIND_SCALE
-        + 0.5 * abs(head_a - head_b) / _WIND_SCALE
-        + abs(a.rain_pct - b.rain_pct)
-        + 0.5 * abs(a.visibility_m - b.visibility_m) / _VISIBILITY_SCALE
+        runway_friction_dist
+        + cross_wind_dist
+        + head_wind_dist
+        + rain_pct_dist
+        + visibility_dist
     )
 
 

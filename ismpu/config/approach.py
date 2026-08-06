@@ -72,7 +72,7 @@ class ApproachConfig:
     коэффициента заново.
     """
 
-    name: str = "default"
+    name: str = "ics_clear_weather"
     draft: bool = False
     """`True` — заготовка под шифр матрицы прогонов, коэффициенты не калиброваны. Такие пресеты
     не подбираются автоматически: до настройки они хуже подтверждённого умолчания, а тихая
@@ -228,38 +228,19 @@ def _pid_from_colleague(spec: dict, *, name: str) -> dict:
     )
 
 
-APPROACH_DEFAULT = ApproachConfig()
-"""Настройки захода по умолчанию — «чистая» погода без отказов, откалибровано на стенде."""
+ICS_CLEAR_WEATHER_CONFIG_PATH = Path(__file__).with_name("ics_clear_weather_pid.json")
 
+ICS_CLEAR_WEATHER_APPROACH = replace(
+    ApproachConfig.from_json(ICS_CLEAR_WEATHER_CONFIG_PATH),
+    name="ics_clear_weather",
+    draft=False,
+)
+"""Единственный воздушный пресет МС-21: проверенная конфигурация ICS из репозитория Романа."""
 
-def _draft(name: str) -> ApproachConfig:
-    """Заготовка воздушного пресета под шифр матрицы: копия подтверждённой настройки.
-
-    Копия, а не нули: стартовать настройку от работающего на стенде набора — это то, как матрица
-    и предписывает работать («коэффициенты предыдущего прогона — начальное приближение
-    следующего»). Пометка `draft` при этом честно говорит, что под конкретный отказ он ещё не
-    считался.
-    """
-    return replace(APPROACH_DEFAULT, name=name, draft=True,
-                   roll_pid=dict(APPROACH_DEFAULT.roll_pid),
-                   pitch_pid=dict(APPROACH_DEFAULT.pitch_pid),
-                   speed_pid=dict(APPROACH_DEFAULT.speed_pid))
-
+# Совместимое имя для закона и существующих импортов. Это тот же единственный пресет,
+# а не второй набор коэффициентов.
+APPROACH_DEFAULT = ICS_CLEAR_WEATHER_APPROACH
 
 APPROACH_CONFIGS: dict[str, ApproachConfig] = {
-    "default": APPROACH_DEFAULT,
-    # Лист А матрицы прогонов: один шифр — один набор коэффициентов (см. config/run_matrix.py).
-    "a_1_1_track": _draft("a_1_1_track"),
-    "a_1_2_flare": _draft("a_1_2_flare"),
-    "a_2_1_gear_left_up": _draft("a_2_1_gear_left_up"),
-    "a_2_2_gear_nose_up": _draft("a_2_2_gear_nose_up"),
-    "a_2_3_gear_partial": _draft("a_2_3_gear_partial"),
-    "a_3_1_stab_nose_down_high": _draft("a_3_1_stab_nose_down_high"),
-    "a_3_2_stab_nose_up_high": _draft("a_3_2_stab_nose_up_high"),
-    "a_3_3_stab_nose_down_low": _draft("a_3_3_stab_nose_down_low"),
-    "a_3_4_stab_nose_up_low": _draft("a_3_4_stab_nose_up_low"),
-    "a_4_1_engine_out_high": _draft("a_4_1_engine_out_high"),
-    "a_4_2_engine_partial": _draft("a_4_2_engine_partial"),
-    "a_4_3_engine_out_low": _draft("a_4_3_engine_out_low"),
+    ICS_CLEAR_WEATHER_APPROACH.name: ICS_CLEAR_WEATHER_APPROACH,
 }
-"""Пресеты воздушного участка по шифрам матрицы. Все, кроме `default`, — черновые."""

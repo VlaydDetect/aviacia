@@ -27,5 +27,8 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["ismpu*"]
 
+[tool.setuptools.package-data]
+"ismpu.config" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

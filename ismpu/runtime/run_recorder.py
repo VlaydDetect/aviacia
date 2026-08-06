@@ -73,11 +73,11 @@ def controller_pids(controller) -> dict:
         "roll": approach.roll_pid,
         "pitch": approach.pitch_pid,
         "air_speed": approach.speed_pid,
-        "steer": ground["runway_center_pid"],
-        "brake_l": ground["pid_brake_l"],
-        "brake_r": ground["pid_brake_r"],
-        "reverse_l": ground["pid_rev_l"],
-        "reverse_r": ground["pid_rev_r"],
+        "steer": ground.get("runway_center_pid", None),
+        "brake_l": ground.get("pid_brake_l", None),
+        "brake_r": ground.get("pid_brake_r", None),
+        "reverse_l": ground.get("pid_rev_l", None),
+        "reverse_r": ground.get("pid_rev_r", None),
     }
 
 
@@ -198,22 +198,23 @@ class RunRecorder:
             }
             operating_points = pid_operating_points(controller)
             for name, pid in controller_pids(controller).items():
-                prefix = f"pid_{name}_"
-                row.update({
-                    prefix + "kp": pid.kp,
-                    prefix + "ki": pid.ki,
-                    prefix + "kd": pid.kd,
-                    prefix + "value": operating_points[name]["value"],
-                    prefix + "setpoint": operating_points[name]["setpoint"],
-                    prefix + "error": pid.last_error,
-                    prefix + "output": pid.last_output,
-                    prefix + "p": pid.last_p_term,
-                    prefix + "i": pid.last_i_term,
-                    prefix + "d": pid.last_d_term,
-                    prefix + "saturated": int(
-                        pid.last_unconstrained < pid.min_out
-                        or pid.last_unconstrained > pid.max_out),
-                })
+                if pid:
+                    prefix = f"pid_{name}_"
+                    row.update({
+                        prefix + "kp": pid.kp,
+                        prefix + "ki": pid.ki,
+                        prefix + "kd": pid.kd,
+                        prefix + "value": operating_points[name]["value"],
+                        prefix + "setpoint": operating_points[name]["setpoint"],
+                        prefix + "error": pid.last_error,
+                        prefix + "output": pid.last_output,
+                        prefix + "p": pid.last_p_term,
+                        prefix + "i": pid.last_i_term,
+                        prefix + "d": pid.last_d_term,
+                        prefix + "saturated": int(
+                            pid.last_unconstrained < pid.min_out
+                            or pid.last_unconstrained > pid.max_out),
+                    })
             self._rows.append(row)
             self._sequence += 1
 

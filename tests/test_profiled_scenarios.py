@@ -75,7 +75,7 @@ def test_composition_selects_each_phase_and_preserves_provenance():
         FailureMode.REVERSE_LEFT_FAIL,
     })
     assert composed.control_for("mc21", FlightSegment.APPROACH).name == \
-        "a_4_1_engine_out_high"
+        "ics_clear_weather"
     assert composed.control_for("mc21", FlightSegment.ROLLOUT) is \
         SCENARIOS["left_reverse_fail"].control_for("mc21", FlightSegment.ROLLOUT)
 

@@ -14,6 +14,7 @@ from ismpu.config.scenarios import (
     SensorNoise,
     TouchdownSetup,
     compose_scenario,
+    compose_matrix_scenario,
     match_conditions,
     matrix_battery,
     resolve_scenario,
@@ -26,6 +27,7 @@ from ismpu.config.scenarios import (
 __all__ = (
     "AircraftControlSet", "ApproachSetup", "ConditionMatch", "GroundControlConfig",
     "Scenario", "SegmentConditions", "SensorNoise", "TouchdownSetup", "compose_scenario",
+    "compose_matrix_scenario",
     "match_conditions", "matrix_battery", "resolve_scenario", "scenario_distance",
     "select_for_telemetry", "select_scenario", "weather_distance",
 )

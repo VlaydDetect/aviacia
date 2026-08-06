@@ -7,7 +7,8 @@ ICS остаётся производственным backend по умолча�
 
 Канонический реестр — `ismpu.config.scenarios.SCENARIOS`; его значения являются готовыми объектами
 `Scenario`. Сценарий содержит настройки `APPROACH / ROLLOUT / TAXI` отдельно для `mc21` и `a330-300`,
-условия каждого участка и provenance источников составного сценария. Для программной сборки используется:
+условия каждого участка и provenance источников составного сценария. Для произвольной сборки по
+участкам используется:
 
 ```python
 from ismpu.config.scenarios import compose_scenario
@@ -18,6 +19,23 @@ scenario = compose_scenario(
     rollout="left_reverse_fail",
 )
 ```
+
+Для матрицы стендовых прогонов удобнее выбирать строки листов А и Б напрямую:
+
+```python
+from ismpu.config.scenarios import compose_matrix_scenario
+
+scenario = compose_matrix_scenario(
+    "full",
+    approach_case="А.4.1",
+    ground_case="Б.3.1",
+)
+```
+
+Все строки листа А для `mc21` используют один проверенный воздушный пресет
+`ics_clear_weather`, перенесённый из `roman_aviacia_ics/config/ics_clear_weather_pid.json`.
+Они различаются условиями испытания, а не копиями наземного PID-пресета. Отказы листа А
+сохраняются после касания; совпадающие отказы А и Б объединяются один раз.
 
 `taxi=None` наследует источник пробега. Повторяющийся отказ хранится один раз в `frozenset`, поэтому
 X‑Plane не вводит его повторно; неизменная погода также не переустанавливается. ICS не меняет среду:

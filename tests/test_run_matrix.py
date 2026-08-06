@@ -2,12 +2,22 @@
 
 import pytest
 
-from ismpu.config.approach import APPROACH_CONFIGS, APPROACH_DEFAULT
+from ismpu.config.approach import (
+    APPROACH_CONFIGS,
+    APPROACH_DEFAULT,
+    ICS_CLEAR_WEATHER_APPROACH,
+)
 from ismpu.config.run_matrix import (
     RUN_MATRIX, APPROACH_CASES, GROUND_CASES, APPROACH_CONDITIONS,
     GROUND_CONDITIONS, CASE_BY_CODE, TOTAL_RUNS, ground_cases,
 )
-from ismpu.config.scenarios import SCENARIOS, matrix_battery, resolve_scenario, select_scenario
+from ismpu.config.scenarios import (
+    SCENARIOS,
+    compose_matrix_scenario,
+    matrix_battery,
+    resolve_scenario,
+    select_scenario,
+)
 from ismpu.config.segments import FlightSegment
 from ismpu.control.failures import FailureMode
 from ismpu.control.system import ControllingSystem
@@ -30,25 +40,64 @@ def test_taxi_skips_the_aquaplaning_condition():
     assert all(condition.code != "У.7" for condition in taxi.conditions)
 
 
-def test_every_case_has_one_scenario_and_phase_draft():
-    for case in RUN_MATRIX:
+def test_every_case_has_one_full_scenario_and_correct_phase_admission():
+    for case in APPROACH_CASES:
         scenario = SCENARIOS[case.preset]
-        segments = (
-            (FlightSegment.APPROACH, FlightSegment.ROLLOUT)
-            if case.segment == "through"
-            else (FlightSegment(case.segment),)
+        assert scenario.matrix_codes[FlightSegment.APPROACH] == case.code
+        assert not scenario.is_draft("mc21", FlightSegment.APPROACH)
+        assert scenario.control_for("mc21", FlightSegment.ROLLOUT)
+        expected_failures = frozenset(case.bench_faults)
+        assert all(
+            scenario.conditions_for(segment).failures == expected_failures
+            for segment in FlightSegment
         )
-        for segment in segments:
-            assert scenario.matrix_codes[segment] == case.code
-            assert scenario.is_draft("mc21", segment)
+
+    for case in GROUND_CASES:
+        scenario = SCENARIOS[case.preset]
+        segment = (
+            FlightSegment.TAXI if case.segment == "taxi" else FlightSegment.ROLLOUT)
+        assert scenario.matrix_codes[segment] == case.code
+        assert scenario.is_draft("mc21", segment)
+        if case.segment == "through":
+            assert scenario.matrix_codes[FlightSegment.APPROACH] == case.code
+            assert not scenario.is_draft("mc21", FlightSegment.APPROACH)
 
 
-def test_approach_cases_use_their_own_control_config():
+def test_all_approach_cases_use_the_single_working_ics_control_config():
+    assert APPROACH_CONFIGS == {
+        "ics_clear_weather": ICS_CLEAR_WEATHER_APPROACH,
+    }
     for case in APPROACH_CASES:
         config = SCENARIOS[case.preset].control_for("mc21", FlightSegment.APPROACH)
-        assert config.name == case.preset
-        assert config is not APPROACH_CONFIGS[case.preset]
-        assert config.draft
+        assert config.name == "ics_clear_weather"
+        assert config is not ICS_CLEAR_WEATHER_APPROACH
+        assert config.roll_pid == ICS_CLEAR_WEATHER_APPROACH.roll_pid
+        assert config.pitch_pid == ICS_CLEAR_WEATHER_APPROACH.pitch_pid
+        assert config.speed_pid == ICS_CLEAR_WEATHER_APPROACH.speed_pid
+        assert not config.draft
+
+
+def test_compose_matrix_scenario_combines_air_and_ground_control_and_failures():
+    scenario = compose_matrix_scenario(
+        "a41-b31",
+        approach_case=CASE_BY_CODE["А.4.1"],
+        ground_case=CASE_BY_CODE["Б.3.1"],
+    )
+    assert scenario.control_for(
+        "mc21", FlightSegment.APPROACH).name == "ics_clear_weather"
+    assert scenario.control_for(
+        "mc21", FlightSegment.ROLLOUT).rev_l == \
+        SCENARIOS["b_3_1_reverse_left_fail"].control_for(
+            "mc21", FlightSegment.ROLLOUT).rev_l
+    assert scenario.conditions_for(FlightSegment.APPROACH).failures == frozenset({
+        FailureMode.ENGINE_OUT_LEFT,
+    })
+    assert scenario.conditions_for(FlightSegment.ROLLOUT).failures == frozenset({
+        FailureMode.ENGINE_OUT_LEFT,
+        FailureMode.REVERSE_LEFT_FAIL,
+    })
+    assert scenario.provenance[FlightSegment.APPROACH] == "a_4_1_engine_out_high"
+    assert scenario.provenance[FlightSegment.ROLLOUT] == "b_3_1_reverse_left_fail"
 
 
 def test_drafts_are_never_selected_automatically():
@@ -74,7 +123,7 @@ def test_applying_each_b42_segment_rebuilds_the_relevant_pids():
     controller = ControllingSystem()
     scenario = SCENARIOS["b_4_2_through_engine_out"]
     scenario.apply_control(controller, "mc21", FlightSegment.APPROACH)
-    assert controller.approach_channel.config.name == "a_4_1_engine_out_high"
+    assert controller.approach_channel.config.name == "ics_clear_weather"
     first = controller.approach_channel
     scenario.apply_control(controller, "mc21", FlightSegment.APPROACH)
     assert controller.approach_channel is not first
