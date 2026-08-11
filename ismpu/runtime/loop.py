@@ -260,6 +260,16 @@ def main(
 
 
 if __name__ == "__main__":
+    # The generic matrix runtime remains available through ``main(...)`` for
+    # X-Plane and ground-only experiments.  Live ICS approach flights use the
+    # byte-for-byte port of the contour validated in ``aviacia_v2``: its
+    # receive/update/send timing and 0 -> 1 handshake are part of the control
+    # contract and must not be substituted by the generic backend adapter.
+    from ismpu.working_ics.runner import live_main
+
+    raise SystemExit(live_main())
+
+    # Historical generic live entrypoint retained below as documentation.
     # time.sleep(2)
     # sim = build_sim(
     #     "ics",
