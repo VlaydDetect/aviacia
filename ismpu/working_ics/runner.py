@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path(__file__).with_name("ics_clear_weather_pid.json")
 TERMINAL_PHASE_RADIO_ALTITUDE_FT = 80.0
 LANDING_MODE_RADIO_ALTITUDE_FT = 40.0
+FLARE_MODE_RADIO_ALTITUDE_FT = 100.0
+FLARE_MODE_END_RADIO_ALTITUDE_FT = 20.0
 
 
 def receive(sock: socket.socket, timeout_s: float) -> tuple[ICSInputs, tuple[str, int]]:
@@ -60,12 +62,26 @@ def airborne_control_mode(
     return ControlModeState.Approach
 
 
+def airborne_flare_mode(
+    state: ICSInputs,
+    flare_mode_radio_altitude_ft: float = FLARE_MODE_RADIO_ALTITUDE_FT,
+    flare_mode_end_radio_altitude_ft: float = FLARE_MODE_END_RADIO_ALTITUDE_FT,
+) -> bool:
+    return bool(
+        state.RadioAltitudeValid
+        and state.RadioAltitude <= flare_mode_radio_altitude_ft
+        and state.RadioAltitude > flare_mode_end_radio_altitude_ft
+    )
+
+
 def make_airborne_output(
     state: ICSInputs,
     result: ControlResult,
     control_mode: ControlModeState | None = None,
+    flare_mode: bool | None = None,
 ) -> ICSOutputs:
     active_mode = control_mode or airborne_control_mode(state)
+    active_flare_mode = airborne_flare_mode(state) if flare_mode is None else flare_mode
     return ICSOutputs(
         ControlValidMask=AIRBORNE_CONTROL_VALID_MASK,
         ControlMode=active_mode,
@@ -80,13 +96,15 @@ def make_airborne_output(
         ThrottleLeft=result.throttle_left_hold_norm,
         ThrottleRight=result.throttle_right_hold_norm,
         ModeAIReady=1,
-        # Keep every airborne mode flag identical to the high-altitude PID
-        # approach. Flare and align remain controller-internal phases only;
-        # advertising them to ICS changes the simulator's longitudinal law.
+        # This isolated bench experiment advertises FLARE shortly before the
+        # observed AgentIsActive dropout.  Arm and every other phase flag stay
+        # unchanged so the resulting longitudinal-law change is attributable.
         ModeLocCapture=0,
         ModeLocTrack=0,
         ModeGSCapture=0,
         ModeGSTrack=0,
+        ModeFlareArm=0,
+        ModeFlare=int(active_flare_mode),
         ModeSpeed=1,
         ModeThrust=1,
         QualityLateralError=abs(result.loc_dots),
@@ -165,6 +183,18 @@ def main(argv: list[str] | None = None) -> int:
         default=LANDING_MODE_RADIO_ALTITUDE_FT,
         help="Switch ControlMode from Approach to Landing at this radio altitude.",
     )
+    parser.add_argument(
+        "--flare-mode-ra-ft",
+        type=float,
+        default=FLARE_MODE_RADIO_ALTITUDE_FT,
+        help="Set the bench ModeFlare bit at this radio altitude.",
+    )
+    parser.add_argument(
+        "--flare-mode-end-ra-ft",
+        type=float,
+        default=FLARE_MODE_END_RADIO_ALTITUDE_FT,
+        help="Clear the bench ModeFlare bit at this radio altitude.",
+    )
     parser.add_argument("--dashboard-host", default="127.0.0.1")
     parser.add_argument("--dashboard-port", type=int, default=8765)
     parser.add_argument(
@@ -191,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         or args.criteria_max_course_error_deg <= 0.0
         or args.criteria_max_glideslope_error_deg <= 0.0
         or args.landing_mode_ra_ft <= 0.0
+        or args.flare_mode_ra_ft <= 0.0
+        or args.flare_mode_end_ra_ft < 0.0
+        or args.flare_mode_end_ra_ft >= args.flare_mode_ra_ft
         or not all(
             math.isfinite(value)
             for value in (
@@ -198,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.criteria_max_course_error_deg,
                 args.criteria_max_glideslope_error_deg,
                 args.landing_mode_ra_ft,
+                args.flare_mode_ra_ft,
+                args.flare_mode_end_ra_ft,
                 args.active_wait_seconds,
                 args.rollout_timeout_seconds,
             )
@@ -319,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         "flaps_angle_deg", "slats_angle_deg", "flap_configuration", "landing_weight_kg",
         "target_ias_kt", "vapp_kt", "vsr1_kt", "vfe_kt", "alpha_prot_deg", "alpha_sw_deg",
         "alpha_margin_deg", "roll_limit_deg", "flare_armed", "flare_active", "flare_progress",
+        "mode_flare",
         "flare_entry_ra_ft", "flare_entry_vs_fpm",
         "body_norm_accel_g", "left_throttle_angle_deg", "right_throttle_angle_deg",
         "stabilizer_angle_deg", "elevator_left_angle_deg", "elevator_right_angle_deg",
@@ -345,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 0
     terminal_inactive_reported = False
     last_airborne_mode = ControlModeState.Approach
+    last_flare_mode = False
     try:
         with log_path.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns)
@@ -397,6 +434,11 @@ def main(argv: list[str] | None = None) -> int:
                     state,
                     args.landing_mode_ra_ft,
                 )
+                active_flare_mode = airborne_flare_mode(
+                    state,
+                    args.flare_mode_ra_ft,
+                    args.flare_mode_end_ra_ft,
+                )
                 if active_airborne_mode is not last_airborne_mode:
                     print(
                         "switching ControlMode: "
@@ -404,6 +446,12 @@ def main(argv: list[str] | None = None) -> int:
                         f"at RA={state.RadioAltitude:.1f}ft"
                     )
                     last_airborne_mode = active_airborne_mode
+                if active_flare_mode != last_flare_mode:
+                    print(
+                        f"setting ModeFlare={int(active_flare_mode)} "
+                        f"at RA={state.RadioAltitude:.1f}ft"
+                    )
+                    last_flare_mode = active_flare_mode
                 if dashboard_state is not None:
                     dashboard_state.record(now - start, state, result)
                 criteria_sample = None
@@ -424,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
                         state,
                         result,
                         active_airborne_mode,
+                        active_flare_mode,
                     )
                     sock.sendto(output.to_json_bytes(), latest_sender)
                     next_send = now + 1.0 / args.rate_hz
@@ -475,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
                     "flare_armed": int(result.flare_armed),
                     "flare_active": int(result.flare_active),
                     "flare_progress": result.flare_progress,
+                    "mode_flare": int(active_flare_mode),
                     "flare_entry_ra_ft": result.flare_entry_radio_altitude_ft,
                     "flare_entry_vs_fpm": result.flare_entry_vertical_speed_fpm,
                     "body_norm_accel_g": state.BodyNormAccel,
@@ -542,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"roll={state.RollAngle:+.2f}/{result.target_roll_deg:+.2f} "
                         f"pitch={state.PitchAngle:+.2f}/{result.target_pitch_deg:+.2f} "
                         f"mode={active_airborne_mode.name} flare={result.flare_progress:.2f} "
+                        f"ModeFlare={int(active_flare_mode)} "
                         f"aoa={result.estimated_aoa_deg:.2f}/{result.reference_aoa_deg:.2f} "
                         f"thr={state.LeftThrottleAngle:.1f}/{state.RightThrottleAngle:.1f} "
                         f"T={state.EngLeftThrust:.1f}/{state.EngRigntThrust:.1f} "

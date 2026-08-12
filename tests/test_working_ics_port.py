@@ -54,6 +54,67 @@ def test_airborne_mode_switches_to_landing_before_the_observed_38ft_dropout():
     assert runner.airborne_control_mode(landing) is ControlModeState.Landing
 
 
+def test_flare_mode_bit_switches_on_at_100ft_without_arming_other_phase_bits():
+    above = SimpleNamespace(
+        IndicatedAirspeed=146.0,
+        RadioAltitudeValid=1,
+        RadioAltitude=100.1,
+    )
+    at_threshold = SimpleNamespace(
+        IndicatedAirspeed=146.0,
+        RadioAltitudeValid=1,
+        RadioAltitude=100.0,
+    )
+    result = SimpleNamespace(
+        elevator=0.12,
+        aileron=-1.5,
+        rudder=0.0,
+        throttle_left_rate=0.25,
+        throttle_right_rate=0.20,
+        throttle_left_hold_norm=0.36,
+        throttle_right_hold_norm=0.36,
+        loc_dots=-0.03,
+        heading_error_deg=0.4,
+        target_ias_kt=145.0,
+    )
+
+    assert runner.make_airborne_output(above, result).ModeFlare == 0
+    packet = runner.make_airborne_output(at_threshold, result)
+    assert packet.ModeFlare == 1
+    assert packet.ModeFlareArm == 0
+    assert packet.ModeAlignArm == packet.ModeAlign == 0
+
+
+def test_flare_mode_bit_clears_at_20ft_while_landing_mode_remains_active():
+    above_cutoff = SimpleNamespace(
+        IndicatedAirspeed=140.0,
+        RadioAltitudeValid=1,
+        RadioAltitude=20.1,
+    )
+    at_cutoff = SimpleNamespace(
+        IndicatedAirspeed=140.0,
+        RadioAltitudeValid=1,
+        RadioAltitude=20.0,
+    )
+    result = SimpleNamespace(
+        elevator=0.05,
+        aileron=0.0,
+        rudder=0.0,
+        throttle_left_rate=0.0,
+        throttle_right_rate=0.0,
+        throttle_left_hold_norm=0.0,
+        throttle_right_hold_norm=0.0,
+        loc_dots=0.0,
+        heading_error_deg=0.0,
+        target_ias_kt=140.0,
+    )
+
+    assert runner.make_airborne_output(above_cutoff, result).ModeFlare == 1
+    packet = runner.make_airborne_output(at_cutoff, result)
+    assert packet.ModeFlare == 0
+    assert packet.ControlMode is ControlModeState.Landing
+
+
 def test_validated_controller_config_is_packaged():
     config = ControllerConfig.from_json(runner.DEFAULT_CONFIG)
 
@@ -62,9 +123,20 @@ def test_validated_controller_config_is_packaged():
     assert config.pitch_pid.output_max == 0.5
     assert config.roll_pid.kp == -7
     assert config.landing_flap_fallback == "FLAPS_3"
-    assert config.flare_vs_to_pitch_gain_deg_per_fpm == 0.0075
-    assert config.flare_pitch_base_deg == 2.2
+    assert config.min_pitch_target_deg == -2.0
+    assert config.max_pitch_target_deg == 10.0
+    assert config.flare_vs_to_pitch_gain_deg_per_fpm == 0.0080
+    assert config.flare_pitch_base_deg == 2.35
     assert config.flare_pitch_attitude_damping_gain == 0.10
+    assert config.flare_max_pitch_target_deg == 6.5
+
+
+def test_future_go_around_pitch_envelope_does_not_expand_landing_flare():
+    config = ControllerConfig.from_json(runner.DEFAULT_CONFIG)
+
+    assert config.max_pitch_target_deg == 10.0
+    assert config.flare_max_pitch_target_deg == 6.5
+    assert config.flare_max_pitch_target_deg < config.max_pitch_target_deg
 
 
 def test_roundout_commands_a_material_pitch_increase_before_touchdown():

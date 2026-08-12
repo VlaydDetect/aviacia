@@ -121,8 +121,10 @@ class ControllerConfig:
     min_vertical_correction_deg: float = -1.0
     max_vertical_correction_deg: float = 2.0
     pitch_target_rate_deg_per_s: float = 1.5
-    min_pitch_target_deg: float = -1.0
-    max_pitch_target_deg: float = 8.0
+    # Broad airborne envelope reserved for approach recovery / future go-around.
+    # The landing roundout remains independently constrained by flare_* limits.
+    min_pitch_target_deg: float = -2.0
+    max_pitch_target_deg: float = 10.0
     landing_weight_kg: float = 69277.0
     landing_flap_fallback: str = "FLAPS_3"
     flare_arm_radio_altitude_ft: float = 400.0
@@ -132,13 +134,13 @@ class ControllerConfig:
     flare_end_radio_altitude_ft: float = 5.0
     flare_initial_vs_fpm: float = -472.44
     touchdown_target_vs_fpm: float = -68.90
-    flare_vs_to_pitch_gain_deg_per_fpm: float = 0.0075
-    flare_pitch_base_deg: float = 2.2
+    flare_vs_to_pitch_gain_deg_per_fpm: float = 0.0080
+    flare_pitch_base_deg: float = 2.35
     flare_pitch_attitude_damping_gain: float = 0.10
     flare_pitch_rate_damping_gain: float = 0.08
     flare_min_pitch_target_deg: float = 0.5
     flare_pitch_target_rate_deg_per_s: float = 4.0
-    flare_max_pitch_target_deg: float = 6.0
+    flare_max_pitch_target_deg: float = 6.5
     elevator_command_sign: float = 1.0
     throttle_forward_max_deg: float = 55.7
     throttle_rate_max_deg_per_s: float = 8.0
