@@ -129,6 +129,9 @@ def test_validated_controller_config_is_packaged():
     assert config.flare_pitch_base_deg == 2.35
     assert config.flare_pitch_attitude_damping_gain == 0.10
     assert config.flare_max_pitch_target_deg == 6.5
+    assert config.terminal_hold_radio_altitude_ft == 10.0
+    assert config.terminal_guidance_cutoff_radio_altitude_ft == 5.0
+    assert config.terminal_hold_pitch_target_deg == 6.3
 
 
 def test_future_go_around_pitch_envelope_does_not_expand_landing_flare():
@@ -183,6 +186,67 @@ def test_roundout_commands_a_material_pitch_increase_before_touchdown():
     assert roundout is not None
     assert roundout.target_pitch_deg >= 5.2
     assert roundout.target_pitch_deg > entry.target_pitch_deg + 1.0
+
+
+def test_terminal_pitch_hold_starts_before_last_five_feet_guidance_cutoff():
+    def inputs(**overrides):
+        return ICSInputs(*[
+            overrides.get(field.name, 0) for field in fields(ICSInputs)
+        ])
+
+    config = ControllerConfig.from_json(runner.DEFAULT_CONFIG)
+    controller = ClearWeatherILSController(config)
+    common = {
+        "AgentIsActive": 1,
+        "RadioAltitudeValid": 1,
+        "GroundSpeedValid": 1,
+        "GroundSpeed": 140.0,
+        "VerticalSpeedValid": 1,
+        "VerticalSpeed": -550.0,
+        "IndicatedAirspeedValid": 1,
+        "IndicatedAirspeed": 140.0,
+        "PitchAngleValid": 1,
+        "PitchAngle": 5.7,
+        "BodyPitchRateValid": 1,
+        "BodyPitchRate": 0.0,
+        "RunwayHeadingValid": 1,
+        "RunwayHeading": 270.0,
+        "TrkAngleMagneticValid": 1,
+        "TrkAngleMagnetic": 271.0,
+        "RollAngleValid": 1,
+        "RollAngle": 0.4,
+        "LocDeviationValid": 1,
+        "LocDeviation": 0.155,
+        "GSDeviationValid": 1,
+        "GSDeviation": -0.175,
+        "FlapsAngle": 27.0,
+    }
+
+    above = controller.update(inputs(**common, RadioAltitude=10.1), 0.25)
+    terminal = controller.update(inputs(**common, RadioAltitude=9.9), 0.25)
+
+    assert not above.terminal_hold_active
+    assert terminal.terminal_hold_active
+    assert terminal.target_heading_deg != 270.0
+    assert terminal.target_roll_deg != 0.0
+    assert terminal.vertical_correction_deg == 0.0
+    assert terminal.target_pitch_deg == config.terminal_hold_pitch_target_deg
+    assert terminal.elevator > 0.0
+
+    guidance_cutoff = controller.update(
+        inputs(**common, RadioAltitude=4.9),
+        0.25,
+    )
+    assert guidance_cutoff.terminal_hold_active
+    assert guidance_cutoff.target_heading_deg == 270.0
+    assert guidance_cutoff.target_roll_deg == 0.0
+
+    touchdown = controller.update(inputs(
+        **common,
+        RadioAltitude=0.3,
+        LeftGearWeightOnWheels=1,
+    ), 0.05)
+    assert not touchdown.terminal_hold_active
 
 
 def test_live_entrypoint_uses_validated_live_arguments(monkeypatch):

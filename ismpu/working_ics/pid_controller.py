@@ -141,6 +141,9 @@ class ControllerConfig:
     flare_min_pitch_target_deg: float = 0.5
     flare_pitch_target_rate_deg_per_s: float = 4.0
     flare_max_pitch_target_deg: float = 6.5
+    terminal_hold_radio_altitude_ft: float = 10.0
+    terminal_guidance_cutoff_radio_altitude_ft: float = 5.0
+    terminal_hold_pitch_target_deg: float = 6.3
     elevator_command_sign: float = 1.0
     throttle_forward_max_deg: float = 55.7
     throttle_rate_max_deg_per_s: float = 8.0
@@ -218,6 +221,7 @@ class ControlResult:
     flare_armed: bool
     flare_active: bool
     flare_progress: float
+    terminal_hold_active: bool
     flare_entry_radio_altitude_ft: float
     flare_entry_vertical_speed_fpm: float
     touchdown_vertical_speed_limit_fpm: float
@@ -283,6 +287,14 @@ class ClearWeatherILSController:
         target_ias = self._target_ias_kt
         loc_dots = state.LocDeviation / cfg.loc_full_scale_ddm
         gs_dots = cfg.glideslope_sign * state.GSDeviation / cfg.gs_full_scale_ddm
+        main_gear_contact = bool(
+            state.LeftGearWeightOnWheels or state.RightGearWeightOnWheels
+        )
+        terminal_hold_active = bool(
+            state.RadioAltitudeValid
+            and state.RadioAltitude <= cfg.terminal_hold_radio_altitude_ft
+            and not main_gear_contact
+        )
 
         intercept = clamp(
             cfg.localizer_sign * cfg.localizer_intercept_deg_per_dot * loc_dots,
@@ -296,11 +308,24 @@ class ClearWeatherILSController:
         target_heading = (state.RunwayHeading + intercept) % 360.0
         heading_error = angle_error_deg(target_heading, state.TrkAngleMagnetic)
         active_roll_limit = roll_limit_deg(state.RadioAltitude, cfg.max_roll_target_deg)
-        target_roll = clamp(
-            cfg.heading_to_roll_gain * heading_error,
-            -active_roll_limit,
-            active_roll_limit,
+        terminal_guidance_cutoff_active = bool(
+            terminal_hold_active
+            and state.RadioAltitude
+            <= cfg.terminal_guidance_cutoff_radio_altitude_ft
         )
+        if terminal_guidance_cutoff_active:
+            # At wheel height the ILS beams are no longer a useful steering
+            # reference. Freeze the lateral objective on the runway direction
+            # and command wings level until either main gear reports WoW.
+            target_heading = state.RunwayHeading % 360.0
+            heading_error = angle_error_deg(target_heading, state.TrkAngleMagnetic)
+            target_roll = 0.0
+        else:
+            target_roll = clamp(
+                cfg.heading_to_roll_gain * heading_error,
+                -active_roll_limit,
+                active_roll_limit,
+            )
         roll_error = target_roll - state.RollAngle
         aileron = self.roll_pid.update(roll_error, state.RollAngle, dt_s)
 
@@ -423,7 +448,18 @@ class ClearWeatherILSController:
             if self._reference_aoa_deg is not None
             else cfg.approach_aoa_deg
         )
-        if not flare_active:
+        if terminal_hold_active:
+            # The last few feet are an attitude-hold phase, not another
+            # glideslope correction. Keep a modest nose-up attitude until the
+            # mains touch; runner.py then stops airborne packets and hands the
+            # aircraft directly to rollout.
+            vertical_correction = 0.0
+            raw_target_pitch = clamp(
+                cfg.terminal_hold_pitch_target_deg,
+                cfg.flare_min_pitch_target_deg,
+                cfg.flare_max_pitch_target_deg,
+            )
+        elif not flare_active:
             vertical_gain = (
                 cfg.vs_to_pitch_fast_descent_gain_deg_per_fpm
                 if vertical_speed_error > 0.0
@@ -614,6 +650,7 @@ class ClearWeatherILSController:
             flare_armed=flare_armed,
             flare_active=flare_active,
             flare_progress=flare_progress,
+            terminal_hold_active=terminal_hold_active,
             flare_entry_radio_altitude_ft=(
                 self._flare_entry_radio_altitude_ft
                 if self._flare_entry_radio_altitude_ft is not None
