@@ -117,6 +117,10 @@ def test_touchdown_hands_the_approach_over_to_rollout():
                   flight_phase=int(FlightPhase.LAND_FLARE_AND_TOUCHDOWN)))
     assert eng.state is EngagementState.COMMAND_APPROACH
 
+    assert eng.request_landing()
+    assert eng.state is EngagementState.COMMAND_LANDING
+    assert eng.control_mode is ControlModeState.Landing
+
     eng.step(_air(all_gear_on_ground=True, radio_altitude_ft=0.0, groundspeed_kts=135.0,
                   flight_phase=int(FlightPhase.LAND_RUN)))
     assert eng.state is EngagementState.COMMAND_ROLLOUT
@@ -226,6 +230,35 @@ def test_the_first_ground_tick_is_computed_by_the_ground_channels():
     assert controller.longitudinal_channel.last_diagnostics.value > 0.0
     assert controller.state.cmd_elevator == 0.0
     assert controller.state.cmd_rev_l <= 0.0
+
+
+def test_touchdown_frame_sends_exactly_one_coherent_rollout_packet():
+    sim, conn = _engaged_airborne_sim(radio_altitude_ft=600.0)
+    controller = ControllingSystem(sim)
+    controller.bind_scenario(SCENARIOS["default"], "mc21")
+    controller.begin_flight(sim.read_telemetry())
+
+    conn.inputs = airborne_inputs(radio_altitude_ft=24.0)
+    controller.control_step(DT, telemetry=sim.read_telemetry())
+    assert conn.sent_outputs[-1].ControlMode is ControlModeState.Landing
+
+    conn.inputs = airborne_inputs(
+        radio_altitude_ft=0.0,
+        GroundSpeed=140.0,
+        FlightPhase=int(FlightPhase.LAND_RUN),
+        LeftGearWeightOnWheels=1,
+    )
+    touchdown = sim.read_telemetry()
+    before = len(conn.sent_outputs)
+
+    controller.control_step(DT, telemetry=touchdown)
+
+    assert len(conn.sent_outputs) == before + 1
+    packet = conn.sent_outputs[-1]
+    assert controller.segment is FlightSegment.ROLLOUT
+    assert packet.ControlMode is ControlModeState.Rollout
+    assert packet.ControlValidMask == int(ROLLOUT_CONTROL_MASK)
+    assert packet.ElevatorCmd == packet.AileronCmd == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -377,6 +410,33 @@ def test_airborne_frame_carries_the_commands_in_icd_units():
     assert 0.0 <= out.ThrottleLeft <= 1.0
 
 
+@pytest.mark.parametrize(
+    ("radio_altitude_ft", "mode", "mode_flare"),
+    (
+        (100.1, ControlModeState.Approach, 0),
+        (100.0, ControlModeState.Approach, 1),
+        (25.0, ControlModeState.Landing, 1),
+        (20.0, ControlModeState.Landing, 0),
+    ),
+)
+def test_landing_mode_and_flare_window_match_the_validated_bench_run(
+    radio_altitude_ft, mode, mode_flare,
+):
+    sim, conn = _engaged_airborne_sim(radio_altitude_ft=600.0)
+    controller = ControllingSystem(sim)
+    SCENARIOS["default"].apply_control(controller, "mc21")
+    controller.begin_flight(sim.read_telemetry())
+    conn.inputs = airborne_inputs(radio_altitude_ft=radio_altitude_ft)
+
+    controller.control_step(DT)
+
+    out = conn.sent_outputs[-1]
+    assert out.ControlMode is mode
+    assert out.ControlValidMask == int(AIRBORNE_CONTROL_MASK)
+    assert out.ModeFlare == mode_flare
+    assert out.ModeFlareArm == out.ModeAlign == out.ModeRollout == out.ModeTaxi == 0
+
+
 def test_quality_fields_are_reported_on_the_approach():
     """ТЗ 5.1.5: показатели выдерживания — отчёт, идущий вместе с командой."""
     sim, conn = _engaged_airborne_sim(LocDeviation=0.03, MagneticHeading=80.0)
@@ -465,13 +525,15 @@ def test_a_whole_flight_runs_from_approach_to_taxi(monkeypatch):
     assert controller.segment is FlightSegment.TAXI
 
     modes = [o.ControlMode for o in bench.sent_outputs]
-    # Порядок режимов на проводе: Off (выдержка) → Approach (заход) → Rollout → Taxi.
+    # Одна сессия: Off → Approach → Landing → Rollout → Taxi, без второго handshake.
     ordered = [m for i, m in enumerate(modes) if i == 0 or m is not modes[i - 1]]
     assert ordered == [ControlModeState.Off, ControlModeState.Approach,
-                       ControlModeState.Rollout, ControlModeState.Taxi]
+                       ControlModeState.Landing, ControlModeState.Rollout,
+                       ControlModeState.Taxi]
 
     masks = {o.ControlMode: o.ControlValidMask for o in bench.sent_outputs}
     assert masks[ControlModeState.Approach] == int(AIRBORNE_CONTROL_MASK)
+    assert masks[ControlModeState.Landing] == int(AIRBORNE_CONTROL_MASK)
     assert masks[ControlModeState.Rollout] == int(ROLLOUT_CONTROL_MASK)
 
 

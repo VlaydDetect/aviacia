@@ -20,9 +20,8 @@
 **Выравнивание — это фаза профиля уставки, а не отдельный закон.** Меняется только уставка
 тангажа; тот же регулятор с тем же интегралом и теми же пределами ±0.5 g превращает её в команду.
 Отдельного форсажа, «пола» команды и прямого перехвата руля высоты нет намеренно: они и создают
-разрыв на входе в выравнивание. По той же причине `ControlMode` во время выравнивания **не
-меняется** — смена режима отключает автопилот стенда (проверено коллегой на стенде), поэтому
-`ModeFlare*`/`ModeAlign*`/`ModeRollout*` остаются нулями весь воздушный участок.
+разрыв на входе в выравнивание. Сам закон при смене `Approach → Landing` на 25 ft не меняется;
+`ModeFlare` повторяет подтверждённое окно 100–20 ft, остальные фазовые флаги остаются нулевыми.
 
 ## Почему здесь единицы стенда, а не СИ
 
@@ -107,12 +106,13 @@ class ApproachResult:
     flare_armed: bool = False
     flare_active: bool = False
     flare_progress: float = 0.0
+    terminal_hold_active: bool = False
     flare_entry_radio_altitude_ft: float = 0.0
     flare_entry_vertical_speed_fpm: float = 0.0
     envelope_warnings: tuple[str, ...] = ()
 
 
-class ApproachChannel:
+class ApproachController:
     """Заход по ILS с выравниванием. Телеметрию получает параметром, не читает сам.
 
     Коэффициенты статические (`config/approach.py`) — на воздушном участке нейросети пока нет.
@@ -184,7 +184,17 @@ class ApproachChannel:
 
         limits = self._limits(inp, res)
         self._speed_setpoint(inp, limits, dt, res)
-        self._lateral(inp, cfg, dt, res)
+        ra = telemetry.radio_altitude_ft
+        res.terminal_hold_active = bool(
+            ra is not None
+            and ra <= cfg.terminal_hold_radio_altitude_ft
+            and not telemetry.main_gear_contact
+        )
+        terminal_guidance_cutoff = bool(
+            res.terminal_hold_active
+            and ra <= cfg.terminal_guidance_cutoff_radio_altitude_ft
+        )
+        self._lateral(inp, cfg, dt, res, terminal_guidance_cutoff)
         target_vs = self._vertical_target(inp, cfg, res)
         self._pitch(inp, cfg, limits, dt, target_vs, res)
         self._throttle(inp, cfg, dt, res)
@@ -305,7 +315,8 @@ class ApproachChannel:
         res.target_ias_kt = self._target_ias_kt
 
     def _lateral(self, inp: ApproachTelemetry, cfg: ApproachConfig,
-                 dt: float, res: ApproachResult) -> None:
+                 dt: float, res: ApproachResult,
+                 terminal_guidance_cutoff: bool = False) -> None:
         """Курсовой маяк → угол доворота → уставка крена → элероны.
 
         Руль направления на заходе остаётся нулевым: снос парируется креном, а рыскание рулём
@@ -321,8 +332,14 @@ class ApproachChannel:
 
         # Предел крена ужимается с высотой: у земли запас до касания законцовкой минимален.
         res.roll_limit_deg = roll_limit_deg(inp.RadioAltitude, cfg.max_roll_target_deg)
-        res.target_roll_deg = clamp(cfg.heading_to_roll_gain * res.heading_error_deg,
-                                    -res.roll_limit_deg, res.roll_limit_deg)
+        if terminal_guidance_cutoff:
+            res.target_heading_deg = inp.RunwayHeading % 360.0
+            res.heading_error_deg = angle_error_deg(
+                res.target_heading_deg, inp.TrkAngleMagnetic)
+            res.target_roll_deg = 0.0
+        else:
+            res.target_roll_deg = clamp(cfg.heading_to_roll_gain * res.heading_error_deg,
+                                        -res.roll_limit_deg, res.roll_limit_deg)
         roll_error = res.target_roll_deg - inp.RollAngle
         res.aileron_deg = self.roll_pid.compute(roll_error, dt, measurement=inp.RollAngle)
         res.rudder_deg = 0.0
@@ -402,7 +419,16 @@ class ApproachChannel:
         res.reference_aoa_deg = (self._reference_aoa_deg if self._reference_aoa_deg is not None
                                  else cfg.approach_aoa_deg)
 
-        if not self._flare_active:
+        if res.terminal_hold_active:
+            # В последние десять футов эталон держит безопасный нос-вверх тангаж до обжатия
+            # основных стоек; глиссадная коррекция здесь уже не является полезной целью.
+            res.vertical_correction_deg = 0.0
+            raw_target_pitch = clamp(
+                cfg.terminal_hold_pitch_target_deg,
+                cfg.flare_min_pitch_target_deg,
+                cfg.flare_max_pitch_target_deg,
+            )
+        elif not self._flare_active:
             # На снижении быстрее нужного (ошибка > 0) коррекция агрессивнее: догонять глиссаду
             # сверху безопаснее, чем проваливаться под неё.
             gain = (cfg.vs_to_pitch_fast_descent_gain_deg_per_fpm if vs_error > 0.0
@@ -549,3 +575,7 @@ class ApproachChannel:
             if not 0.0 < inp.PitchAngle < limits.touchdown_pitch_limit_deg:
                 warnings.append("TOUCHDOWN_PITCH")
         return tuple(warnings)
+
+
+# Совместимый импорт для кода этапов 0–2. Это то же определение, а не второй контроллер.
+ApproachChannel = ApproachController

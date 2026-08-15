@@ -32,6 +32,7 @@ from ismpu.config.ics import (
     BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
     REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
     AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK, FlightPhase,
+    FLARE_MODE_RADIO_ALTITUDE_FT, FLARE_MODE_END_RADIO_ALTITUDE_FT,
 )
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
@@ -629,6 +630,10 @@ class ICSSim(SimInterface):
         """Войти в пробег самостоятельно (`ControlMode 0 → 3`)."""
         self.engagement.request_rollout()
 
+    def request_landing(self) -> bool:
+        """Перейти `Approach → Landing`; сессия и воздушные каналы сохраняются."""
+        return self.engagement.request_landing()
+
     def request_taxi(self) -> bool:
         """Передать управление в руление (`3 → 4`) — по решению вызывающего, что пробег окончен."""
         return self.engagement.request_taxi(self._engagement_inputs(self._last_telemetry))
@@ -741,7 +746,7 @@ class ICSSim(SimInterface):
             out.ControlValidMask = 0
             return out
 
-        if mode is ControlModeState.Approach:
+        if mode in (ControlModeState.Approach, ControlModeState.Landing):
             self._fill_airborne(out, command)
         else:
             self._fill_ground(out, command)   # выбирает маску пробега или руления по режиму
@@ -753,14 +758,11 @@ class ICSSim(SimInterface):
         out.QualitySpeedError = command.quality_speed
         return out
 
-    @staticmethod
-    def _fill_airborne(out: ICSOutputs, command: ControlsState) -> None:
+    def _fill_airborne(self, out: ICSOutputs, command: ControlsState) -> None:
         """Воздушный участок: перегрузка, элероны и скорости РУД.
 
-        Флаги фаз (`ModeFlare*`, `ModeAlign*`, `ModeRollout*`) остаются нулевыми весь заход:
-        выравнивание у нас — фаза профиля уставки, а объявление её стенду **меняет его
-        собственный продольный закон** (проверено коллегой на стенде). `ModeSpeed`/`ModeThrust`
-        держатся единицами — ими мы и управляем.
+        `ModeFlare` повторяет подтверждённое окно 100–20 ft. Остальные фазовые флаги остаются
+        нулевыми; `ModeSpeed`/`ModeThrust` держатся единицами — ими мы и управляем.
         """
         out.ControlValidMask = int(AIRBORNE_CONTROL_MASK)
         out.ElevatorCmd = command.cmd_elevator                      # g
@@ -776,6 +778,11 @@ class ICSSim(SimInterface):
         # заход коллеги и был подтверждён.
         out.ThrottleLeft = command.cmd_throttle_norm
         out.ThrottleRight = command.cmd_throttle_norm
+        ra = getattr(self._last_telemetry, "radio_altitude_ft", None)
+        out.ModeFlare = int(
+            ra is not None
+            and FLARE_MODE_END_RADIO_ALTITUDE_FT < ra <= FLARE_MODE_RADIO_ALTITUDE_FT
+        )
         out.ModeSpeed = 1
         out.ModeThrust = 1
 

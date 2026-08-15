@@ -1,7 +1,7 @@
 """Оркестратор классического контура управления — на всём интервале полёта.
 
 `ControllingSystem` на каждом такте выбирает участок (`control/flight.py`) и вызывает его закон:
-в воздухе — `ApproachChannel` (заход по ILS и выравнивание), на земле — speed controller,
+в воздухе — `ApproachController` (заход по ILS и выравнивание), на земле — speed controller,
 guidance и allocator органов управления.
 
 **Транспорта здесь нет.** Контур получает объект стенда (`envs.ics_sim.ICSSim`) и общается с ним
@@ -23,7 +23,7 @@ from ismpu.control.trajectory import CompletionRule, ReferenceTrajectory, Veloci
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
 from ismpu.control.ground_allocator import GroundControlAllocator
-from ismpu.control.approach import ApproachChannel
+from ismpu.control.approach import ApproachController
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
 from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerances
 from ismpu.control.failures import FailureManager, FailureMode
@@ -34,6 +34,7 @@ from ismpu.control.flight import (
 from ismpu.config.approach import ApproachConfig
 from ismpu.config.constants import TARGET_SPEED_KTS
 from ismpu.config.requirements import GO_AROUND_CONFIRM_TICKS
+from ismpu.config.ics import LANDING_MODE_RADIO_ALTITUDE_FT
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
 from ismpu.envs.ics_sim import Telemetry
 from ismpu.envs.sim_interface import SimInterface
@@ -95,7 +96,8 @@ class ControllingSystem:
         self._segment_decided: bool = True
         """Определён ли участок окончательно. `False` только между `begin_flight` по
         непригодному кадру и первым пригодным — см. `begin_flight`."""
-        self.approach_channel: ApproachChannel = ApproachChannel(approach_config)
+        self.approach_channel: ApproachController = ApproachController(approach_config)
+        self.landing_committed: bool = False
         self.abort_reason: Optional[str] = None
 
         # Уход на второй круг (fallback в воздухе). `go_around` активен → заход не ведётся.
@@ -175,6 +177,7 @@ class ControllingSystem:
         self.state.reset()
         self.go_around = None
         self.go_around_reason = None
+        self.landing_committed = False
         self.tolerance_report = None
         self.approach_criteria = ApproachCriteriaMonitor()
         self._violation_ticks = 0
@@ -203,14 +206,14 @@ class ControllingSystem:
             pids["pid_brake_l"], pids["pid_brake_r"], pids["pid_rev_l"], pids["pid_rev_r"],
             trajectory)
 
-    def setup_approach(self, config: Optional[ApproachConfig] = None) -> ApproachChannel:
+    def setup_approach(self, config: Optional[ApproachConfig] = None) -> ApproachController:
         """Пересобрать воздушный канал под заданные настройки. → новый канал.
 
         Именно пересобрать, а не переписать коэффициенты: регуляторы захода **stateful**
         (интеграл, фильтр производной, память профиля выравнивания), и перенос состояния прошлого
         захода в новый — это ступень команды руля высоты на первом же такте.
         """
-        self.approach_channel = ApproachChannel(config)
+        self.approach_channel = ApproachController(config)
         return self.approach_channel
 
     def set_longitudinal_params(
@@ -280,6 +283,7 @@ class ControllingSystem:
         Заход, который вести нельзя (`approach_blocker`), — это `ApproachRefused`, а не тихий
         откат на наземный закон: ВС в воздухе, и молча поехать по земле хуже, чем отказаться.
         """
+        self.landing_committed = False
         self._segment_decided = segment_is_decidable(telemetry)
         self.segment = initial_segment(telemetry) if self._segment_decided else FlightSegment.ROLLOUT
         if self.segment is FlightSegment.APPROACH:
@@ -352,11 +356,6 @@ class ControllingSystem:
         неприменим (глиссады уже нет, а РУД пора отдавать реверсу), и такт нужно считать уже
         наземными каналами. Иначе первый такт пробега уходил бы с командой захода.
         """
-        # Уход на второй круг — поглощающее состояние: пока он идёт, заход не ведётся и касание
-        # не проверяется (мы уходим вверх, а не садимся).
-        if self.go_around is not None:
-            return self._go_around_step(dt, telemetry)
-
         if touched_down(telemetry):
             # Касание важнее потери воздушного датчика: управление уже обязано перейти земле.
             # При этом отчётный cutoff обновляем только по полностью валидному воздушному кадру.
@@ -372,6 +371,11 @@ class ControllingSystem:
             self.hand_over_to_rollout()
             return self._ground_step(dt)
 
+        # Если начатый выше высоты решения уход всё же закончился касанием, земля имеет
+        # приоритет: воздушную команду на полосе не выдаём. Поэтому эта ветвь строго после WoW.
+        if self.go_around is not None:
+            return self._go_around_step(dt, telemetry)
+
         if not telemetry.valid:
             # Без кадра стенда воздушный закон считать не по чему: размерный расчёт по нулям
             # выдал бы правдоподобное отклонение по несуществующим данным.
@@ -380,6 +384,8 @@ class ControllingSystem:
         blocker = approach_blocker(telemetry)
         if blocker is not None:
             return self._abort_approach(blocker)
+
+        self._commit_landing_mode(telemetry)
 
         criteria_ra = telemetry.radio_altitude_ft
         if (
@@ -411,6 +417,18 @@ class ControllingSystem:
             self._start_go_around(reason, telemetry)
             self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
         return False
+
+    def _commit_landing_mode(self, telemetry: Telemetry) -> None:
+        """Зафиксировать `Approach → Landing` на 25 ft без смены воздушного закона."""
+        if self.landing_committed:
+            return
+        ra = telemetry.radio_altitude_ft
+        if ra is None or ra > LANDING_MODE_RADIO_ALTITUDE_FT:
+            return
+        request = getattr(self.sim, "request_landing", None)
+        if request is not None and request() is False:
+            raise RuntimeError("backend отказал в переходе Approach → Landing")
+        self.landing_committed = True
 
     def _abort_approach(self, reason: str) -> bool:
         """Прервать заход с названной причиной. → True (управлять больше нечем)."""
@@ -447,6 +465,9 @@ class ControllingSystem:
         """
         if self.segment is not FlightSegment.APPROACH:
             return None
+        if self.landing_committed:
+            self._violation_ticks = 0
+            return None
         if not above_decision_height(telemetry):
             self._violation_ticks = 0
             return None
@@ -471,7 +492,7 @@ class ControllingSystem:
     def _go_around_step(self, dt: float, telemetry: Telemetry) -> bool:
         """Такт манёвра ухода. → True, когда набор устойчив (пора отдать управление пилоту).
 
-        Взлётный режим + кабрирование + крылья в горизонт (`ApproachChannel.go_around_command`).
+        Взлётный режим + кабрирование + крылья в горизонт (`ApproachController.go_around_command`).
         `ControlMode` не меняется (остаётся `Approach`): смена режима в воздухе сбрасывает
         автопилот стенда. Завершение = устойчивый набор или страховочный таймаут; дальше цикл
         останавливается, и `control_exception` снимает заявку каналов — это и есть передача пилоту.
@@ -538,11 +559,11 @@ class ControllingSystem:
         return longitudinal.stop_requested
 
     def hand_over_to_rollout(self) -> None:
-        """Передать управление с захода на пробег (`ControlMode 1 → 3`).
+        """Передать управление с посадки на пробег (`ControlMode 2 → 3`).
 
         Момент — первое обжатие основной стойки. Раньше нельзя: смена `ControlMode` до касания
-        сбрасывает автопилот стенда, поэтому весь заход, включая выравнивание, идёт в одном
-        режиме `Approach`.
+        сбрасывает автопилот стенда, поэтому весь заход и посадка используют один воздушный
+        закон (`Approach`, затем `Landing` с 25 ft).
         """
         if self.segment is not FlightSegment.APPROACH:
             return

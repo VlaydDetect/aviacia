@@ -365,6 +365,10 @@ class XPlaneSim(SimInterface):
     def request_rollout(self) -> None:
         self._mode = "rollout"
 
+    def request_landing(self) -> bool:
+        # В X-Plane Landing остаётся фазой того же воздушного набора DataRef-команд.
+        return self._mode == "approach"
+
     def request_taxi(self) -> bool:
         self._mode = "taxi"
         return True

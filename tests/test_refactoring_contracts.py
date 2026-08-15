@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import struct
 from copy import deepcopy
 
@@ -44,6 +45,20 @@ class DatagramSocket:
 
     def close(self):
         self.closed = True
+
+
+def test_production_cli_uses_the_unified_runtime_without_working_ics(monkeypatch):
+    from ismpu.runtime import loop
+
+    captured = {}
+    monkeypatch.setattr(loop, "main", lambda **kwargs: captured.update(kwargs))
+
+    assert loop.cli(["default", "--aircraft-profile", "mc21", "--start", "approach"]) == 0
+    assert captured["backend"] == "ics"
+    assert captured["aircraft_profile"] == "mc21"
+    assert captured["start"] == "approach"
+    assert "working_ics" not in inspect.getsource(loop)
+    assert "live_main" not in inspect.getsource(loop)
 
 
 def test_xplane_used_wire_packets_match_confirmed_original(monkeypatch):

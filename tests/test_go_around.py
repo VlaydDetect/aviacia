@@ -88,6 +88,20 @@ def test_touchdown_wins_over_bad_ils_and_enters_rollout():
     assert c.go_around is None
 
 
+def test_touchdown_also_wins_over_an_already_started_go_around():
+    """Если набор не состоялся и стойка обжалась, воздушный закон на полосе не продолжается."""
+    c = ControllingSystem()
+    c.bind_scenario(SCENARIOS["default"], "mc21")
+    c.begin_flight(_frame(1000.0))
+    c.go_around = GoAroundManeuver(reason="тест", entry_radio_altitude_ft=200.0)
+    c.go_around_reason = "тест"
+
+    touchdown = _frame(0.5, LeftGearWeightOnWheels=1)
+    assert c.control_step(DT, telemetry=touchdown, send=False) is False
+    assert c.segment is FlightSegment.ROLLOUT
+    assert c.state.cmd_elevator == pytest.approx(0.0)
+
+
 def test_no_go_around_on_ground():
     """На пробеге ухода нет — segment guard (козление удерживает защёлка сегмента, тест отдельно)."""
     c = ControllingSystem()

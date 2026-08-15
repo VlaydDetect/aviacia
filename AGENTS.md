@@ -136,7 +136,7 @@ Read these before making architectural changes — they define the target design
   `ics_engagement.py` (the engagement state machine), `xplane_connector.py` (RREF/DREF/CMND/VEHS),
   `datarefs.py` (curated X-Plane 12 DataRefs).
 - `ismpu/control/` — the classical loop: `pid.py`, `runway_tracker.py`, `trajectory.py`, `channels.py`
-  (`ControlsState` + the two ground channels), `approach.py` (`ApproachChannel` — the airborne law +
+  (`ControlsState` + the two ground channels), `approach.py` (`ApproachController` — the airborne law +
   `go_around_command`, the TOGA/climb/wings-level law), `tolerance.py` (`evaluate_approach_tolerances` — the
   runtime ТЗ-tolerance monitor + `ToleranceReport`, distinct from the report-only `_envelope_warnings`),
   `flight.py` (`FlightSegment` + the transitions + `above_decision_height`/`at_lateral_alignment_gate`),
@@ -197,7 +197,7 @@ UDP JSON bridge to the customer's bench on port 3030 — the only I/O layer and 
     into the negative sector, with `ReverseXCmd` (Off/Arm/Deploy) working the doors. `ICSSim` therefore runs
     a small position loop against the measured `LeftThrottleAngle`.
   - `AileronCmd` ±25°, `RudderCmd` ±30° — the latter had been an assumption, now confirmed.
-  Still flagged **ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ**: whether the bench honours the mask at all, the `1 → 3` handover,
+  Still flagged **ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ**: whether the bench honours the mask at all, the `2 → 3` handover,
   and whether the `Mode*` flags are inputs or reporting.
 - **`ControlValidMask` is one bit per `ICSOutputs` command field, in declaration order** — 14 fields, 14 bits,
   `ALL = 16383`. This replaced an earlier layout that merged the left/right pairs into single bits and so
@@ -227,12 +227,13 @@ already enabled, having transmitted zero handshake frames. Until both hold, `Con
 actuator commands are emitted.
 
 - **Airborne engagement** (`RadioAltitude > 400 ft`, gear off the ground): hold `ControlMode = Off` +
-  `ModeAIReady = 1` for **2.2 s**, then flip to `Approach` (the `0 → 1` edge). The whole approach, flare
-  included, stays in `Approach` — changing `ControlMode` in flight disengages the bench's own autopilot.
+  `ModeAIReady = 1` for **2.2 s**, then flip to `Approach` (the `0 → 1` edge). At 25 ft the supervisor
+  changes only the reported mode to `Landing`; the same airborne law and mask remain active.
 - **Ground engagement** from standstill: same dwell (2.0 s per the ICD), then `Taxi` (the `0 → 4` edge).
   Adoption of a rollout already in progress (`FlightPhase = LandRun`): emit `ControlMode = Rollout`.
-- **Handovers:** approach→rollout is `1 → 3` at first main-gear weight-on-wheels — **not in the ICD**, an
-  assumption flagged for the bench developer; rollout→taxi is `3 → 4` (`request_taxi`), and
+- **Handovers:** approach→landing is `1 → 2` at 25 ft; landing→rollout is `2 → 3` at first main-gear
+  weight-on-wheels — **not in the ICD**, an assumption flagged for the bench developer; rollout→taxi is
+  `3 → 4` (`request_taxi`), and
   `ControllingSystem.hand_over_to_taxi` now actually **transmits** frames in the new mode, since the bench
   switches on the edge in a received packet.
 - A missing radio altitude is "the bench didn't say", not "zero feet" — it never arms the airborne path.
@@ -317,7 +318,7 @@ speed, load factors) lives in `config/criticality.py`.
 
 `control/tolerance.py::evaluate_approach_tolerances` runs **every approach tick** and returns a
 `ToleranceReport` (`landing_allowed` + per-parameter flags + a diagnostic `SpecialSituation`). It is distinct
-from `ApproachChannel._envelope_warnings`, which stays report-only — this monitor is the one wired to *act*.
+from `ApproachController._envelope_warnings`, which stays report-only — this monitor is the one wired to *act*.
 Glideslope tolerance is picked by the reported fault (stab → 1°, gear → 0.7°, else 0.5°). It never touches the
 command; the decision belongs to the loop above it.
 
@@ -329,7 +330,7 @@ a **debounced** tolerance violation (`GO_AROUND_CONFIRM_TICKS`, so ILS noise doe
 air today, but the guard is the gate for a future ground path). The ±5 m axis check is active only in a band
 just above the gate (`at_lateral_alignment_gate`); higher up the course tolerance bounds lateral position.
 
-The maneuver (`ApproachChannel.go_around_command`, driven by `_go_around_step`) commands **TOGA** (throttle
+The maneuver (`ApproachController.go_around_command`, driven by `_go_around_step`) commands **TOGA** (throttle
 norm→1 at max rate), **nose-up** (a positive climb VS target through the same `pitch_pid`), and **wings level**
 (roll target 0). `ControlMode` stays `Approach` throughout — changing it mid-air resets the bench autopilot.
 Once the climb is established (positive VS **and** altitude gained over the entry point, or a safety timeout),
@@ -357,7 +358,7 @@ telemetry, calls two channels, applies failure degradation, then sends commands:
   commands: **differential braking** (`steering_brake_gain`) and **asymmetric thrust** (`steering_rev_gain`,
   only above 60 kts). The mixing runs *after* the longitudinal channel sets brake/reverse, so ordering matters.
 
-### `ApproachChannel` — the airborne law (`ismpu/control/approach.py`)
+### `ApproachController` — the airborne law (`ismpu/control/approach.py`)
 
 A port of the colleague's bench-validated `ClearWeatherILSController`, kept numerically identical (same
 gains, same signs, same order of operations); only the framing changed. Three loops: localizer ddm → "dots"
@@ -366,12 +367,14 @@ throttle *rate*, integrated into an absolute setpoint. Things not to "improve":
 
 - **Units are the bench's, not SI.** This is the one deliberate exception to the `Telemetry` SI boundary: the
   law's gains are dimensional (deg per fpm, fpm per dot) and calibrated on the bench in knots/feet/fpm, so
-  converting would mean re-deriving every coefficient. The channel therefore reads the raw packet
-  (`Telemetry.ics_inputs`) and refuses to compute without one.
+  converting would mean re-deriving every coefficient. The controller therefore reads the backend-neutral
+  dimensional slice (`Telemetry.approach_inputs`) and refuses to compute without one.
 - **Flare is a phase of the setpoint profile, not a separate law.** The same pitch PID, the same integral,
   the same ±0.5 g bounds. No flare-only feed-forward, no command floor, no direct elevator override — those
   are what create the discontinuity at roundout. The entry vertical-speed reference is *fixed*
   (`flare_initial_vs_fpm`), not the measured sink rate, and the trigger latches.
+- `ControlMode` changes from `Approach` to `Landing` at 25 ft without changing the law or airborne mask;
+  `ModeFlare=1` only in the bench-validated 100–20 ft window.
 - **Sign conventions** (localizer +1, glideslope −1, negative roll gains, elevator +1) each encode bench
   wiring. `roll_pid.kp = -7` is not a typo, and the tuned value differs 7× from the class defaults.
 - The three airborne PIDs live on the channel, **not** in `ControllingSystem.pids` — that dict defines the

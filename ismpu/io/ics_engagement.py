@@ -39,7 +39,8 @@ telemetry reports AgentIsActive=1»; его запуск сначала *про�
   переводит `ControlMode` в целевой режим (`Approach` в воздухе, `Taxi` на земле). Радиовысота,
   обжатие и скорость нужны здесь лишь чтобы решить, *какой* стимул гнать и *когда начинать*, а не
   чтобы объявлять включение;
-* **режимы** — вход в пробег (`ControlMode → Rollout`), подхват уже идущего пробега по фазе полёта
+* **режимы** — `Approach → Landing` на 25 ft по запросу supervisor-а, вход в пробег
+  (`ControlMode → Rollout`), подхват уже идущего пробега по фазе полёта
   (`FlightPhase = LandRun`, т.к. `ControlMode` во входной структуре нет), передача заход → пробег
   после касания и пробег → руление (`3 → 4`).
 
@@ -69,13 +70,14 @@ class EngagementState(Enum):
     """
     IDLE = "idle"                    # стимула нет: ControlMode = Off, ModeAIReady = 0
     READY_DWELL = "ready_dwell"      # заявка готовности: Off + ModeAIReady = 1, идёт выдержка
-    COMMAND_APPROACH = "command_approach"  # шлём ControlMode = Approach (заход и выравнивание)
+    COMMAND_APPROACH = "command_approach"  # шлём ControlMode = Approach
+    COMMAND_LANDING = "command_landing"    # шлём ControlMode = Landing, воздушный закон тот же
     COMMAND_ROLLOUT = "command_rollout"  # шлём ControlMode = Rollout (вход/подхват пробега)
     COMMAND_TAXI = "command_taxi"    # шлём ControlMode = Taxi (переход 0→4 или 3→4)
 
 
-COMMANDING_STATES = (EngagementState.COMMAND_APPROACH, EngagementState.COMMAND_ROLLOUT,
-                     EngagementState.COMMAND_TAXI)
+COMMANDING_STATES = (EngagementState.COMMAND_APPROACH, EngagementState.COMMAND_LANDING,
+                     EngagementState.COMMAND_ROLLOUT, EngagementState.COMMAND_TAXI)
 """Состояния, в которых стимул доведён до конца: режим выставлен и держится."""
 
 
@@ -157,13 +159,22 @@ class IcsEngagement:
         """Войти в пробег самостоятельно: шлём `ControlMode = Rollout`.
 
         Это же — передача управления с воздушного участка на пробег после касания
-        (`ControlMode 1 → 3`). Переход `1 → 3` в ICD **не описан** и является предположением:
-        документированы только `0 → 4` и `3 → 4`. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ у разработчика стенда —
-        если стенд его не принимает, здесь появится промежуточный `Landing (2)`.
+        (`ControlMode 2 → 3`).
         """
         self.state = EngagementState.COMMAND_ROLLOUT
         self._adopted = False
         self._dwell_started = None
+
+    def request_landing(self) -> bool:
+        """Перейти `Approach → Landing` без нового рукопожатия. Закон остаётся воздушным."""
+        if self.state is EngagementState.COMMAND_LANDING:
+            return True
+        if self.state is not EngagementState.COMMAND_APPROACH:
+            return False
+        self.state = EngagementState.COMMAND_LANDING
+        self._adopted = False
+        self._dwell_started = None
+        return True
 
     def request_approach(self) -> None:
         """Войти в заход самостоятельно: шлём `ControlMode = Approach`.
@@ -220,7 +231,8 @@ class IcsEngagement:
             if self.state is EngagementState.IDLE:
                 self.adopt_rollout()       # пробег шёл без нас — это подхват
                 return
-            if self.state is EngagementState.COMMAND_APPROACH:
+            if self.state in (EngagementState.COMMAND_APPROACH,
+                              EngagementState.COMMAND_LANDING):
                 self.request_rollout()     # заход довели мы — это передача, а не подхват
                 return
 
@@ -292,14 +304,15 @@ class IcsEngagement:
         подтверждение, но никогда не создаёт его само (на стенде это же поведение подтверждено
         коллегой: ниже 80 футов потеря активности логируется, а заход продолжается до касания).
         """
-        if self.state is not EngagementState.COMMAND_APPROACH:
+        if self.state not in (EngagementState.COMMAND_APPROACH,
+                              EngagementState.COMMAND_LANDING):
             return False
         ra = inputs.radio_altitude_ft
         return ra is not None and ra <= TERMINAL_RADIO_ALTITUDE_FT
 
     @property
     def _commanding_mode(self) -> bool:
-        """Уже гоним какой-то режим (Approach/Rollout/Taxi), а не заявку готовности."""
+        """Уже гоним режим Approach/Landing/Rollout/Taxi, а не заявку готовности."""
         return self.state in COMMANDING_STATES
 
     # --- что отдавать в команде ----------------------------------------- #
@@ -338,6 +351,8 @@ class IcsEngagement:
         """
         if self.state is EngagementState.COMMAND_APPROACH:
             return ControlModeState.Approach
+        if self.state is EngagementState.COMMAND_LANDING:
+            return ControlModeState.Landing
         if self.state is EngagementState.COMMAND_ROLLOUT:
             return ControlModeState.Rollout
         if self.state is EngagementState.COMMAND_TAXI:

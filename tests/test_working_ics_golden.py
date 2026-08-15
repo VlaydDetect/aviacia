@@ -8,10 +8,14 @@ import hashlib
 import io
 import math
 import struct
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from ismpu.control.channels import ControlsState
+from ismpu.control.approach import ApproachController
+from ismpu.envs.ics_sim import ICSSim, Telemetry
+from ismpu.io.ics_connector import ICSInputs as ProductionInputs
+from tests.fakes import FakeConnector
 from ismpu.working_ics.pid_controller import ClearWeatherILSController, ControllerConfig
 from ismpu.working_ics.protocol import (
     AIRBORNE_CONTROL_VALID_MASK,
@@ -114,6 +118,34 @@ RESULT_COLUMNS = {
     "touchdown_speed_min_kt": "touchdown_speed_min_kt",
     "touchdown_speed_max_kt": "touchdown_speed_max_kt",
     "touchdown_pitch_limit_deg": "touchdown_pitch_limit_deg",
+}
+
+CANONICAL_RESULT_FIELDS = {
+    "aileron": "aileron_deg",
+    "elevator": "elevator_g",
+    "rudder": "rudder_deg",
+    "throttle_left_rate": "throttle_left_rate_deg_s",
+    "throttle_right_rate": "throttle_right_rate_deg_s",
+    "throttle_norm": "throttle_norm",
+    "throttle_target_angle_deg": "throttle_target_angle_deg",
+    "loc_dots": "loc_dots",
+    "gs_dots": "gs_dots",
+    "target_heading_deg": "target_heading_deg",
+    "heading_error_deg": "heading_error_deg",
+    "target_roll_deg": "target_roll_deg",
+    "target_vs_fpm": "target_vs_fpm",
+    "target_pitch_deg": "target_pitch_deg",
+    "vertical_correction_deg": "vertical_correction_deg",
+    "flight_path_angle_deg": "flight_path_angle_deg",
+    "target_flight_path_angle_deg": "target_flight_path_angle_deg",
+    "estimated_aoa_deg": "estimated_aoa_deg",
+    "reference_aoa_deg": "reference_aoa_deg",
+    "mach": "mach",
+    "target_ias_kt": "target_ias_kt",
+    "roll_limit_deg": "roll_limit_deg",
+    "flare_progress": "flare_progress",
+    "flare_entry_radio_altitude_ft": "flare_entry_radio_altitude_ft",
+    "flare_entry_vertical_speed_fpm": "flare_entry_vertical_speed_fpm",
 }
 
 EXPECTED_HANDSHAKE = (
@@ -313,6 +345,92 @@ def test_real_approach_replays_deterministically_to_touchdown():
         (3.6777079645398203, -0.8576434383494449, 5.876602),
         (-8.81658270328894, -0.14433552706004185, 138.820892),
     )
+
+
+def test_production_approach_matches_working_ics_on_every_golden_frame():
+    """Канонический контур и формирователь пакета совпадают с эталоном до 1e-12."""
+    rows = _rows()
+    reference = ClearWeatherILSController(ControllerConfig.from_json(DEFAULT_CONFIG))
+    production = ApproachController()
+    command = ControlsState()
+
+    first_input = ProductionInputs.from_dict(asdict(_state(rows[0])))
+    sim = ICSSim(
+        connector=FakeConnector(first_input),
+        aircraft_profile="mc21",
+        validate_conditions=False,
+    )
+    sim.engagement.request_approach()
+    sim.read_telemetry()
+    assert sim.engaged
+
+    previous_time = 0.0
+    next_send = 0.0
+    packet_count = 0
+    for index, row in enumerate(rows):
+        source = _state(row)
+        production_input = ProductionInputs.from_dict(asdict(source))
+        telemetry = Telemetry.from_ics(production_input)
+        sim._last_telemetry = telemetry
+        sim.engagement.step(sim._engagement_inputs(telemetry))
+
+        time_s = float(row["time_s"])
+        dt = time_s - previous_time
+        previous_time = time_s
+        expected = reference.update(source, dt)
+        actual = production.calc_commands(dt, command, telemetry)
+
+        for expected_name, actual_name in CANONICAL_RESULT_FIELDS.items():
+            assert abs(float(getattr(actual, actual_name))
+                       - float(getattr(expected, expected_name))) <= 1e-12, (
+                index, expected_name)
+        assert actual.flare_armed is expected.flare_armed
+        assert actual.flare_active is expected.flare_active
+        assert actual.terminal_hold_active is expected.terminal_hold_active
+        assert actual.envelope_warnings == expected.envelope_warnings
+        assert actual.limits is not None
+        for name in (
+            "table_weight_kg", "vapp_kt", "vsr1_kt", "vfe_kt", "alpha_prot_deg",
+            "alpha_sw_deg", "touchdown_vertical_speed_limit_fpm",
+            "touchdown_speed_min_kt", "touchdown_speed_max_kt",
+            "touchdown_pitch_limit_deg",
+        ):
+            assert abs(float(getattr(actual.limits, name))
+                       - float(getattr(expected, name))) <= 1e-12, (index, name)
+        assert actual.limits.flap_configuration.value == expected.flap_configuration
+        assert abs(
+            actual.limits.alpha_prot_deg - actual.estimated_aoa_deg
+            - expected.alpha_margin_deg
+        ) <= 1e-12
+
+        for actual_pid, expected_pid in zip(
+            (production.roll_pid, production.pitch_pid, production.speed_pid),
+            (reference.roll_pid, reference.pitch_pid, reference.speed_pid),
+        ):
+            assert abs(actual_pid.integral - expected_pid.integral) <= 1e-12
+            assert abs(actual_pid.filtered_derivative - expected_pid.derivative) <= 1e-12
+            assert abs(-actual_pid._prev_deriv_input
+                       - expected_pid._previous_measurement) <= 1e-12
+
+        mode = airborne_control_mode(source)
+        if mode is ControlModeState.Landing:
+            assert sim.request_landing()
+        if not main_gear_contact(source) and time_s >= next_send:
+            expected_output = make_airborne_output(source, expected)
+            actual_output = sim._to_outputs(command)
+            for field in fields(ICSOutputs):
+                if field.name == "reserved":
+                    continue
+                left = getattr(actual_output, field.name)
+                right = getattr(expected_output, field.name)
+                if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                    assert abs(float(left) - float(right)) <= 1e-12, (index, field.name)
+                else:
+                    assert left == right, (index, field.name)
+            packet_count += 1
+            next_send = time_s + 0.05
+
+    assert packet_count == 728
 
 
 def test_handshake_and_first_rollout_wire_are_frozen_at_the_seam():

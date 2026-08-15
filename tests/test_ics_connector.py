@@ -83,6 +83,20 @@ def test_input_schema_stays_at_the_99_known_bench_fields():
     assert len(fields(ICSInputs)) == 99
 
 
+def test_production_and_reference_schemas_have_the_same_99_36_fields():
+    from ismpu.working_ics.protocol import (
+        ICSInputs as ReferenceInputs,
+        ICSOutputs as ReferenceOutputs,
+    )
+
+    assert [field.name for field in fields(ICSInputs)] == [
+        field.name for field in fields(ReferenceInputs)]
+    assert [field.name for field in fields(ICSOutputs)] == [
+        field.name for field in fields(ReferenceOutputs)]
+    assert len(fields(ICSInputs)) == 99
+    assert len(fields(ICSOutputs)) == 36
+
+
 def test_missing_fields_raise_instead_of_defaulting_to_zero():
     """Подставить ноль значило бы выдумать телеметрию, по которой считается управление."""
     payload = _full_payload()

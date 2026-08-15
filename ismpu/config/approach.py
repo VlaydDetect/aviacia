@@ -122,8 +122,8 @@ class ApproachConfig:
     min_vertical_correction_deg: float = -1.0
     max_vertical_correction_deg: float = 2.0
     pitch_target_rate_deg_per_s: float = 1.5
-    min_pitch_target_deg: float = -1.0
-    max_pitch_target_deg: float = 8.0
+    min_pitch_target_deg: float = -2.0
+    max_pitch_target_deg: float = 10.0
 
     # --- масса и конфигурация --- #
     landing_weight_kg: float = 69277.0
@@ -139,13 +139,16 @@ class ApproachConfig:
     """Опорная вертикальная скорость входа в выравнивание — **фиксированная**, а не измеренная.
     По мгновенному замеру профиль начинался бы с разной точки при одинаковом заходе."""
     touchdown_target_vs_fpm: float = -68.90
-    flare_vs_to_pitch_gain_deg_per_fpm: float = 0.00635
-    flare_pitch_base_deg: float = 1.8
-    flare_pitch_attitude_damping_gain: float = 0.15
+    flare_vs_to_pitch_gain_deg_per_fpm: float = 0.0080
+    flare_pitch_base_deg: float = 2.35
+    flare_pitch_attitude_damping_gain: float = 0.10
     flare_pitch_rate_damping_gain: float = 0.08
     flare_min_pitch_target_deg: float = 0.5
     flare_pitch_target_rate_deg_per_s: float = 4.0
-    flare_max_pitch_target_deg: float = 6.0
+    flare_max_pitch_target_deg: float = 6.5
+    terminal_hold_radio_altitude_ft: float = 10.0
+    terminal_guidance_cutoff_radio_altitude_ft: float = 5.0
+    terminal_hold_pitch_target_deg: float = 6.3
 
     # --- продольная тяга --- #
     elevator_command_sign: float = 1.0

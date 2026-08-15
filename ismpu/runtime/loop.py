@@ -6,7 +6,7 @@
 Участок выбирается по первому кадру стенда (`control/flight.py`):
 
 * ВС в воздухе выше 400 футов — начинаем с **захода**: рукопожатие `ControlMode 0 → 1`, дальше
-  заход по ILS, выравнивание, касание, и в тот же момент передача на пробег (`1 → 3`);
+  заход по ILS, `Landing` с 25 ft, касание и передача на пробег (`2 → 3`);
 * ВС на полосе — начинаем с **пробега** (или подхватываем уже идущий), как раньше.
 
 Стенд слушается по UDP (по умолчанию на всех интерфейсах, порт 3030); адрес самого стенда
@@ -30,7 +30,6 @@ from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE
 from ismpu.config.scenarios import (
     SCENARIOS, Scenario, resolve_scenario, select_for_telemetry,
-    compose_matrix_scenario,
 )
 
 logger = logging.getLogger(__name__)
@@ -263,92 +262,25 @@ def main(
         sim.close()
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """Единственная production CLI-точка для ICS и явного тестового X-Plane backend."""
+    parser = argparse.ArgumentParser(description="ИСМПУ: полный полёт через ICS или X-Plane 12")
+    parser.add_argument("preset", nargs="?", default=None)
+    parser.add_argument("--backend", choices=("ics", "xplane"), default="ics")
+    parser.add_argument("--start", choices=("approach", "rollout"), default=None)
+    parser.add_argument("--ip", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--xplane-root", default=None)
+    parser.add_argument("--aircraft-profile", default=None)
+    parser.add_argument("--runway-profile", default=None)
+    parser.add_argument("--dashboard", action="store_true")
+    parser.add_argument("--dashboard-tune", action="store_true")
+    args = parser.parse_args(argv)
+    if args.backend == "ics" and args.aircraft_profile is None:
+        parser.error("для ICS требуется --aircraft-profile (например, mc21)")
+    main(**vars(args))
+    return 0
+
+
 if __name__ == "__main__":
-    # The generic matrix runtime remains available through ``main(...)`` for
-    # X-Plane and ground-only experiments.  Live ICS approach flights use the
-    # byte-for-byte port of the contour validated in ``aviacia_v2``: its
-    # receive/update/send timing and 0 -> 1 handshake are part of the control
-    # contract and must not be substituted by the generic backend adapter.
-    from ismpu.working_ics.runner import live_main
-
-    raise SystemExit(live_main())
-
-    # Historical generic live entrypoint retained below as documentation.
-    # time.sleep(2)
-    # sim = build_sim(
-    #     "ics",
-    #     aircraft_profile="a330-300",
-    #     runway_profile="uuee-06r",
-    # )
-    # controller = ControllingSystem(sim)
-    # scenario = SCENARIOS["default"]
-    # scenario.apply_control(controller)
-    #
-    # try:
-    #     telemetry = sim.reset(scenario, start="approach")
-    #
-    #     segment = controller.begin_flight(telemetry)
-    #     print(f"Участок по телеметрии стенда: {segment.value}")
-    #
-    #     print("Прогрев (ожидание, пока стенд примет управление)...")
-    #     sim.warm_up()
-    #     controller.last_telemetry = sim.read_telemetry()
-    #     run_started = time.monotonic()
-    #
-    #     last_time = time.monotonic()
-    #     while True:
-    #         current_time = time.monotonic()
-    #         dt = current_time - last_time
-    #
-    #         if dt >= DT:
-    #             finished = controller.control_step(dt)
-    #             if finished:
-    #                 if controller.segment is FlightSegment.ROLLOUT:
-    #                     # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
-    #                     controller.hand_over_to_taxi()
-    #                     reason = RunStopReason.COMPLETED
-    #                 elif controller.go_around_reason is not None:
-    #                     # Уход на второй круг: заявка каналов снимается ниже (control_exception),
-    #                     # руление не запрашиваем — ВС в воздухе, управление уходит пилоту.
-    #                     print(f"[loop] уход на второй круг: {controller.go_around_reason}")
-    #                     reason = RunStopReason.GO_AROUND
-    #                     details = controller.go_around_reason
-    #                 else:
-    #                     reason = RunStopReason.COMPLETED
-    #                 break
-    #
-    #             if _lost_engagement(controller, sim):
-    #                 reason = RunStopReason.ENGAGEMENT_LOST
-    #                 details = f"{sim.backend_name}: {controller.segment.value}"
-    #                 break
-    #
-    #             last_time = current_time
-    #
-    #         time.sleep(0.01)  # Снижение нагрузки на CPU
-    # finally:
-    #     sim.close()
-
-    # parser = argparse.ArgumentParser(description="ИСМПУ: стенд ICS или X-Plane 12")
-    # parser.add_argument("preset", nargs="?", default=None)
-    # parser.add_argument("--backend", choices=("ics", "xplane"), default="xplane")
-    # parser.add_argument("--start", choices=("approach", "rollout"), default=None)
-    # parser.add_argument("--ip", default=None)
-    # parser.add_argument("--port", type=int, default=None)
-    # parser.add_argument("--xplane-root", default=None)
-    # parser.add_argument("--aircraft-profile", default="a330-300")
-    # parser.add_argument("--runway-profile", default="uuee-06r")
-    # parser.add_argument("--dashboard", action="store_true")
-    # parser.add_argument("--dashboard-tune", action="store_true")
-    # args = parser.parse_args()
-
-    main(
-        preset=compose_matrix_scenario(
-            scenario_id="full",
-            approach_case="А.1.2",
-            ground_case="Б.1.1",
-        ),
-        backend="ics",
-        start="approach",
-        aircraft_profile="mc21",
-        runway_profile="uuee-06r",
-    )
+    raise SystemExit(cli())
