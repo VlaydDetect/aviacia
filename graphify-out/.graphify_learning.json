@@ -1,0 +1,70 @@
+{
+  "generated_at": "2026-08-14T22:38:55.603576+00:00",
+  "nodes": {
+    "ismpu_control_flight_approach_blocker": {
+      "code_fingerprint": "587fc72df3d60e4c5b85e5ddabcb941e64dc8f54b7b51844e56a593c42e77df6",
+      "label": "approach_blocker()",
+      "last": "2026-08-14T22:36:00.679819+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T22:36:00.679819+00:00",
+          "outcome": "useful",
+          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
+        }
+      ],
+      "score": 0.999953223,
+      "source_file": "ismpu/control/flight.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "ismpu_control_system_controllingsystem": {
+      "code_fingerprint": "b0dd830f76e0cba316c277ca917f83e85e2e0c30c798ca5163ed48be0f98f642",
+      "label": "ControllingSystem",
+      "last": "2026-08-14T22:36:00.679819+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T22:36:00.679819+00:00",
+          "outcome": "useful",
+          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
+        }
+      ],
+      "score": 0.999953223,
+      "source_file": "ismpu/control/system.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "ismpu_envs_observation_observationbuilder": {
+      "code_fingerprint": "8f586844bee59f6480a28a597b22d505dbe1a5138f50a177e22b900f7ac58c45",
+      "label": "ObservationBuilder",
+      "last": "2026-08-14T22:36:00.679819+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T22:36:00.679819+00:00",
+          "outcome": "useful",
+          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
+        }
+      ],
+      "score": 0.999953223,
+      "source_file": "ismpu/envs/observation.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "ismpu_envs_weather_weatherstate": {
+      "code_fingerprint": "0219dfad51a8a8c2b2e3fe30d0103c7b65cdcfb704b8040f2226cb7e31d98366",
+      "label": "WeatherState",
+      "last": "2026-08-14T22:36:00.679819+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T22:36:00.679819+00:00",
+          "outcome": "useful",
+          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
+        }
+      ],
+      "score": 0.999953223,
+      "source_file": "ismpu/envs/weather.py",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}
