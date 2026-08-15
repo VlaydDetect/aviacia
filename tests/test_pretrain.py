@@ -15,6 +15,8 @@ from ismpu.runtime.capture import (
 )
 from ismpu.runtime.pretrain import smoke_pretrain
 from ismpu.config.scenarios import SCENARIOS
+from ismpu.config.segments import FlightSegment
+from ismpu.control.failures import FailureMode
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.control.system import ControllingSystem
 
@@ -24,7 +26,16 @@ from ismpu.envs.rollout_env import RolloutEnv
 
 
 def _make_env(window=6):
-    return scripted_env(window=window, shield=False)
+    env = scripted_env(window=window, shield=False)
+    original_reset = env.reset
+
+    def reset_with_scenario_fault(scenario, *args, **kwargs):
+        failures = scenario.conditions_for(FlightSegment.ROLLOUT).failures
+        env.sim.connector._overrides["FaultNWS"] = int(FailureMode.NWS_FAIL in failures)
+        return original_reset(scenario, *args, **kwargs)
+
+    env.reset = reset_with_scenario_fault
+    return env
 
 
 # --------------------------------------------------------------------------- #
@@ -163,6 +174,24 @@ def test_capture_dataset_drops_rejected_rollouts_and_keeps_reports():
     # вес каждой строки датасета равен весу её прогона
     assert set(np.unique(ds.weight)).issubset({QUALITY_CLEAN, QUALITY_CAVEAT})
     assert len(ds.weight) == len(ds.obs)
+
+
+def test_capture_rejects_condition_mismatch(monkeypatch):
+    env = _make_env(window=6)
+    original_reset = env.reset
+
+    def reset_with_mismatch(scenario):
+        result = original_reset(scenario)
+        env.sim.conditions_valid = False
+        return result
+
+    monkeypatch.setattr(env, "reset", reset_with_mismatch)
+    ds, report = capture_scenario(env, SCENARIOS["default"], max_steps=20)
+
+    assert report["conditions_valid"] is False
+    assert report["weight"] == QUALITY_REJECT
+    assert "conditions_mismatch" in report["reasons"]
+    assert np.all(ds.weight == QUALITY_REJECT)
 
 
 def test_capture_dataset_raises_when_everything_is_rejected():

@@ -125,6 +125,7 @@ class IcsEngagement:
         self._ready_frames = 0
         self._adopted = False
         self._arm_target: ControlModeState | None = None   # режим, под который идёт выдержка
+        self._forced_arm_target: ControlModeState | None = None
 
     # --- обратная связь от транспорта ----------------------------------- #
 
@@ -152,6 +153,7 @@ class IcsEngagement:
         включению с нуля.
         """
         self.state = EngagementState.COMMAND_ROLLOUT
+        self._forced_arm_target = None
         self._adopted = True
         self._dwell_started = None
 
@@ -162,6 +164,7 @@ class IcsEngagement:
         (`ControlMode 2 → 3`).
         """
         self.state = EngagementState.COMMAND_ROLLOUT
+        self._forced_arm_target = None
         self._adopted = False
         self._dwell_started = None
 
@@ -183,8 +186,15 @@ class IcsEngagement:
         нужен для подхвата уже идущего захода и для отладки конкретного участка.
         """
         self.state = EngagementState.COMMAND_APPROACH
+        self._forced_arm_target = None
         self._adopted = False
         self._dwell_started = None
+
+    def arm_taxi_start(self) -> None:
+        """Явный матричный старт TAXI: штатная выдержка Off → Taxi без порога скорости."""
+        self.state = EngagementState.IDLE
+        self._forced_arm_target = ControlModeState.Taxi
+        self._reset_dwell()
 
     def request_taxi(self, inputs: EngagementInputs) -> bool:
         """Передать управление в руление (`ControlMode 3 → 4`). → удался ли переход.
@@ -292,6 +302,8 @@ class IcsEngagement:
                 and inputs.radio_altitude_ft is not None
                 and inputs.radio_altitude_ft > self.min_radio_altitude_ft):
             return ControlModeState.Approach
+        if self._forced_arm_target is ControlModeState.Taxi and inputs.all_gear_on_ground:
+            return ControlModeState.Taxi
         if inputs.all_gear_on_ground and inputs.groundspeed_kts < self.max_groundspeed_kts:
             return ControlModeState.Taxi
         return None

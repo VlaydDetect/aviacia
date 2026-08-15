@@ -27,9 +27,10 @@ from ismpu.envs.sim_interface import (
     RunResult, RunStopReason, ShutdownReport, SimInterface,
 )
 from ismpu.runtime.run_recorder import RunRecorder
-from ismpu.config.run_matrix import CASE_BY_CODE
+from ismpu.config.run_matrix import CASE_BY_CODE, SOURCE_SHA256
 from ismpu.config.scenarios import (
-    SCENARIOS, Scenario, resolve_scenario, select_for_telemetry,
+    SCENARIOS, ProfileStatus, Scenario, resolve_scenario, scenario_for_matrix_run,
+    select_for_telemetry,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,10 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         telemetry = sim.reset(scenario, start=start)
 
         # Участок определяется ДО рукопожатия: от него зависит стимул включения.
-        segment = controller.begin_flight(telemetry)
+        segment = controller.begin_flight(
+            telemetry,
+            FlightSegment.TAXI if start == "taxi" else None,
+        )
         print(f"Участок по телеметрии стенда: {segment.value}")
 
         print("Прогрев (ожидание, пока стенд примет управление)...")
@@ -166,6 +170,7 @@ def main(
     xplane_root: str | None = None,
     aircraft_profile: str | None = None,
     runway_profile: str | None = None,
+    run_id: str | None = None,
     dashboard: bool = False,
     dashboard_tune: bool = False,
 ):
@@ -176,15 +181,25 @@ def main(
     рабочий режим поставки: конфигурацию борта задаёт Заказчик, и угадывать её именем в
     командной строке незачем.
 
-    Явное имя (`"default"`, `"nws_fail"`, …, см. `SCENARIOS`), **шифр матрицы прогонов**
-    (`"Б.3.1"`, `"А.1.2"` — см. `config/run_matrix.py`) или готовый `Scenario` перекрывает подбор.
-    Ручная проверка по матрице выглядит так:
+    Матричный запуск требует конкретную строку, а не шифр:
 
-        python -c "from ismpu.runtime.loop import main; main('Б.2.2')"
+        python -m ismpu.runtime.loop --aircraft-profile mc21 --run-id Б.2.2/4
 
-    Черновые пресеты матрицы автоматическим подбором **не берутся** — только по имени или шифру,
-    и запуск об этом предупреждает.
+    Фактические условия стенда сверяются с выбранной строкой, но не используются для угадывания
+    неоднозначных Б.2.* и Б.3.*.
     """
+    if run_id is not None and preset is not None:
+        raise ValueError("задайте либо preset, либо run_id")
+    selected = (
+        scenario_for_matrix_run(run_id) if run_id is not None
+        else preset if isinstance(preset, Scenario)
+        else resolve_scenario(preset) if preset is not None
+        else None
+    )
+    if selected is not None and selected.matrix_codes and not selected.matrix_runs:
+        raise ValueError(
+            "матричный сценарий нельзя запускать по одному шифру; "
+            "укажите --run-id <шифр>/<номер>")
     sim = build_sim(
         backend,
         ip=ip,
@@ -196,9 +211,9 @@ def main(
     controller = ControllingSystem(sim)
     profile_name = sim.aircraft_profile_name
 
-    if isinstance(preset, Scenario):
-        scenario = preset
-    elif preset is None and backend == "ics":
+    if selected is not None:
+        scenario = selected
+    elif backend == "ics":
         frame = sim.read_telemetry()
         scenario = select_for_telemetry(
             frame,
@@ -206,21 +221,40 @@ def main(
             segment=initial_segment(frame),
         )
         print(f"Сценарий подобран по телеметрии стенда: {scenario.scenario_id}")
-    elif preset is None:
-        scenario = SCENARIOS["default"]
     else:
-        scenario = resolve_scenario(preset)
-
-    if scenario.matrix_code:
-        case = CASE_BY_CODE.get(scenario.matrix_code)
-        print(f"Прогон матрицы {scenario.matrix_code}: {case.title if case else ''}")
+        scenario = SCENARIOS["default"]
+    if scenario.matrix_runs:
+        if start is None:
+            start = (
+                "approach" if FlightSegment.APPROACH in scenario.matrix_runs
+                else "taxi" if set(scenario.matrix_runs) == {FlightSegment.TAXI}
+                else "rollout")
+        print(f"Каталог матрицы SHA-256: {SOURCE_SHA256}")
+        for segment, selected_run_id in scenario.matrix_runs.items():
+            code = scenario.matrix_codes.get(segment, "")
+            case = CASE_BY_CODE.get(code)
+            print(
+                f"Прогон матрицы {selected_run_id} [{segment.value}]: "
+                f"{case.title if case else ''}")
         requested_segment = (
-            FlightSegment.APPROACH if start == "approach" else FlightSegment.ROLLOUT)
-        if scenario.is_draft(profile_name, requested_segment):
-            print("ВНИМАНИЕ: пресет черновой — коэффициенты под этот шифр ещё не настроены.")
-        if case and case.ambiguous_with:
-            print(f"По телеметрии неотличим от {', '.join(case.ambiguous_with)} — "
-                  f"убедитесь, что на стенде выставлен именно этот прогон.")
+            FlightSegment.APPROACH if start == "approach"
+            else FlightSegment.TAXI
+            if set(scenario.matrix_runs) == {FlightSegment.TAXI}
+            else FlightSegment.ROLLOUT
+        )
+        status = scenario.control_status(profile_name, requested_segment)
+        if status is not ProfileStatus.ACCEPTED:
+            print(
+                f"ВНИМАНИЕ: статус профиля {status.value} — "
+                "результат не допускается в SFT.")
+        ambiguous = {
+            item
+            for code in scenario.matrix_codes.values()
+            for item in CASE_BY_CODE[code].ambiguous_with
+        }
+        if ambiguous:
+            print(f"По телеметрии неотличим от {', '.join(sorted(ambiguous))} — "
+                  "проверяется именно явно выбранный run_id.")
 
     controller.bind_scenario(scenario, profile_name)
     recorder = RunRecorder(
@@ -267,12 +301,13 @@ def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ИСМПУ: полный полёт через ICS или X-Plane 12")
     parser.add_argument("preset", nargs="?", default=None)
     parser.add_argument("--backend", choices=("ics", "xplane"), default="ics")
-    parser.add_argument("--start", choices=("approach", "rollout"), default=None)
+    parser.add_argument("--start", choices=("approach", "rollout", "taxi"), default=None)
     parser.add_argument("--ip", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--xplane-root", default=None)
     parser.add_argument("--aircraft-profile", default=None)
     parser.add_argument("--runway-profile", default=None)
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--dashboard-tune", action="store_true")
     args = parser.parse_args(argv)

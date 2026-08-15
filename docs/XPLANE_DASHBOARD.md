@@ -27,8 +27,8 @@ from ismpu.config.scenarios import compose_matrix_scenario
 
 scenario = compose_matrix_scenario(
     "full",
-    approach_case="А.4.1",
-    ground_case="Б.3.1",
+    approach_run="А.4.1/1",
+    rollout_run="Б.3.1/1",
 )
 ```
 
@@ -37,7 +37,7 @@ scenario = compose_matrix_scenario(
 Они различаются условиями испытания, а не копиями наземного PID-пресета. Отказы листа А
 сохраняются после касания; совпадающие отказы А и Б объединяются один раз.
 
-`taxi=None` наследует источник пробега. Повторяющийся отказ хранится один раз в `frozenset`, поэтому
+`taxi_run=None` наследует источник пробега. Повторяющийся отказ хранится один раз в `frozenset`, поэтому
 X‑Plane не вводит его повторно; неизменная погода также не переустанавливается. ICS не меняет среду:
 он сверяет телеметрию с `SegmentConditions` и сохраняет `ConditionMatch` в `report.json`.
 
@@ -45,8 +45,9 @@ X‑Plane не вводит его повторно; неизменная пог
 `a330-300` и отклоняет профиль без X‑Plane-привязки. Воздушная ветка A330 остаётся `draft` до живой
 приёмки; `draft` проверяется отдельно для профиля и участка.
 
-Сценарии сериализуются только в JSON schema v2. Чтение schema v1 относит старые стендовые настройки к
-`mc21`; старый A330-файл нужно читать с `legacy_aircraft_profile="a330-300"`.
+Сценарии сериализуются в JSON schema v3 с конкретными `matrix_runs`, статусами профилей и sparse overrides.
+Schema v1/v2 читаются миграторами; для старого A330-файла нужен
+`legacy_aircraft_profile="a330-300"`.
 
 NPGS-артефакты разделены по профилям:
 
@@ -70,6 +71,9 @@ checkpoints/
 ```powershell
 .venv\Scripts\python.exe -m ismpu.runtime.loop --aircraft-profile mc21
 ```
+
+Матричный прогон ICS запускается только по полной строке, например
+`--run-id Б.2.2/4`; шифр по телеметрии не угадывается.
 
 Полный заход в X‑Plane:
 

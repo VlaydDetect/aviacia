@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from ismpu.config.scenarios import Scenario
     from ismpu.config.segments import FlightSegment
 
-StartMode = Literal["approach", "rollout"]
+StartMode = Literal["approach", "rollout", "taxi"]
 
 
 @dataclass(frozen=True)

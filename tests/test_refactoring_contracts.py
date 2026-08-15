@@ -57,8 +57,38 @@ def test_production_cli_uses_the_unified_runtime_without_working_ics(monkeypatch
     assert captured["backend"] == "ics"
     assert captured["aircraft_profile"] == "mc21"
     assert captured["start"] == "approach"
+    assert loop.cli(["--aircraft-profile", "mc21", "--run-id", "Б.2.2/4"]) == 0
+    assert captured["run_id"] == "Б.2.2/4"
     assert "working_ics" not in inspect.getsource(loop)
     assert "live_main" not in inspect.getsource(loop)
+
+
+def test_runtime_uses_explicit_matrix_run_id_without_telemetry_guessing(monkeypatch):
+    from ismpu.runtime import loop
+
+    sim, _ = static_sim()
+    captured = {}
+
+    def unexpected_guess(*args, **kwargs):
+        raise AssertionError("telemetry guess")
+
+    monkeypatch.setattr(loop, "build_sim", lambda *args, **kwargs: sim)
+    monkeypatch.setattr(loop, "select_for_telemetry", unexpected_guess)
+    monkeypatch.setattr(
+        loop,
+        "run",
+        lambda controller, backend, scenario, **kwargs: captured.update(
+            scenario=scenario, start=kwargs["start"]),
+    )
+
+    with pytest.raises(ValueError, match="--run-id"):
+        loop.main("Б.2.2", backend="ics", aircraft_profile="mc21")
+    loop.main(backend="ics", aircraft_profile="mc21", run_id="Б.2.2/4")
+
+    assert captured["scenario"].matrix_runs == {
+        FlightSegment.ROLLOUT: "Б.2.2/4",
+    }
+    assert captured["start"] == "rollout"
 
 
 def test_xplane_used_wire_packets_match_confirmed_original(monkeypatch):
@@ -106,7 +136,7 @@ def test_ics_shutdown_is_idempotent_and_releases_every_channel():
     assert all(int(packet.ControlMode) == 0 for packet in connector.sent_outputs)
 
 
-def test_scenario_json_v2_supports_unregistered_profile_roundtrip():
+def test_scenario_json_v3_supports_unregistered_profile_roundtrip():
     original = Scenario.from_preset("default", scenario_id="external-json", seed=17)
     document = scenario_to_document(original)
     document["aircraft_controls"]["experimental"] = deepcopy(
@@ -117,6 +147,22 @@ def test_scenario_json_v2_supports_unregistered_profile_roundtrip():
     assert restored.scenario_id == "external-json"
     assert restored.control_for("experimental", FlightSegment.ROLLOUT).brake_l["kp"] == 0.123
     assert scenario_to_document(restored) == document
+
+
+def test_scenario_json_v2_remains_readable_after_control_profile_split():
+    document = scenario_to_document(Scenario.from_preset("default"))
+    document["schema_version"] = 2
+    document.pop("matrix_runs")
+    for profile in document["aircraft_controls"].values():
+        profile["draft_segments"] = [
+            segment for segment, status in profile.pop("statuses").items()
+            if status == "draft"
+        ]
+        profile.pop("run_overrides")
+
+    restored = scenario_from_document(document)
+    assert restored.is_draft("mc21", FlightSegment.ROLLOUT)
+    assert restored.control_for("mc21", FlightSegment.APPROACH).name == "ics_clear_weather"
 
 
 @pytest.mark.parametrize("profile", ["mc21", "a330-300"])

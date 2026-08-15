@@ -21,7 +21,7 @@
 import math
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from ismpu.io.ics_connector import (
@@ -531,7 +531,10 @@ class ICSSim(SimInterface):
         self.condition_match = None
         self.condition_matches.clear()
         self.conditions_valid = True
-        return self.read_telemetry()
+        frame = self.read_telemetry()
+        if start == "taxi":
+            self.engagement.arm_taxi_start()
+        return frame
 
     def enter_segment(
         self,
@@ -541,8 +544,12 @@ class ICSSim(SimInterface):
     ) -> ConditionMatch:
         """Сверить ожидаемые условия; стендовые условия никогда не изменяются кодом."""
         frame = telemetry or self._last_telemetry or self.read_telemetry()
-        report = match_conditions(
-            scenario.conditions_for(segment), frame.faults, frame.weather, segment)
+        report = replace(
+            match_conditions(
+                scenario.conditions_for(segment), frame.faults, frame.weather, segment),
+            matrix_run_id=scenario.matrix_runs.get(segment),
+            matrix_code=scenario.matrix_codes.get(segment),
+        )
         initial = self._entered_segment is None
         self._scenario = scenario
         self._entered_segment = segment
@@ -555,7 +562,7 @@ class ICSSim(SimInterface):
             raise RuntimeError(
                 f"условия ICS не соответствуют сценарию {scenario.scenario_id!r}: "
                 f"нет отказов [{missing}], лишние [{unexpected}]")
-        if not report.exact:
+        if not report.failures_match or not report.weather_matches:
             logger.warning(
                 "Условия участка %s отличаются от сценария %s: missing=%s unexpected=%s "
                 "weather_distance=%.6f",

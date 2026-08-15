@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ismpu.control.trajectory import CompletionRule, VelocityLaw
@@ -26,7 +27,7 @@ from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
 from ismpu.envs.weather import decompose_wind
 
 if TYPE_CHECKING:
-    from ismpu.config.run_matrix import MatrixCase
+    from ismpu.config.run_matrix import MatrixCase, MatrixRun
     from ismpu.control.pid import PIDController
     from ismpu.control.system import ControllingSystem
     from ismpu.envs.ics_sim import Telemetry
@@ -91,7 +92,6 @@ class _GroundPresetSpec:
     brake_rate_per_s: float = 1.0
     reverse_rate_per_s: float = 1.0
     failure_yaw_compensation_gain: float = 1.0
-    draft: bool = False  # True = черновой наземный пресет, требует калибровки
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
@@ -231,9 +231,8 @@ _ICY_RWY_SPEC = _GroundPresetSpec(
 # заводится на шифр, а не на строку таблицы.
 #
 # Каждый черновик наследуется от **ближайшего откалиброванного** пресета, а не от нулей: начинать
-# настройку от работающего набора — ровно то, что предписывает методика матрицы. Пометка
-# `draft=True` при этом говорит правду: под конкретный отказ коэффициенты ещё не считались, и
-# автоматический подбор по телеметрии такие пресеты не берёт.
+# настройку от работающего набора — ровно то, что предписывает методика матрицы. Статус
+# калибровки хранится только в `ControlProfile.statuses`.
 
 def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
                   failure: FailureMode | None = None,
@@ -244,7 +243,7 @@ def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
     общий словарь на два пресета означал бы, что настройка одного молча меняет другой.
     """
     spec = dict(
-        name=name, matrix_code=code, draft=True,
+        name=name, matrix_code=code,
         failure=base.failure if failure is None else failure,
         runway_center=dict(base.runway_center), brake_l=dict(base.brake_l),
         brake_r=dict(base.brake_r), rev_l=dict(base.rev_l), rev_r=dict(base.rev_r),
@@ -362,34 +361,117 @@ class ConditionMatch:
     missing_failures: frozenset[FailureMode]
     unexpected_failures: frozenset[FailureMode]
     weather_distance: float
+    matrix_run_id: str | None = None
+    matrix_code: str | None = None
 
     @property
     def failures_match(self) -> bool:
         return not self.missing_failures and not self.unexpected_failures
 
     @property
-    def exact(self) -> bool:
+    def weather_matches(self) -> bool:
+        return self.weather_distance <= 1e-3
+
+    @property
+    def acceptance_valid(self) -> bool:
+        """Погода остаётся отчётной; неверный отказ делает прогон недопустимым."""
         return self.failures_match
-        # return self.failures_match and self.weather_distance <= 1e-3
+
+    @property
+    def exact(self) -> bool:
+        """Совместимое имя для прежних потребителей допуска к приёмке."""
+        return self.acceptance_valid
+
+
+class ProfileStatus(str, Enum):
+    DRAFT = "draft"
+    TUNED = "tuned"
+    ACCEPTED = "accepted"
+
+
+def _materialize_override(config, patch: Mapping[str, Any]):
+    """Применить одноуровневый sparse patch и вернуть полный неизменяемый config."""
+    changes = {
+        name: dict(value)
+        for name, value in vars(config).items()
+        if isinstance(value, Mapping)
+    }
+    for name, value in patch.items():
+        if not hasattr(config, name):
+            raise ValueError(f"неизвестное поле override {name!r}")
+        current = getattr(config, name)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            changes[name] = {**current, **value}
+        elif isinstance(current, Enum) and not isinstance(value, type(current)):
+            changes[name] = (
+                type(current)[value] if isinstance(value, str) and value in type(current).__members__
+                else type(current)(value)
+            )
+        else:
+            changes[name] = value
+    return replace(config, **changes)
 
 
 @dataclass(frozen=True)
-class AircraftControlSet:
-    """Настройки всех участков одного профиля ЛА."""
+class ControlProfile:
+    """Базовые законы одного профиля ЛА и sparse override конкретных строк матрицы."""
 
     approach: ApproachConfig
     rollout: GroundControlConfig
     taxi: GroundControlConfig
-    draft_segments: frozenset[FlightSegment] = frozenset()
+    statuses: Mapping[FlightSegment, ProfileStatus] = field(default_factory=lambda: {
+        segment: ProfileStatus.ACCEPTED for segment in FlightSegment
+    })
+    run_overrides: Mapping[
+        str, Mapping[FlightSegment, Mapping[str, Any]]
+    ] = field(default_factory=dict)
 
-    def for_segment(self, segment: FlightSegment) -> ApproachConfig | GroundControlConfig:
+    def __post_init__(self) -> None:
+        if set(self.statuses) != set(FlightSegment):
+            raise ValueError("ControlProfile требует статус approach/rollout/taxi")
+        if not self.run_overrides:
+            return
+        from ismpu.config.run_matrix import resolve_matrix_run
+        for run_id, per_segment in self.run_overrides.items():
+            run = resolve_matrix_run(run_id)
+            for segment, patch in per_segment.items():
+                if run.segment not in (segment.value, "through"):
+                    raise ValueError(
+                        f"override {run_id} нельзя применить к {segment.value}")
+                base = (
+                    self.approach if segment is FlightSegment.APPROACH
+                    else self.rollout if segment is FlightSegment.ROLLOUT
+                    else self.taxi
+                )
+                _materialize_override(base, patch)
+
+    def for_segment(
+        self, segment: FlightSegment, matrix_run_id: str | None = None,
+    ) -> ApproachConfig | GroundControlConfig:
         if segment is FlightSegment.APPROACH:
-            return self.approach
-        if segment is FlightSegment.ROLLOUT:
-            return self.rollout
-        if segment is FlightSegment.TAXI:
-            return self.taxi
-        raise ValueError(f"неподдерживаемый участок {segment!r}")
+            base = self.approach
+        elif segment is FlightSegment.ROLLOUT:
+            base = self.rollout
+        elif segment is FlightSegment.TAXI:
+            base = self.taxi
+        else:
+            raise ValueError(f"неподдерживаемый участок {segment!r}")
+        patch = self.run_overrides.get(matrix_run_id or "", {}).get(segment, {})
+        return _materialize_override(base, patch)
+
+    def status_for(self, segment: FlightSegment) -> ProfileStatus:
+        return ProfileStatus(self.statuses.get(segment, ProfileStatus.DRAFT))
+
+    @property
+    def draft_segments(self) -> frozenset[FlightSegment]:
+        """Совместимое чтение старого контракта; канонический источник — ``statuses``."""
+        return frozenset(
+            segment for segment in FlightSegment
+            if self.status_for(segment) is ProfileStatus.DRAFT)
+
+
+# Старое имя остаётся только как импортная совместимость schema v1/v2.
+AircraftControlSet = ControlProfile
 
 
 def _profile_name(profile: AircraftProfile | str) -> str:
@@ -402,13 +484,27 @@ class Scenario:
 
     scenario_id: str
     seed: int
-    aircraft_controls: Mapping[str, AircraftControlSet]
+    aircraft_controls: Mapping[str, ControlProfile]
     conditions: Mapping[FlightSegment, SegmentConditions]
     approach: ApproachSetup = field(default_factory=ApproachSetup)
     touchdown: TouchdownSetup = field(default_factory=TouchdownSetup)
     sensor_noise: SensorNoise = field(default_factory=SensorNoise)
+    matrix_runs: Mapping[FlightSegment, str] = field(default_factory=dict)
     matrix_codes: Mapping[FlightSegment, str] = field(default_factory=dict)
     provenance: Mapping[FlightSegment, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.matrix_runs:
+            return
+        from ismpu.config.run_matrix import resolve_matrix_run
+        for segment, run_id in self.matrix_runs.items():
+            run = resolve_matrix_run(run_id)
+            if self.matrix_codes.get(segment) != run.code:
+                raise ValueError(
+                    f"{segment.value}: run_id {run_id!r} не совпадает с выбранным шифром")
+            if run.segment not in (segment.value, "through"):
+                raise ValueError(
+                    f"{run_id}: строка {run.segment} не относится к {segment.value}")
 
     @property
     def name(self) -> str:
@@ -425,7 +521,7 @@ class Scenario:
             raise KeyError(
                 f"сценарий {self.scenario_id!r} не содержит профиль {name!r}; доступны: {known}"
             ) from exc
-        return controls.for_segment(segment)
+        return controls.for_segment(segment, self.matrix_runs.get(segment))
 
     def conditions_for(self, segment: FlightSegment) -> SegmentConditions:
         try:
@@ -436,11 +532,26 @@ class Scenario:
             ) from exc
 
     def is_draft(self, profile: AircraftProfile | str, segment: FlightSegment) -> bool:
+        return self.control_status(profile, segment) is ProfileStatus.DRAFT
+
+    def control_status(
+        self, profile: AircraftProfile | str, segment: FlightSegment,
+    ) -> ProfileStatus:
         name = _profile_name(profile)
         try:
-            return segment in self.aircraft_controls[name].draft_segments
+            return self.aircraft_controls[name].status_for(segment)
         except KeyError as exc:
             raise KeyError(f"в сценарии нет профиля {name!r}") from exc
+
+    def is_accepted(self, profile: AircraftProfile | str, segment: FlightSegment) -> bool:
+        return self.control_status(profile, segment) is ProfileStatus.ACCEPTED
+
+    def matrix_run_for(self, segment: FlightSegment) -> "MatrixRun | None":
+        run_id = self.matrix_runs.get(segment)
+        if run_id is None:
+            return None
+        from ismpu.config.run_matrix import resolve_matrix_run
+        return resolve_matrix_run(run_id)
 
     def apply_control(
         self,
@@ -476,7 +587,7 @@ class Scenario:
         return codes[0] if len(codes) == 1 else "+".join(codes)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize only the canonical profile-aware schema v2."""
+        """Serialize only the canonical profile- and matrix-aware schema v3."""
         from ismpu.config.json_config import scenario_to_document
 
         return scenario_to_document(self)
@@ -565,26 +676,30 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
 
     # Численность PID и allocator изменены на этапе 2: все прежние наземные gains требуют
     # повторной настройки, даже если до рефакторинга считались рабочими.
-    mc21_drafts = frozenset({FlightSegment.ROLLOUT, FlightSegment.TAXI})
-    a330_drafts = mc21_drafts | {FlightSegment.APPROACH}
+    mc21_statuses = {
+        FlightSegment.APPROACH: ProfileStatus.ACCEPTED,
+        FlightSegment.ROLLOUT: ProfileStatus.DRAFT,
+        FlightSegment.TAXI: ProfileStatus.DRAFT,
+    }
+    a330_statuses = {segment: ProfileStatus.DRAFT for segment in FlightSegment}
     controls = {
-        MC21.name: AircraftControlSet(
+        MC21.name: ControlProfile(
             approach=_copy_approach(
                 ICS_CLEAR_WEATHER_APPROACH,
                 name=ICS_CLEAR_WEATHER_APPROACH.name,
                 draft=False,
             ),
             rollout=_copy_ground(rollout_ground), taxi=_copy_ground(taxi_ground),
-            draft_segments=frozenset(mc21_drafts),
+            statuses=mc21_statuses,
         ),
-        A330_300.name: AircraftControlSet(
+        A330_300.name: ControlProfile(
             approach=_copy_approach(
                 _A330_APPROACH_DRAFT,
                 name=_A330_APPROACH_DRAFT.name,
                 draft=True,
             ),
             rollout=_copy_ground(rollout_ground), taxi=_copy_ground(taxi_ground),
-            draft_segments=frozenset(a330_drafts),
+            statuses=a330_statuses,
         ),
     }
 
@@ -604,6 +719,10 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
         seed=0,
         aircraft_controls=controls,
         conditions=conditions,
+        touchdown=(
+            TouchdownSetup(speed_knots=15.0)
+            if spec.name == "b_1_2_taxi" else TouchdownSetup()
+        ),
         matrix_codes=matrix_codes,
         provenance={segment: spec.name for segment in FlightSegment},
     )
@@ -627,7 +746,7 @@ def _install_approach_scenarios() -> None:
     base = SCENARIOS["default"]
     for case in APPROACH_CASES:
         controls = {
-            profile: AircraftControlSet(
+            profile: ControlProfile(
                 approach=_copy_approach(
                     control.approach,
                     name=control.approach.name,
@@ -635,7 +754,8 @@ def _install_approach_scenarios() -> None:
                 ),
                 rollout=_copy_ground(control.rollout),
                 taxi=_copy_ground(control.taxi),
-                draft_segments=control.draft_segments,
+                statuses=dict(control.statuses),
+                run_overrides=dict(control.run_overrides),
             )
             for profile, control in base.aircraft_controls.items()
         }
@@ -702,14 +822,21 @@ def compose_scenario(
         by_segment = {
             segment: source.aircraft_controls[profile] for segment, source in sources.items()
         }
-        drafts = frozenset(
-            segment for segment, source_controls in by_segment.items()
-            if segment in source_controls.draft_segments)
-        controls[profile] = AircraftControlSet(
+        statuses = {
+            segment: source_controls.status_for(segment)
+            for segment, source_controls in by_segment.items()
+        }
+        overrides: dict[str, dict[FlightSegment, Mapping[str, Any]]] = {}
+        for segment, source_controls in by_segment.items():
+            for run_id, per_segment in source_controls.run_overrides.items():
+                if segment in per_segment:
+                    overrides.setdefault(run_id, {})[segment] = per_segment[segment]
+        controls[profile] = ControlProfile(
             approach=by_segment[FlightSegment.APPROACH].approach,
             rollout=by_segment[FlightSegment.ROLLOUT].rollout,
             taxi=by_segment[FlightSegment.TAXI].taxi,
-            draft_segments=drafts,
+            statuses=statuses,
+            run_overrides=overrides,
         )
     return Scenario(
         scenario_id=scenario_id,
@@ -719,6 +846,10 @@ def compose_scenario(
         approach=sources[FlightSegment.APPROACH].approach,
         touchdown=sources[FlightSegment.ROLLOUT].touchdown,
         sensor_noise=sources[FlightSegment.APPROACH].sensor_noise,
+        matrix_runs={
+            segment: source.matrix_runs[segment]
+            for segment, source in sources.items() if segment in source.matrix_runs
+        },
         matrix_codes={
             segment: source.matrix_codes[segment]
             for segment, source in sources.items() if segment in source.matrix_codes
@@ -730,77 +861,172 @@ def compose_scenario(
 def compose_matrix_scenario(
     scenario_id: str,
     *,
-    approach_case: "str | MatrixCase",
-    ground_case: "str | MatrixCase",
+    approach_run: "str | MatrixRun | None" = None,
+    rollout_run: "str | MatrixRun | None" = None,
+    taxi_run: "str | MatrixRun | None" = None,
+    approach_case: "str | MatrixCase | None" = None,
+    ground_case: "str | MatrixCase | None" = None,
     seed: int = 0,
 ) -> Scenario:
-    """Объединить случай листа А и случай листа Б в один полный сценарий.
+    """Собрать сценарий из конкретных строк APPROACH/ROLLOUT/TAXI.
 
-    Аргументы принимают как шифры (`А.1.2`, `Б.1.1`), так и имена из поля
-    `MatrixCase.preset`. Все варианты листа А используют единственный рабочий
-    `ICS_CLEAR_WEATHER_APPROACH`; матрица задаёт условия, а не копии PID.
+    ``approach_case``/``ground_case`` оставлены только для эталонного ``working_ics`` и
+    детерминированно означают первую строку шифра. Production CLI принимает только run_id.
     """
-    from ismpu.config.run_matrix import APPROACH_CASES, GROUND_CASES
+    from ismpu.config.run_matrix import (
+        CASE_BY_CODE,
+        CASE_BY_PRESET,
+        MatrixRun,
+        resolve_matrix_run,
+    )
 
-    def find_case(key: "str | MatrixCase", cases, sheet: str):
-        if not isinstance(key, str):
-            if key in cases:
-                return key
-            raise KeyError(f"случай {key!r} не относится к листу {sheet}")
-        normalized = key.strip().upper().replace("A", "А").replace("B", "Б")
-        for case in cases:
-            if case.preset == key or case.code.upper() == normalized:
-                return case
-        raise KeyError(f"в листе {sheet} нет случая {key!r}")
+    if (approach_case is not None or ground_case is not None) and any(
+        value is not None for value in (approach_run, rollout_run, taxi_run)
+    ):
+        raise ValueError("нельзя смешивать конкретные run_id и legacy шифры")
 
-    approach = find_case(approach_case, APPROACH_CASES, "А")
-    ground = find_case(ground_case, GROUND_CASES, "Б")
-    if ground.segment == "taxi":
-        rollout_source: str | Scenario = "default"
-        taxi_source: str | Scenario | None = ground.preset
-    else:
-        rollout_source = ground.preset
-        taxi_source = None
+    def first_run(value: "str | MatrixCase", expected: str) -> MatrixRun:
+        if not isinstance(value, str):
+            case = value
+        else:
+            case = CASE_BY_PRESET.get(value) or CASE_BY_CODE.get(
+                value.strip().upper().replace("A", "А").replace("B", "Б"))
+        if case is None or (expected == "approach") != (case.segment == "approach"):
+            raise KeyError(f"шифр {value!r} не относится к части {expected}")
+        return case.rows[0]
+
+    if approach_case is not None or ground_case is not None:
+        if approach_case is None or ground_case is None:
+            raise ValueError("legacy-композиции нужны оба шифра")
+        approach_run = first_run(approach_case, "approach")
+        legacy_ground = first_run(ground_case, "ground")
+        if legacy_ground.segment == "taxi":
+            taxi_run = legacy_ground
+        elif legacy_ground.segment == "through":
+            return scenario_for_matrix_run(legacy_ground, scenario_id=scenario_id, seed=seed)
+        else:
+            rollout_run = legacy_ground
+
+    selected: dict[FlightSegment, MatrixRun] = {}
+    for segment, value, expected in (
+        (FlightSegment.APPROACH, approach_run, "approach"),
+        (FlightSegment.ROLLOUT, rollout_run, "rollout"),
+        (FlightSegment.TAXI, taxi_run, "taxi"),
+    ):
+        if value is None:
+            continue
+        run = resolve_matrix_run(value)
+        if run.segment == "through":
+            if len([item for item in (approach_run, rollout_run, taxi_run) if item is not None]) != 1:
+                raise ValueError("сквозной run_id нельзя смешивать с другими строками")
+            return scenario_for_matrix_run(run, scenario_id=scenario_id, seed=seed)
+        if run.segment != expected:
+            raise ValueError(
+                f"{run.matrix_run_id} относится к {run.segment}, а не к {expected}")
+        selected[segment] = run
+
+    if not selected:
+        raise ValueError("нужен хотя бы один конкретный run_id")
+
+    approach_source = selected.get(FlightSegment.APPROACH)
+    rollout_source = selected.get(FlightSegment.ROLLOUT)
+    taxi_source = selected.get(FlightSegment.TAXI)
     scenario = compose_scenario(
         scenario_id,
-        approach=approach.preset,
-        rollout=rollout_source,
-        taxi=taxi_source,
+        approach=approach_source.preset if approach_source else "default",
+        rollout=rollout_source.preset if rollout_source else "default",
+        taxi=taxi_source.preset if taxi_source else None,
         seed=seed,
     )
-    # Отказы листа А не чинятся сами в момент касания. Переносим их на землю;
-    # frozenset одновременно убирает повтор, если лист Б содержит тот же отказ.
-    persistent = scenario.conditions_for(FlightSegment.APPROACH).failures
     conditions = dict(scenario.conditions)
+    for segment, run in selected.items():
+        conditions[segment] = SegmentConditions(
+            weather=run.condition.weather,
+            failures=run.failures_for(segment),
+        )
+    if rollout_source is not None and taxi_source is None:
+        conditions[FlightSegment.TAXI] = SegmentConditions(
+            weather=rollout_source.condition.weather,
+            failures=rollout_source.failures_for(FlightSegment.TAXI),
+        )
+
+    # Введённые в воздухе отказы явно сохраняются на последующих сегментах.
+    persistent = conditions[FlightSegment.APPROACH].failures
     for segment in (FlightSegment.ROLLOUT, FlightSegment.TAXI):
         current = conditions[segment]
-        conditions[segment] = replace(
-            current, failures=current.failures | persistent)
-    return replace(scenario, conditions=conditions)
+        conditions[segment] = replace(current, failures=current.failures | persistent)
+    return replace(
+        scenario,
+        conditions=conditions,
+        touchdown=(SCENARIOS[taxi_source.preset].touchdown
+                   if taxi_source is not None else scenario.touchdown),
+        matrix_runs={segment: run.matrix_run_id for segment, run in selected.items()},
+        matrix_codes={segment: run.code for segment, run in selected.items()},
+    )
+
+
+def scenario_for_matrix_run(
+    matrix_run: "str | MatrixRun", *, scenario_id: str | None = None, seed: int = 0,
+) -> Scenario:
+    """Одна строка каталога → минимальный сценарий нужного участка или сквозной пары."""
+    from ismpu.config.run_matrix import (
+        CASE_BY_CODE,
+        THROUGH_PROFILE_CODES,
+        resolve_matrix_run,
+    )
+
+    run = resolve_matrix_run(matrix_run)
+    name = scenario_id or run.matrix_run_id
+    if run.segment == "approach":
+        return compose_matrix_scenario(name, approach_run=run, seed=seed)
+    if run.segment == "rollout":
+        return compose_matrix_scenario(name, rollout_run=run, seed=seed)
+    if run.segment == "taxi":
+        return compose_matrix_scenario(name, taxi_run=run, seed=seed)
+
+    pair = THROUGH_PROFILE_CODES[run.code]
+    approach = CASE_BY_CODE[pair[FlightSegment.APPROACH]].preset
+    rollout = CASE_BY_CODE[pair[FlightSegment.ROLLOUT]].preset
+    scenario = compose_scenario(name, approach=approach, rollout=rollout, seed=seed)
+    conditions = {
+        segment: SegmentConditions(
+            weather=run.condition.weather,
+            failures=run.failures_for(segment),
+        )
+        for segment in FlightSegment
+    }
+    return replace(
+        scenario,
+        conditions=conditions,
+        matrix_runs={
+            FlightSegment.APPROACH: run.matrix_run_id,
+            FlightSegment.ROLLOUT: run.matrix_run_id,
+        },
+        matrix_codes={
+            FlightSegment.APPROACH: run.code,
+            FlightSegment.ROLLOUT: run.code,
+        },
+    )
 
 
 def _install_through_scenarios() -> None:
-    """Собрать штатные сквозные случаи Б.4 из реальных источников листов А и Б."""
-    sources = {
-        "b_4_1_through": "А.1.2",
-        "b_4_2_through_engine_out": "А.4.1",
-    }
-    for scenario_id, approach_code in sources.items():
-        rollout_source = SCENARIOS[scenario_id]
-        scenario = compose_matrix_scenario(
-            scenario_id,
-            approach_case=approach_code,
-            ground_case=rollout_source.matrix_code,
-            seed=rollout_source.seed,
-        )
-        code = rollout_source.matrix_code
-        SCENARIOS[scenario_id] = replace(scenario, matrix_codes={
-            FlightSegment.APPROACH: code,
-            FlightSegment.ROLLOUT: code,
-        })
+    """Собрать Б.4 из первой строки и заранее определённой пары законов."""
+    from ismpu.config.run_matrix import CASE_BY_CODE
+
+    for code in ("Б.4.1", "Б.4.2"):
+        case = CASE_BY_CODE[code]
+        SCENARIOS[case.preset] = scenario_for_matrix_run(
+            case.rows[0], scenario_id=case.preset)
 
 
 _install_through_scenarios()
+
+# Ровно одна базовая настройка на шифр; 280 строк ссылаются на неё по ``MatrixRun.code``.
+from ismpu.config.run_matrix import MATRIX_CASES as _MATRIX_CASES
+
+CONTROL_PROFILES: dict[str, Mapping[str, ControlProfile]] = {
+    case.code: SCENARIOS[case.preset].aircraft_controls for case in _MATRIX_CASES
+}
 
 
 FAILURE_MISMATCH_PENALTY = 100.0
@@ -873,9 +1099,11 @@ def select_scenario(
 ) -> Scenario:
     pool = list(scenarios if scenarios is not None else SCENARIOS.values())
     profile = _profile_name(aircraft_profile)
+    # Строка матрицы требует явного run_id; телеметрия не выбирает даже принятый шифр.
+    pool = [scenario for scenario in pool if not scenario.matrix_codes]
     pool = [scenario for scenario in pool if profile in scenario.aircraft_controls]
     if not include_draft:
-        pool = [scenario for scenario in pool if not scenario.is_draft(profile, segment)]
+        pool = [scenario for scenario in pool if scenario.is_accepted(profile, segment)]
     if not pool:
         admission = "допущенных " if not include_draft else ""
         raise ValueError(
@@ -912,8 +1140,8 @@ def select_for_telemetry(
 
 
 def matrix_battery(segment: str | None = None) -> tuple[Scenario, ...]:
-    from ismpu.config.run_matrix import RUN_MATRIX
+    from ismpu.config.run_matrix import MATRIX_RUNS
     return tuple(
-        SCENARIOS[case.preset] for case in RUN_MATRIX
-        if case.preset in SCENARIOS and (segment is None or case.segment == segment)
+        scenario_for_matrix_run(run) for run in MATRIX_RUNS
+        if segment is None or run.segment == segment
     )

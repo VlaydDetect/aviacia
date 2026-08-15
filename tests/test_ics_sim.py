@@ -296,7 +296,11 @@ def test_ics_requires_profile_and_records_nonfatal_transition_mismatch():
     controller.bind_scenario(scenario, "mc21")
     controller.activate_segment(FlightSegment.APPROACH, first)
     approach = sim.condition_match
+    assert approach.matrix_run_id == "Б.4.2/1"
+    assert approach.matrix_code == "Б.4.2"
     assert approach.exact
+    assert not approach.weather_matches
+    assert approach.acceptance_valid
     assert sim.conditions_valid
     assert controller.failures.state.thrust_left_eff == 0.0
 
@@ -305,6 +309,7 @@ def test_ics_requires_profile_and_records_nonfatal_transition_mismatch():
     # the run is invalid and the exact mismatch remains auditable.
     controller.activate_segment(FlightSegment.ROLLOUT, first)
     rollout = sim.condition_match
+    assert rollout.matrix_run_id == "Б.4.2/1"
     assert rollout.missing_failures == frozenset({FailureMode.REVERSE_LEFT_FAIL})
     assert not sim.conditions_valid
     assert sim.condition_matches == [approach, rollout]

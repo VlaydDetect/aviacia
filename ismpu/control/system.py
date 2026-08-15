@@ -266,7 +266,11 @@ class ControllingSystem:
             return
         self.failures.sync(telemetry.faults)
 
-    def begin_flight(self, telemetry: Telemetry | None) -> FlightSegment:
+    def begin_flight(
+        self,
+        telemetry: Telemetry | None,
+        requested_segment: FlightSegment | None = None,
+    ) -> FlightSegment:
         """Определить стартовый участок по кадру стенда. → выбранный участок.
 
         Вызывается в начале прогона. Если стенд сообщает, что ВС в воздухе и выше порога приёма
@@ -284,8 +288,14 @@ class ControllingSystem:
         откат на наземный закон: ВС в воздухе, и молча поехать по земле хуже, чем отказаться.
         """
         self.landing_committed = False
-        self._segment_decided = segment_is_decidable(telemetry)
-        self.segment = initial_segment(telemetry) if self._segment_decided else FlightSegment.ROLLOUT
+        if requested_segment not in (None, FlightSegment.TAXI):
+            raise ValueError("явно начинать разрешено только с TAXI")
+        self._segment_decided = (
+            requested_segment is not None or segment_is_decidable(telemetry))
+        self.segment = (
+            (requested_segment or initial_segment(telemetry))
+            if self._segment_decided else FlightSegment.ROLLOUT
+        )
         if self.segment is FlightSegment.APPROACH:
             blocker = approach_blocker(telemetry)
             if blocker is not None:

@@ -1,3 +1,4 @@
+import math
 import socket
 import struct
 import time
@@ -6,7 +7,7 @@ import pytest
 
 from ismpu.config.aircraft_profiles import A330_300, get_aircraft_profile
 from ismpu.config.runway_profiles import UUEE_06R, parse_ils_station
-from ismpu.config.scenarios import SCENARIOS, SegmentConditions
+from ismpu.config.scenarios import SCENARIOS, SegmentConditions, scenario_for_matrix_run
 from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.flight import FlightSegment
@@ -197,6 +198,37 @@ def test_xplane_reset_supports_approach_and_rollout(tmp_path):
     rollout = sim.reset(scenario, start="rollout")
     assert mock.positions[-1]["elevation_m"] < UUEE_06R.elevation_m + 2.0
     assert rollout.main_gear_contact
+
+
+def test_xplane_applies_weather_and_supported_failure_from_exact_matrix_row():
+    mock = MockXPlaneConnector()
+    sim = _xplane(mock)
+    scenario = scenario_for_matrix_run("Б.3.1/11")
+    expected = scenario.conditions_for(FlightSegment.ROLLOUT)
+
+    sim.reset(scenario, start="rollout")
+
+    assert sim._weather == expected.weather
+    assert sim.active_failures == frozenset({FailureMode.REVERSE_LEFT_FAIL})
+    writes = dict(mock.writes)
+    assert writes[dr.WX_RUNWAY_FRICTION] == expected.weather.runway_friction
+    assert writes[dr.WX_WIND_SPEED_MSC + "[0]"] == pytest.approx(10.0)
+
+
+def test_exact_taxi_row_starts_xplane_and_controller_in_taxi_at_15_knots():
+    mock = MockXPlaneConnector()
+    sim = _xplane(mock)
+    scenario = scenario_for_matrix_run("Б.1.2/1")
+
+    frame = sim.reset(scenario, start="taxi")
+    controller = ControllingSystem(sim)
+    controller.bind_scenario(scenario, "a330-300")
+
+    assert controller.begin_flight(frame, FlightSegment.TAXI) is FlightSegment.TAXI
+    assert scenario.touchdown.speed_knots == 15.0
+    writes = dict(mock.writes)
+    speed_ms = math.hypot(writes[dr.LOCAL_VX], writes[dr.LOCAL_VZ])
+    assert speed_ms == pytest.approx(15.0 * 0.514444, rel=1e-5)
 
 
 def test_failed_approach_setup_releases_overrides_and_pause(tmp_path):

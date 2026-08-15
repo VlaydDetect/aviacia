@@ -62,7 +62,9 @@ Read these before making architectural changes — they define the target design
   Pinned as data in `tests/test_icd_units.py`.
 - **[`docs/Матрица_прогонов_ПИД_ИСМПУ.xlsx`](docs/Матрица_прогонов_ПИД_ИСМПУ.xlsx)** — the run matrix for
   tuning the classical PIDs: 22 failure/mode codes × condition catalogue = 280 runs (156 approach + 124
-  ground). Machine-readable in `ismpu/config/run_matrix.py`, pinned by `tests/test_run_matrix.py`.
+  ground). Its exact 280×16 snapshot is `ismpu/config/run_matrix.v3.json`; runtime reads that JSON only.
+  Regenerate explicitly with `python -m ismpu.tools.import_run_matrix`; tests pin the workbook hash and
+  exact import.
 - **`roman_aviacia_ics/`** (untracked) — the second НИР participant's ICS toolkit against the same bench.
   It is no longer just a cross-check: `ismpu/control/approach.py`, `ismpu/config/approach.py` and
   `ismpu/config/envelope.py` are ports of `tools/ics_pid_controller.py`, `config/ics_clear_weather_pid.json`
@@ -89,10 +91,10 @@ Read these before making architectural changes — they define the target design
   `main()` with no argument **picks the preset by telemetry** (`select_for_telemetry`); pass a name
   (`main("nws_fail", aircraft_profile="mc21")`) to force one — see
   `ismpu.config.scenarios.SCENARIOS`. Every scenario contains profile-specific control and conditions for
-  `APPROACH` / `ROLLOUT` / `TAXI`; ICS requires an explicit aircraft profile. Matrix rows can be combined
-  into one full-flight object with `compose_matrix_scenario("full", approach_case="А.1.2",
-  ground_case="Б.1.1")`; every MC-21 row A uses the single bench-validated `ics_clear_weather` airborne
-  preset, while row B supplies the ground control.
+  `APPROACH` / `ROLLOUT` / `TAXI`; ICS requires an explicit aircraft profile. A matrix run is never guessed:
+  start it with `--run-id Б.2.2/4`. Compose concrete rows with
+  `compose_matrix_scenario("full", approach_run="А.1.2/1", rollout_run="Б.1.1/1")`;
+  every MC-21 row A uses the single bench-validated `ics_clear_weather` airborne preset.
 - **Run against X-Plane:** `python -m ismpu.runtime.loop --backend xplane --start approach
   --xplane-root C:\X-Plane 12`. For fast rollout reset use `--start rollout`. X-Plane is never selected
   implicitly by the delivery loop.
@@ -100,7 +102,7 @@ Read these before making architectural changes — they define the target design
   `--dashboard-tune` to permit explicit gain changes. Replay a CSV with
   `python -m ismpu.gui.dashboard --replay runs\<run>\telemetry.csv`.
 - **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (X-Plane/rollout by default). Captures
-  classical rollouts of the non-draft presets and behavior-clones the NPGS toward their coefficients →
+  classical rollouts of `accepted` profiles only and behavior-clones the NPGS toward their coefficients →
   `checkpoints/npgs_sft.pt`. Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)`
   (see `tests/test_pretrain.py`).
 - **Train the NPGS:** `python -m ismpu.runtime.train` (X-Plane/rollout by default). Builds env + controller,
@@ -143,9 +145,9 @@ Read these before making architectural changes — they define the target design
   `system.py` (`ControllingSystem` — the segment supervisor + the go-around decision `_should_go_around` and
   maneuver `_go_around_step`/`GoAroundManeuver`), `failures.py`.
 - `ismpu/config/` — `runway.py` (UUEE 06R geometry — the **fallback** when the bench doesn't publish runway
-  data), `constants.py`, `scenarios.py` (the canonical profile- and segment-aware `Scenario` registry;
-  `Scenario.is_draft(profile, segment)` gates uncalibrated branches), `run_matrix.py` (the customer's run
-  matrix as data), `approach.py` (`ApproachConfig` + `APPROACH_CONFIGS` — reusable law configurations, not scenarios;
+  data), `constants.py`, `scenarios.py` (`Scenario`, `ControlProfile`, `draft/tuned/accepted` status and the
+  canonical registry), `run_matrix.py` (stdlib-only runtime view of `run_matrix.v3.json`),
+  `approach.py` (`ApproachConfig` + `APPROACH_CONFIGS` — reusable law configurations, not scenarios;
   airborne settings, the three airborne PID specs, the ddm→degree map and the go-around params), `envelope.py`
   (МС-21 approach limits: VAPP/VSR1/VFE, alpha protection, touchdown limits, roll limit by radio altitude),
   `criticality.py` (Приложение 1 — the АП-25 5-level `SpecialSituation` scale + trajectory tolerance bands:
@@ -454,30 +456,24 @@ telemetry.
 
 ## Run matrix (`ismpu/config/run_matrix.py`)
 
-The customer's tuning matrix as data: **22 codes ("шифр") × a condition catalogue = 280 runs**. Matrix A
-uses the single bench-validated airborne law `ics_clear_weather`; its codes name test modes and conditions,
-not separate coefficient sets. On matrix B, one code = **one ground coefficient set** ("коэффициенты
-предыдущего прогона — начальное приближение следующего"), so ground presets are per code, not per row.
+`run_matrix.v3.json` is the versioned, exact **280-row × 16-column** runtime catalogue imported from the
+customer workbook: 156 approach rows, 124 ground rows, 22 codes. `MatrixRun` is one concrete row identified
+by `<code>/<run number>`; `MatrixCase` is only a derived grouping. Runtime never opens Excel. The explicit
+maintainer command `python -m ismpu.tools.import_run_matrix` verifies the sheets/columns and records the
+workbook SHA-256 before replacing the JSON snapshot.
 
-- Every code has a full-flight scenario branch in `config/scenarios.py`. All MC-21 branches A use the sole
-  entry in `config/approach.py::APPROACH_CONFIGS`; ground branches B are seeded from the nearest
-  **calibrated** parent rather than from zeros, with copied gain dicts so tuning cannot mutate the parent.
-  Draft status remains per aircraft and segment.
-- **Ground drafts are never picked automatically.** `select_scenario` excludes them; running one is a deliberate
-  act. `resolve_scenario` accepts the matrix code directly (`main("Б.2.2", aircraft_profile="mc21")`),
-  in either alphabet, because
-  that's what the operator at the bench console is holding — and it prints the run title, a draft warning,
-  and which other codes are indistinguishable from it.
-- **The matrix distinguishes finer than the ICD can report.** `FaultNWS` is one byte, so Б.2.1 (stuck
-  neutral), Б.2.2 (stuck at +5°) and Б.2.3 (limited range) all arrive identically; likewise Б.3.1/Б.3.2 on
-  the reverser. `MatrixCase.bench_faults` says what telemetry will actually show and `ambiguous_with` names
-  the collisions — those presets can only be chosen **by name**, and a test asserts the ambiguity claims
-  are backed by identical fault sets rather than by a comment.
-- **SFT covers the ground codes only.** The label in SFT *is* the preset's coefficients, so a draft would
-  train the net toward a known-wrong answer: `build_scenarios` drops drafts and says which it dropped.
-  `PretrainRunConfig.presets` snaps off one code at a time (the matrix gets tuned incrementally), and
-  `include_drafts=True` is possible but shouts. Approach codes never enter SFT — the net schedules rollout
-  gains, and there is no label for the airborne segment.
+- `ControlProfile` owns control configuration and `draft/tuned/accepted` status. There is one base profile
+  per code in `CONTROL_PROFILES`; an exact run may add a sparse `run_overrides[run_id]` patch. `Scenario`
+  only composes selected approach/rollout/taxi rows and their conditions.
+- **ICS requires `--run-id <code>/<run>` for every matrix execution.** Telemetry selection excludes matrix
+  scenarios, because the ICD collapses Б.2.1/Б.2.2/Б.2.3 into one `FaultNWS` and similarly collapses
+  reverser cases. Weather mismatch is recorded but non-blocking; missing/unexpected failures invalidate
+  acceptance and SFT. The selected run ID, source hash and effective config are persisted by `RunRecorder`.
+- X-Plane applies the initial state, weather and supported failures from the same concrete row. Use
+  `compose_matrix_scenario(..., approach_run=..., rollout_run=..., taxi_run=...)`; approach failures persist
+  into later segments, and Б.4.* expands through fixed approach/rollout profile pairs.
+- SFT takes only an `accepted` ground branch. `draft` and `tuned` are rejected even when explicitly named,
+  and a run whose actual failures do not match its row receives `conditions_mismatch` and zero dataset weight.
 
 ## Scenarios (`ismpu/envs/scenario.py`, `scenario_generator.py`)
 
@@ -485,16 +481,17 @@ not separate coefficient sets. On matrix B, one code = **one ground coefficient 
 aircraft and segment; `conditions` stores failures and weather per segment. On ICS those conditions are
 matching keys rather than commands, while X-Plane applies their delta at segment boundaries:
 
-- `select_scenario(failures, weather)` / `select_for_telemetry(telemetry)` pick the preset calibrated for
+- `select_scenario(failures, weather)` / `select_for_telemetry(telemetry)` pick a non-matrix preset calibrated for
   the conditions the bench is actually reporting. Failure mismatch dominates the score
   (`FAILURE_MISMATCH_PENALTY`) — no weather similarity compensates for running an NWS-tuned preset on a
   healthy aircraft. Draft presets are excluded unless asked for. Without telemetry the answer is `default`:
   it's the only safe choice when nothing is known about the airframe's configuration.
 - `apply_control(controller, profile, segment)` installs fresh, stateful PIDs for exactly one profile branch;
-  `control_for`, `conditions_for`, and `is_draft` fail explicitly when the requested branch is absent.
+  `control_for` materializes its sparse run override, while `status_for`, `conditions_for`, and missing
+  branches fail explicitly.
 - `config.scenarios.SCENARIOS` is the only canonical registry. `compose_scenario` selects independent source
-  scenarios for approach/rollout/taxi and records provenance. Serialization writes schema v2; v1 is read only
-  through the explicit migration path.
+  scenarios for approach/rollout/taxi and records provenance. Serialization writes schema v3; v1/v2 are read
+  only through explicit migration paths.
 - `ScenarioGenerator(seed)`: domain randomization across weather and failures, curriculum via
   `difficulty ∈ [0,1]`, deterministic per seed. `battery()` is the fixed acceptance set. It now enumerates
   **which conditions the bench operator should set up**, in what order — it does not configure them.
@@ -608,11 +605,12 @@ telemetry packet, so reconstructing it from raw fields is wrong). `agent/pretrai
 policy `mean → target_z` (MSE, `log_std` frozen). **Anti-copycat (critical):** the obs carries "previous gains" and
 the BC target is constant per rollout, so the net could just copy the input; `pretrain` replaces the gain features
 with **fresh U(−1,1) noise per batch** (not zeros — real values are in `[−1,1]` too, so no train/inference shift),
-forcing the net to key on the disturbance (failure/weather) features. Canonical labeling: each **non-draft**
-profile/rollout branch (`Scenario.is_draft(profile, FlightSegment.ROLLOUT)`) is its own regime run in its own
+forcing the net to key on the disturbance (failure/weather) features. Canonical labeling: each **accepted**
+profile/rollout branch (`Scenario.is_accepted(profile, FlightSegment.ROLLOUT)`) is its own regime run in its own
 conditions; never mix inconsistent labels. Which
 conditions the bench actually produces is the operator's call — runs that don't match their preset are filtered by
-the quality scoring in `capture.py` (ТЗ gate → reject, saturation/Shield → half weight).
+the quality scoring in `capture.py` (failure mismatch or ТЗ gate → reject, saturation/Shield → half weight;
+weather mismatch stays diagnostic).
 `runtime/pretrain.py` orchestrates capture→BC→checkpoint (`npgs_sft.pt`); `smoke_pretrain(env, scenarios)` is the
 offline (no-bench) path used in `tests/test_pretrain.py`. `train.py` loads it via `TrainConfig.init_from`;
 `ppo.lambda_anchor>0` additionally keeps a frozen SFT copy as `trainer.sft_reference` (anti-forgetting).

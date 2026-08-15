@@ -181,6 +181,18 @@ def test_no_stimulus_above_the_speed_threshold():
     assert eng.state is EngagementState.IDLE
 
 
+def test_explicit_matrix_taxi_start_keeps_the_dwell_at_15_knots():
+    clock = _Clock()
+    eng = _engine(clock)
+    inputs = _ready(groundspeed_kts=15.0)
+
+    eng.arm_taxi_start()
+    _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
+
+    assert eng.state is EngagementState.COMMAND_TAXI
+    assert eng.control_mode is ControlModeState.Taxi
+
+
 def test_speed_threshold_is_interpreted_in_knots():
     """Порог задан в узлах. 1.5 узла — стимул идёт; 2.9 узла — нет.
 

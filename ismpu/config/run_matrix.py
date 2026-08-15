@@ -1,346 +1,381 @@
-"""Матрица прогонов для настройки базовых ПИД-регуляторов.
+"""Версионированный каталог 280 прогонов исходной Excel-матрицы.
 
-Машиночитаемая форма `docs/Матрица_прогонов_ПИД_ИСМПУ.xlsx` (версия 3): 22 варианта отказа/режима
-(«шифра») × справочник условий = 280 прогонов. Лист А — заход и посадка (156), лист Б — ВПП и
-руление (124).
-
-**Лист А использует один рабочий воздушный набор `ics_clear_weather`.** Его шифры задают режимы,
-отказы и условия проверки, а не фиктивные копии наземных коэффициентов. На листе Б один шифр
-соответствует одному наземному набору: внутри шифра прогоны идут от простого к сложному, и
-коэффициенты предыдущего служат начальным приближением следующего. Поэтому 280 отдельных
-пресетов не создаются.
-
-**Условия задаёт оператор стенда, а не мы.** Средой распоряжается Заказчик, поэтому здесь описано,
-*что попросить выставить* и *как это будет выглядеть в телеметрии*, чтобы под эти условия
-подобрался нужный пресет. Ни ветра, ни сцепления, ни отказа мы не устанавливаем.
-
-## Чего телеметрия не различает
-
-Матрица различает тоньше, чем ICD. `FaultNWS` — один байт, и заедание стойки в нейтрали (Б.2.1),
-заедание с уводом (Б.2.2) и ограничение диапазона (Б.2.3) приходят одинаково. То же с реверсом:
-Б.3.1 и Б.3.2 неотличимы по `FaultLeftEngineReverse`. Практическое следствие: такие пресеты
-**нельзя выбрать автоматически** по телеметрии — только по имени, руками, зная какой прогон
-выставлен на стенде. Поле `bench_faults` says, что именно придёт, и это же объясняет, почему у
-нескольких шифров оно совпадает.
-
-Ступени ветра, коэффициенты сцепления, высоты и моменты ввода отказов — рабочие значения
-Исполнителя: в ТЗ их нет, и они подлежат согласованию с Заказчиком (ТЗ 5.1.5.1).
+Production runtime читает только :mod:`json`-каталог рядом с этим модулем. Повторный импорт
+Excel выполняется явно через ``python -m ismpu.tools.import_run_matrix``.
 """
 
-from dataclasses import dataclass, field
+from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ismpu.config.runway_profiles import UUEE_06R
+from ismpu.config.segments import FlightSegment
 from ismpu.control.failures import FailureMode
-from ismpu.envs.weather import WeatherState, RunwayCondition
+from ismpu.envs.weather import FrictionProfile, RunwayCondition, WeatherState
 from ismpu.utils.converts import Converts
 
 
-def _kts(ms: float) -> float:
-    """Матрица задаёт ветер в м/с, телеметрия приходит в узлах."""
-    return ms * Converts.MS_TO_KTS
+CATALOG_PATH = Path(__file__).with_name("run_matrix.v3.json")
+_CATALOG = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+CATALOG_SHA256 = hashlib.sha256(CATALOG_PATH.read_bytes()).hexdigest()
+CATALOG_SCHEMA_VERSION = int(_CATALOG["catalog_schema_version"])
+WORKBOOK_VERSION = int(_CATALOG["workbook_version"])
+SOURCE_FILENAME = str(_CATALOG["source_filename"])
+SOURCE_SHA256 = str(_CATALOG["source_sha256"])
+COLUMNS = tuple(str(column) for column in _CATALOG["columns"])
+OPERATOR_COLUMNS = COLUMNS[:13]
+RESULT_COLUMNS = COLUMNS[13:]
+
+
+_PRESET_BY_CODE = {
+    "А.1.1": "a_1_1_track",
+    "А.1.2": "a_1_2_flare",
+    "А.2.1": "a_2_1_gear_left_up",
+    "А.2.2": "a_2_2_gear_nose_up",
+    "А.2.3": "a_2_3_gear_partial",
+    "А.3.1": "a_3_1_stab_nose_down_high",
+    "А.3.2": "a_3_2_stab_nose_up_high",
+    "А.3.3": "a_3_3_stab_nose_down_low",
+    "А.3.4": "a_3_4_stab_nose_up_low",
+    "А.4.1": "a_4_1_engine_out_high",
+    "А.4.2": "a_4_2_engine_partial",
+    "А.4.3": "a_4_3_engine_out_low",
+    "Б.1.1": "b_1_1_rollout",
+    "Б.1.2": "b_1_2_taxi",
+    "Б.2.1": "b_2_1_nws_stuck_neutral",
+    "Б.2.2": "b_2_2_nws_stuck_offset",
+    "Б.2.3": "b_2_3_nws_limited",
+    "Б.3.1": "b_3_1_reverse_left_fail",
+    "Б.3.2": "b_3_2_reverse_asymmetric",
+    "Б.3.3": "b_3_3_residual_thrust",
+    "Б.4.1": "b_4_1_through",
+    "Б.4.2": "b_4_2_through_engine_out",
+}
+
+_BENCH_FAULTS = {
+    "А.2.1": (FailureMode.GEAR_CONFIG,),
+    "А.2.2": (FailureMode.GEAR_CONFIG,),
+    "А.2.3": (FailureMode.GEAR_CONFIG,),
+    "А.4.1": (FailureMode.ENGINE_OUT_LEFT,),
+    "А.4.2": (FailureMode.THRUST_LEFT_DEGRADED,),
+    "А.4.3": (FailureMode.ENGINE_OUT_LEFT,),
+    "Б.2.1": (FailureMode.NWS_FAIL,),
+    "Б.2.2": (FailureMode.NWS_FAIL,),
+    "Б.2.3": (FailureMode.NWS_FAIL,),
+    "Б.3.1": (FailureMode.REVERSE_LEFT_FAIL,),
+    "Б.3.2": (FailureMode.REVERSE_LEFT_FAIL,),
+    "Б.3.3": (FailureMode.THRUST_LEFT_DEGRADED,),
+    "Б.4.2": (FailureMode.ENGINE_OUT_LEFT, FailureMode.REVERSE_LEFT_FAIL),
+}
+
+_AMBIGUOUS = {
+    "А.2.1": ("А.2.2", "А.2.3"),
+    "А.2.2": ("А.2.1", "А.2.3"),
+    "А.2.3": ("А.2.1", "А.2.2"),
+    "А.3.1": ("А.3.2", "А.3.3", "А.3.4"),
+    "А.3.2": ("А.3.1", "А.3.3", "А.3.4"),
+    "А.3.3": ("А.3.1", "А.3.2", "А.3.4"),
+    "А.3.4": ("А.3.1", "А.3.2", "А.3.3"),
+    "А.4.1": ("А.4.3",),
+    "А.4.3": ("А.4.1",),
+    "Б.2.1": ("Б.2.2", "Б.2.3"),
+    "Б.2.2": ("Б.2.1", "Б.2.3"),
+    "Б.2.3": ("Б.2.1", "Б.2.2"),
+    "Б.3.1": ("Б.3.2",),
+    "Б.3.2": ("Б.3.1",),
+}
+
+# Сквозные строки используют собственные условия, но заранее определённые пары законов.
+THROUGH_PROFILE_CODES = {
+    "Б.4.1": {
+        FlightSegment.APPROACH: "А.1.2",
+        FlightSegment.ROLLOUT: "Б.1.1",
+    },
+    "Б.4.2": {
+        FlightSegment.APPROACH: "А.4.1",
+        FlightSegment.ROLLOUT: "Б.3.1",
+    },
+}
+
+
+def normalize_code(value: str) -> str:
+    return value.strip().upper().replace("A", "А").replace("B", "Б")
+
+
+def _segment_for_code(code: str) -> str:
+    if code.startswith("А."):
+        return "approach"
+    if code == "Б.1.2":
+        return "taxi"
+    if code.startswith("Б.4."):
+        return "through"
+    return "rollout"
+
+
+def _number(text: Any) -> float:
+    match = re.search(r"\d+(?:[,.]\d+)?", str(text))
+    return float(match.group().replace(",", ".")) if match else 0.0
+
+
+def _weather(cells: Mapping[str, Any]) -> tuple[WeatherState, str]:
+    condition = str(cells["Условие"])
+    direction = str(cells["Ветер: направление"])
+    disturbances = str(cells["Порывы / сдвиг"])
+    runway = str(cells["Состояние ВПП"])
+    speed_kts = _number(cells["Ветер: скорость, м/с"]) * Converts.MS_TO_KTS
+    crosswind = -speed_kts if "слева" in direction else speed_kts if "справа" in direction else 0.0
+    headwind = speed_kts if "встречн" in direction else -speed_kts if "попутн" in direction else 0.0
+
+    friction = RunwayCondition.DRY.value
+    rain = 0.0
+    friction_profile = None
+    if "по третям" in runway:
+        friction = RunwayCondition.WET.value
+        friction_profile = FrictionProfile((
+            (0.0, RunwayCondition.DRY.value),
+            (UUEE_06R.length_m / 3.0, RunwayCondition.WET.value),
+            (2.0 * UUEE_06R.length_m / 3.0, RunwayCondition.PUDDLY.value),
+        ))
+    elif "слой воды" in runway:
+        friction, rain = RunwayCondition.PUDDLY.value, 1.0
+    elif "мокрая" in runway:
+        friction, rain = RunwayCondition.WET.value, 0.5
+
+    gust_kts = 0.0
+    turbulence = 0.0
+    variability = 0.0
+    if "порыв" in disturbances:
+        after_to = disturbances.split("до", 1)[-1]
+        gust_kts = _number(after_to) * Converts.MS_TO_KTS
+        turbulence, variability = 0.5, 0.5
+    elif "сдвиг" in condition:
+        gust_kts, variability = speed_kts, 1.0
+
+    visibility = 300.0 if "300" in str(cells["Видимость"]) else 5000.0
+    weather = WeatherState.from_crosswind(
+        crosswind,
+        headwind,
+        gust_kts=gust_kts,
+        turbulence=turbulence,
+        variability_pct=variability,
+        runway_friction=friction,
+        friction_profile=friction_profile,
+        rain_pct=rain,
+        visibility_m=visibility,
+    )
+    note = disturbances if disturbances not in ("нет", "None") else ""
+    return weather, note
 
 
 @dataclass(frozen=True)
 class MatrixCondition:
-    """Условие прогона из справочника матрицы (П.1–П.5 для захода, У.1–У.8 для ВПП).
+    """Условия одной конкретной строки каталога."""
 
-    `weather` — то, как условие должно выглядеть в телеметрии стенда; по нему и подбирается
-    пресет. `note` описывает то, что в `WeatherState` не выражается: порывистость и сдвиг ветра —
-    это процессы, а `WeatherState` — мгновенное показание, а не рычаг.
-    """
+    matrix_run_id: str
     code: str
     title: str
     weather: WeatherState
     note: str = ""
 
 
-# Видимость: матрица задаёт RVR 300 м, телеметрия — футы (см. `WeatherState.from_ics`).
-_RVR_300_M = 300.0
-_CAT_I_M = 5000.0
+@dataclass(frozen=True)
+class MatrixRun:
+    """Одна из 280 строк: задание оператору и критерии конкретного прогона."""
 
-# Сцепление: матрица даёт μ, у нас — монотонная шкала скользкости `RunwayCondition` (это разные
-# величины, а не разные единицы одной). Сопоставление: μ≈0.8 — сухо, μ≈0.4 — мокро,
-# μ≈0.2 и слой воды — лужи/лёд.
-_DRY = RunwayCondition.DRY.value
-_WET = RunwayCondition.WET.value
-_PUDDLY = RunwayCondition.PUDDLY.value
-_ICY = RunwayCondition.ICY.value
+    matrix_run_id: str
+    sheet: str
+    sheet_role: str
+    excel_row: int
+    cells: Mapping[str, Any]
+
+    @property
+    def code(self) -> str:
+        return str(self.cells["Шифр"])
+
+    @property
+    def run_number(self) -> int:
+        return int(self.cells["Прогон"])
+
+    @property
+    def sequence(self) -> int:
+        return int(self.cells["№"])
+
+    @property
+    def preset(self) -> str:
+        return _PRESET_BY_CODE[self.code]
+
+    @property
+    def segment(self) -> str:
+        return _segment_for_code(self.code)
+
+    @property
+    def title(self) -> str:
+        return str(self.cells["Отказ / режим"])
+
+    @property
+    def failure(self) -> str:
+        return str(self.cells["Параметры отказа"])
+
+    @property
+    def injection(self) -> str:
+        return str(self.cells["Момент ввода"])
+
+    @property
+    def criteria(self) -> str:
+        return str(self.cells["Критерии успеха"])
+
+    @property
+    def operator_setup(self) -> dict[str, Any]:
+        return {column: self.cells[column] for column in OPERATOR_COLUMNS}
+
+    @property
+    def result_template(self) -> dict[str, Any]:
+        return {column: self.cells[column] for column in RESULT_COLUMNS}
+
+    @property
+    def bench_faults(self) -> tuple[FailureMode, ...]:
+        return _BENCH_FAULTS.get(self.code, ())
+
+    @property
+    def ambiguous_with(self) -> tuple[str, ...]:
+        return _AMBIGUOUS.get(self.code, ())
+
+    @property
+    def condition(self) -> MatrixCondition:
+        weather, note = _weather(self.cells)
+        raw = str(self.cells["Условие"])
+        return MatrixCondition(self.matrix_run_id, raw, raw, weather, note)
+
+    def failures_for(self, segment: FlightSegment) -> frozenset[FailureMode]:
+        if self.code == "Б.4.2" and segment is FlightSegment.APPROACH:
+            return frozenset({FailureMode.ENGINE_OUT_LEFT})
+        return frozenset(self.bench_faults)
 
 
-APPROACH_CONDITIONS: tuple[MatrixCondition, ...] = (
-    MatrixCondition("П.1", "Штиль, стандартная атмосфера",
-                    WeatherState(visibility_m=_CAT_I_M)),
-    MatrixCondition("П.2-L5", "Боковой ветер 5 м/с слева",
-                    WeatherState.from_crosswind(-_kts(5.0), 0.0)),
-    MatrixCondition("П.2-R5", "Боковой ветер 5 м/с справа",
-                    WeatherState.from_crosswind(_kts(5.0), 0.0)),
-    MatrixCondition("П.2-L10", "Боковой ветер 10 м/с слева",
-                    WeatherState.from_crosswind(-_kts(10.0), 0.0)),
-    MatrixCondition("П.2-R10", "Боковой ветер 10 м/с справа",
-                    WeatherState.from_crosswind(_kts(10.0), 0.0)),
-    MatrixCondition("П.2-L15", "Боковой ветер 15 м/с слева",
-                    WeatherState.from_crosswind(-_kts(15.0), 0.0)),
-    MatrixCondition("П.2-R15", "Боковой ветер 15 м/с справа",
-                    WeatherState.from_crosswind(_kts(15.0), 0.0)),
-    MatrixCondition("П.3-GL", "Порывистый ветер слева: фон 7 м/с, порывы до 12 м/с",
-                    WeatherState.from_crosswind(-_kts(7.0), 0.0),
-                    note="порывы до 12 м/с с периодом 3–5 с — процесс, в WeatherState не выражается"),
-    MatrixCondition("П.3-GR", "Порывистый ветер справа: фон 7 м/с, порывы до 12 м/с",
-                    WeatherState.from_crosswind(_kts(7.0), 0.0),
-                    note="порывы до 12 м/с с периодом 3–5 с"),
-    MatrixCondition("П.3-WS", "Сдвиг ветра: встречный 10 → 0 м/с от H = 150 м до земли",
-                    WeatherState.from_crosswind(0.0, _kts(10.0)),
-                    note="убывание встречной составляющей с высоты 150 м — процесс"),
-    MatrixCondition("П.4-H", "Встречный ветер 10 м/с",
-                    WeatherState.from_crosswind(0.0, _kts(10.0))),
-    MatrixCondition("П.4-T", "Попутный ветер 5 м/с",
-                    WeatherState.from_crosswind(0.0, -_kts(5.0))),
-    MatrixCondition("П.5", "Низкая видимость RVR 300 м (Cat II), заход по ILS",
-                    WeatherState(visibility_m=_RVR_300_M)),
-)
-
-GROUND_CONDITIONS: tuple[MatrixCondition, ...] = (
-    MatrixCondition("У.1", "Сухая ВПП (μ ≈ 0,8), штиль",
-                    WeatherState(runway_friction=_DRY, visibility_m=_CAT_I_M)),
-    MatrixCondition("У.2-L5", "Сухая ВПП, боковой ветер 5 м/с слева",
-                    WeatherState.from_crosswind(-_kts(5.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.2-R5", "Сухая ВПП, боковой ветер 5 м/с справа",
-                    WeatherState.from_crosswind(_kts(5.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.2-L10", "Сухая ВПП, боковой ветер 10 м/с слева",
-                    WeatherState.from_crosswind(-_kts(10.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.2-R10", "Сухая ВПП, боковой ветер 10 м/с справа",
-                    WeatherState.from_crosswind(_kts(10.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.2-L15", "Сухая ВПП, боковой ветер 15 м/с слева",
-                    WeatherState.from_crosswind(-_kts(15.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.2-R15", "Сухая ВПП, боковой ветер 15 м/с справа",
-                    WeatherState.from_crosswind(_kts(15.0), 0.0, runway_friction=_DRY)),
-    MatrixCondition("У.3-GL", "Сухая ВПП, порывистый ветер слева (фон 7, порывы 12 м/с)",
-                    WeatherState.from_crosswind(-_kts(7.0), 0.0, runway_friction=_DRY),
-                    note="порывы до 12 м/с — процесс"),
-    MatrixCondition("У.3-GR", "Сухая ВПП, порывистый ветер справа (фон 7, порывы 12 м/с)",
-                    WeatherState.from_crosswind(_kts(7.0), 0.0, runway_friction=_DRY),
-                    note="порывы до 12 м/с — процесс"),
-    MatrixCondition("У.4", "Мокрая ВПП (μ ≈ 0,4), штиль",
-                    WeatherState(runway_friction=_WET, rain_pct=0.5, visibility_m=_CAT_I_M)),
-    MatrixCondition("У.5-L", "Мокрая ВПП + боковой ветер 10 м/с слева",
-                    WeatherState.from_crosswind(-_kts(10.0), 0.0, runway_friction=_WET)),
-    MatrixCondition("У.5-R", "Мокрая ВПП + боковой ветер 10 м/с справа",
-                    WeatherState.from_crosswind(_kts(10.0), 0.0, runway_friction=_WET)),
-    MatrixCondition("У.6", "Переменное сцепление по третям: μ 0,8 / 0,4 / 0,2",
-                    WeatherState(runway_friction=_WET, visibility_m=_CAT_I_M),
-                    note="сцепление меняется по длине ВПП; телеметрия отдаёт одно значение — "
-                         "пресет калибруется на худшую треть"),
-    MatrixCondition("У.7", "Слой воды 5 мм по всей длине — риск аквапланирования",
-                    WeatherState(runway_friction=_PUDDLY, rain_pct=1.0, visibility_m=_CAT_I_M),
-                    note="для руления не применяется"),
-    MatrixCondition("У.8", "Низкая видимость RVR 300 м, сухая ВПП, штиль",
-                    WeatherState(runway_friction=_DRY, visibility_m=_RVR_300_M)),
-)
+MATRIX_RUNS = tuple(MatrixRun(
+    matrix_run_id=str(raw["matrix_run_id"]),
+    sheet=str(raw["sheet"]),
+    sheet_role=str(raw["sheet_role"]),
+    excel_row=int(raw["excel_row"]),
+    cells=dict(raw["cells"]),
+) for raw in _CATALOG["runs"])
+RUN_MATRIX = MATRIX_RUNS
+RUN_BY_ID = {run.matrix_run_id: run for run in MATRIX_RUNS}
 
 
 @dataclass(frozen=True)
 class MatrixCase:
-    """Один шифр матрицы — вариант отказа/режима, под который настраивается набор коэффициентов."""
-    code: str                       # «А.1.1», «Б.3.2»
-    preset: str                     # имя сценария в каноническом реестре SCENARIOS
-    segment: str                    # approach | rollout | taxi | through
-    title: str
-    failure: str                    # как отказ описан в матрице
-    injection: str                  # момент ввода
-    criteria: str                   # критерии успеха из матрицы
-    conditions: tuple[MatrixCondition, ...]
-    bench_faults: tuple[FailureMode, ...] = ()
-    """Как отказ придёт в телеметрии (`Telemetry.faults`). Пусто — штатный режим.
+    """Производная группировка строк одного шифра; исходные тексты живут в каталоге."""
 
-    Совпадение у разных шифров не ошибка, а факт: ICD беднее матрицы (см. модуль)."""
-    ambiguous_with: tuple[str, ...] = ()
-    """Шифры, неотличимые от этого по телеметрии. Выбирать такой пресет — только по имени."""
+    code: str
+    rows: tuple[MatrixRun, ...]
+
+    @property
+    def preset(self) -> str:
+        return _PRESET_BY_CODE[self.code]
+
+    @property
+    def segment(self) -> str:
+        return self.rows[0].segment
+
+    @property
+    def title(self) -> str:
+        return self.rows[0].title
+
+    @property
+    def failure(self) -> str:
+        return self.rows[0].failure
+
+    @property
+    def injection(self) -> str:
+        return self.rows[0].injection
+
+    @property
+    def criteria(self) -> str:
+        return self.rows[0].criteria
+
+    @property
+    def conditions(self) -> tuple[MatrixCondition, ...]:
+        return tuple(row.condition for row in self.rows)
+
+    @property
+    def bench_faults(self) -> tuple[FailureMode, ...]:
+        return self.rows[0].bench_faults
+
+    @property
+    def ambiguous_with(self) -> tuple[str, ...]:
+        return self.rows[0].ambiguous_with
 
     @property
     def runs(self) -> int:
-        return len(self.conditions)
+        return len(self.rows)
 
 
-APPROACH_CASES: tuple[MatrixCase, ...] = (
-    MatrixCase(
-        "А.1.1", "a_1_1_track", "approach",
-        "Штатно: захват и удержание курса и глиссады до H = 30 м",
-        "без отказов", "—",
-        "Курс ≤ 0,7°; глиссада ≤ 0,5°; на H=30 м ось ВС = ось ВПП ± 5 м",
-        APPROACH_CONDITIONS),
-    MatrixCase(
-        "А.1.2", "a_1_2_flare", "approach",
-        "Штатно: выравнивание (flare), decrab, касание",
-        "без отказов", "—",
-        "Касание в первой трети ВПП (≤ 900 м от торца); Vy касания в согласованных пределах",
-        APPROACH_CONDITIONS),
-    MatrixCase(
-        "А.2.1", "a_2_1_gear_left_up", "approach",
-        "Шасси: не выпущена / не на замке левая основная стойка",
-        "левая основная стойка убрана; аэродинамика и балансировка изменены",
-        "конфигурация с начала глиссады (H = 300 м)",
-        "Глиссада ≤ ± 0,7°; посадочные критерии п. 5.1.1.2",
-        APPROACH_CONDITIONS, (FailureMode.GEAR_CONFIG,),
-        ambiguous_with=("А.2.2", "А.2.3")),
-    MatrixCase(
-        "А.2.2", "a_2_2_gear_nose_up", "approach",
-        "Шасси: не выпущена носовая стойка",
-        "носовая стойка убрана; изменение продольной балансировки",
-        "конфигурация с начала глиссады (H = 300 м)",
-        "Глиссада ≤ ± 0,7°; посадочные критерии п. 5.1.1.2",
-        APPROACH_CONDITIONS, (FailureMode.GEAR_CONFIG,),
-        ambiguous_with=("А.2.1", "А.2.3")),
-    MatrixCase(
-        "А.2.3", "a_2_3_gear_partial", "approach",
-        "Шасси: несимметричный/неполный выпуск",
-        "левая основная стойка в промежуточном положении (~50 %), створки открыты",
-        "конфигурация с начала глиссады (H = 300 м)",
-        "Глиссада ≤ ± 0,7°; посадочные критерии п. 5.1.1.2",
-        APPROACH_CONDITIONS, (FailureMode.GEAR_CONFIG,),
-        ambiguous_with=("А.2.1", "А.2.2")),
-    MatrixCase(
-        "А.3.1", "a_3_1_stab_nose_down_high", "approach",
-        "Стабилизатор: заклинение на пикирование, начало глиссады",
-        "заклинение −2° от балансировочного положения", "H = 300 м (вход в глиссаду)",
-        "Удержание ± 1° глиссады; продольная управляемость",
-        APPROACH_CONDITIONS,
-        ambiguous_with=("А.3.2", "А.3.3", "А.3.4")),
-    MatrixCase(
-        "А.3.2", "a_3_2_stab_nose_up_high", "approach",
-        "Стабилизатор: заклинение на кабрирование, начало глиссады",
-        "заклинение +2° от балансировочного положения", "H = 300 м (вход в глиссаду)",
-        "Удержание ± 1° глиссады; продольная управляемость",
-        APPROACH_CONDITIONS,
-        ambiguous_with=("А.3.1", "А.3.3", "А.3.4")),
-    MatrixCase(
-        "А.3.3", "a_3_3_stab_nose_down_low", "approach",
-        "Стабилизатор: заклинение на пикирование перед выравниванием",
-        "заклинение −2° от балансировочного положения", "H = 60 м (перед выравниванием)",
-        "Удержание ± 1° глиссады; продольная управляемость",
-        APPROACH_CONDITIONS,
-        ambiguous_with=("А.3.1", "А.3.2", "А.3.4")),
-    MatrixCase(
-        "А.3.4", "a_3_4_stab_nose_up_low", "approach",
-        "Стабилизатор: заклинение на кабрирование перед выравниванием",
-        "заклинение +2° от балансировочного положения", "H = 60 м (перед выравниванием)",
-        "Удержание ± 1° глиссады; продольная управляемость",
-        APPROACH_CONDITIONS,
-        ambiguous_with=("А.3.1", "А.3.2", "А.3.3")),
-    MatrixCase(
-        "А.4.1", "a_4_1_engine_out_high", "approach",
-        "Двигатель: полный отказ левого двигателя на глиссаде",
-        "тяга левого двигателя → 0 за 1 с", "H = 300 м (вход в глиссаду)",
-        "Компенсация асимметрии тяги; курс ± 5° от оси ВПП",
-        APPROACH_CONDITIONS, (FailureMode.ENGINE_OUT_LEFT,),
-        ambiguous_with=("А.4.3",)),
-    MatrixCase(
-        "А.4.2", "a_4_2_engine_partial", "approach",
-        "Двигатель: частичная потеря тяги левого двигателя",
-        "тяга левого двигателя снижается до 50 % за 2 с", "H = 300 м (вход в глиссаду)",
-        "Компенсация асимметрии тяги; курс ± 5° от оси ВПП",
-        APPROACH_CONDITIONS, (FailureMode.THRUST_LEFT_DEGRADED,)),
-    MatrixCase(
-        "А.4.3", "a_4_3_engine_out_low", "approach",
-        "Двигатель: полный отказ левого двигателя на малой высоте",
-        "тяга левого двигателя → 0 за 1 с", "H = 60 м (перед выравниванием)",
-        "Компенсация асимметрии тяги; курс ± 5° от оси ВПП",
-        APPROACH_CONDITIONS, (FailureMode.ENGINE_OUT_LEFT,),
-        ambiguous_with=("А.4.1",)),
-)
+_BY_CODE: dict[str, list[MatrixRun]] = defaultdict(list)
+for _run in MATRIX_RUNS:
+    _BY_CODE[_run.code].append(_run)
+MATRIX_CASES = tuple(MatrixCase(code, tuple(rows)) for code, rows in _BY_CODE.items())
+APPROACH_CASES = tuple(case for case in MATRIX_CASES if case.segment == "approach")
+GROUND_CASES = tuple(case for case in MATRIX_CASES if case.segment != "approach")
+CASE_BY_CODE = {case.code: case for case in MATRIX_CASES}
+CASE_BY_PRESET = {case.preset: case for case in MATRIX_CASES}
+APPROACH_CONDITIONS = APPROACH_CASES[0].conditions
+GROUND_CONDITIONS = CASE_BY_CODE["Б.1.1"].conditions
+TOTAL_RUNS = len(MATRIX_RUNS)
 
-_THROUGH_CONDITIONS = (GROUND_CONDITIONS[0], GROUND_CONDITIONS[3], GROUND_CONDITIONS[10])
+if (
+    CATALOG_SCHEMA_VERSION != 1
+    or len(MATRIX_RUNS) != 280
+    or len(APPROACH_CASES) != 12
+    or len(GROUND_CASES) != 10
+    or set(_BY_CODE) != set(_PRESET_BY_CODE)
+):
+    raise RuntimeError("каталог матрицы повреждён или имеет неподдерживаемую версию")
 
-GROUND_CASES: tuple[MatrixCase, ...] = (
-    MatrixCase(
-        "Б.1.1", "b_1_1_rollout", "rollout",
-        "Штатно: пробег от касания до полной остановки по оси ВПП",
-        "без отказов", "касание на V ≈ 140 уз",
-        "Ось ВПП ≤ ± 3 м на пробеге; корректная диагностика (сцепление, ветер, аквапланирование)",
-        GROUND_CONDITIONS),
-    MatrixCase(
-        "Б.1.2", "b_1_2_taxi", "taxi",
-        "Штатно: руление по прямому участку",
-        "без отказов", "руление V ≈ 15 уз",
-        "Осевая линия ≤ ± 1 м при рулении по прямому участку",
-        tuple(c for c in GROUND_CONDITIONS if c.code != "У.7")),
-    MatrixCase(
-        "Б.2.1", "b_2_1_nws_stuck_neutral", "rollout",
-        "Носовая стойка: заедание в нейтральном положении",
-        "стойка фиксирована на 0°; управление стойкой недоступно", "ввод при касании (V ≈ 140 уз)",
-        "Перераспределение на дифф. торможение + асимм. тягу; ось ≤ ± 5 м до полной остановки",
-        GROUND_CONDITIONS, (FailureMode.NWS_FAIL,),
-        ambiguous_with=("Б.2.2", "Б.2.3")),
-    MatrixCase(
-        "Б.2.2", "b_2_2_nws_stuck_offset", "rollout",
-        "Носовая стойка: заедание с ненулевым углом",
-        "стойка фиксирована на +5° (увод вправо)", "ввод при касании (V ≈ 140 уз)",
-        "Перераспределение на дифф. торможение + асимм. тягу; ось ≤ ± 5 м до полной остановки",
-        GROUND_CONDITIONS, (FailureMode.NWS_FAIL,),
-        ambiguous_with=("Б.2.1", "Б.2.3")),
-    MatrixCase(
-        "Б.2.3", "b_2_3_nws_limited", "rollout",
-        "Носовая стойка: ограничение диапазона поворота",
-        "диапазон ограничен до ± 3°; смешанное управление стойка + тормоза + тяга",
-        "ввод при касании (V ≈ 140 уз)",
-        "Перераспределение на дифф. торможение + асимм. тягу; ось ≤ ± 5 м до полной остановки",
-        GROUND_CONDITIONS, (FailureMode.NWS_FAIL,),
-        ambiguous_with=("Б.2.1", "Б.2.2")),
-    MatrixCase(
-        "Б.3.1", "b_3_1_reverse_left_fail", "rollout",
-        "Реверс: отказ реверса левого двигателя",
-        "реверс левого не включается; правый работает штатно", "команда на реверс при V ≈ 120 уз",
-        "Компенсация рысканья; курс ± 5° от направления ВПП до V < 30 уз; скоростной профиль",
-        GROUND_CONDITIONS, (FailureMode.REVERSE_LEFT_FAIL,),
-        ambiguous_with=("Б.3.2",)),
-    MatrixCase(
-        "Б.3.2", "b_3_2_reverse_asymmetric", "rollout",
-        "Реверс: несимметричное включение",
-        "левый выходит на реверс с задержкой 3 с относительно правого",
-        "команда на реверс при V ≈ 120 уз",
-        "Компенсация рысканья; курс ± 5° от направления ВПП до V < 30 уз; скоростной профиль",
-        GROUND_CONDITIONS, (FailureMode.REVERSE_LEFT_FAIL,),
-        ambiguous_with=("Б.3.1",)),
-    MatrixCase(
-        "Б.3.3", "b_3_3_residual_thrust", "rollout",
-        "Тяга: несимметричная остаточная прямая тяга",
-        "левый двигатель не выходит на малый газ, остаётся ~30 % тяги",
-        "с момента касания (V ≈ 140 уз)",
-        "Компенсация рысканья; курс ± 5° от направления ВПП до V < 30 уз; скоростной профиль",
-        GROUND_CONDITIONS, (FailureMode.THRUST_LEFT_DEGRADED,)),
-    MatrixCase(
-        "Б.4.1", "b_4_1_through", "through",
-        "Сквозной: глиссада → касание → пробег до остановки, без отказов",
-        "без отказов", "—",
-        "Все критерии А.1.1, А.1.2, Б.1.1; без скачка управляющих воздействий на стыке модулей",
-        _THROUGH_CONDITIONS),
-    MatrixCase(
-        "Б.4.2", "b_4_2_through_engine_out", "through",
-        "Сквозной с отказом: отказ левого двигателя на глиссаде + отказ реверса левого на пробеге",
-        "тяга левого → 0 на глиссаде; реверс левого не включается",
-        "H = 300 м; реверс при V ≈ 120 уз",
-        "Критерии А.4.1 и Б.3.1",
-        (GROUND_CONDITIONS[0], GROUND_CONDITIONS[10]),
-        (FailureMode.ENGINE_OUT_LEFT, FailureMode.REVERSE_LEFT_FAIL)),
-)
 
-RUN_MATRIX: tuple[MatrixCase, ...] = APPROACH_CASES + GROUND_CASES
+def resolve_matrix_run(value: str | MatrixRun) -> MatrixRun:
+    if isinstance(value, MatrixRun):
+        return value
+    key = value.strip()
+    if key in RUN_BY_ID:
+        return RUN_BY_ID[key]
+    try:
+        code, number = key.rsplit("/", 1)
+        normalized = f"{normalize_code(code)}/{int(number)}"
+    except (ValueError, TypeError) as exc:
+        raise KeyError(f"run_id должен иметь вид <шифр>/<номер>, получено {value!r}") from exc
+    try:
+        return RUN_BY_ID[normalized]
+    except KeyError as exc:
+        raise KeyError(f"в матрице нет прогона {value!r}") from exc
 
-CASE_BY_CODE = {case.code: case for case in RUN_MATRIX}
-CASE_BY_PRESET = {case.preset: case for case in RUN_MATRIX}
 
-TOTAL_RUNS = sum(case.runs for case in RUN_MATRIX)
-"""Полный объём матрицы. Сверяется с итогом в таблице Заказчика (280 прогонов)."""
+def runs_for_code(code: str) -> tuple[MatrixRun, ...]:
+    normalized = normalize_code(code)
+    try:
+        return tuple(_BY_CODE[normalized])
+    except KeyError as exc:
+        raise KeyError(f"в матрице нет шифра {code!r}") from exc
 
 
 def cases_for_segment(segment: str) -> tuple[MatrixCase, ...]:
-    """Шифры одного участка: `approach` / `rollout` / `taxi` / `through`."""
-    return tuple(c for c in RUN_MATRIX if c.segment == segment)
+    return tuple(case for case in MATRIX_CASES if case.segment == segment)
+
+
+def runs_for_segment(segment: str) -> tuple[MatrixRun, ...]:
+    return tuple(run for run in MATRIX_RUNS if run.segment == segment)
 
 
 def ground_cases() -> tuple[MatrixCase, ...]:
-    """Шифры, у которых настраиваются коэффициенты **пробега** (пригодны для SFT).
+    return GROUND_CASES
 
-    Сквозные прогоны сюда входят: у них есть наземный участок, и его коэффициенты — те же пять
-    регуляторов. Заход (`approach`) не входит: там своя, статическая настройка
-    (`config/approach.py`), которую сеть не планирует.
-    """
-    return tuple(c for c in RUN_MATRIX if c.segment in ("rollout", "taxi", "through"))
+
+def ground_runs() -> tuple[MatrixRun, ...]:
+    return tuple(run for run in MATRIX_RUNS if run.segment in ("rollout", "taxi", "through"))

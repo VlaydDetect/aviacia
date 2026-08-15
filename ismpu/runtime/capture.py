@@ -81,13 +81,22 @@ def capture_scenario(env, scenario, max_steps: int = 2000,
     if score:
         summary = env.objective.summary()
         weight, reasons = episode_quality(summary, scenario)
-        report = {"scenario_id": getattr(scenario, "scenario_id", "?"),
-                  "weight": weight, "reasons": reasons,
-                  "total_loss": summary["total_loss"], "windows": len(windows)}
+        total_loss = summary["total_loss"]
     else:
-        weight, report = QUALITY_CLEAN, {"scenario_id": getattr(scenario, "scenario_id", "?"),
-                                         "weight": QUALITY_CLEAN, "reasons": [],
-                                         "total_loss": None, "windows": len(windows)}
+        weight, reasons, total_loss = QUALITY_CLEAN, [], None
+
+    conditions_valid = bool(getattr(env.sim, "conditions_valid", True))
+    if not conditions_valid:
+        weight = QUALITY_REJECT
+        reasons = ["conditions_mismatch", *reasons]
+    report = {
+        "scenario_id": getattr(scenario, "scenario_id", "?"),
+        "weight": weight,
+        "reasons": reasons,
+        "conditions_valid": conditions_valid,
+        "total_loss": total_loss,
+        "windows": len(windows),
+    }
 
     obs_arr = np.stack(windows).astype(np.float32)
     tz_arr = np.repeat(tz[None, :], len(windows), axis=0).astype(np.float32)

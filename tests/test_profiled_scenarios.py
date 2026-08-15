@@ -76,7 +76,9 @@ def test_composition_selects_each_phase_and_preserves_provenance():
     })
     assert composed.control_for("mc21", FlightSegment.APPROACH).name == \
         "ics_clear_weather"
-    assert composed.control_for("mc21", FlightSegment.ROLLOUT) is \
+    assert composed.control_for("mc21", FlightSegment.ROLLOUT) == \
+        SCENARIOS["left_reverse_fail"].control_for("mc21", FlightSegment.ROLLOUT)
+    assert composed.control_for("mc21", FlightSegment.ROLLOUT) is not \
         SCENARIOS["left_reverse_fail"].control_for("mc21", FlightSegment.ROLLOUT)
 
 
@@ -112,7 +114,7 @@ def test_external_profile_controls_survive_scenario_v2_roundtrip():
 
     document = scenario.to_dict()
     restored = Scenario.from_dict(document)
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert restored.control_for(
         "experimental", FlightSegment.ROLLOUT).brake_l["kp"] == 0.4321
     assert restored.to_dict() == document

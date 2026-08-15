@@ -1,10 +1,11 @@
-"""Строгая переносимая JSON-схема профильного сценария (v2) и чтение legacy v1."""
+"""Строгая переносимая JSON-схема сценария v3 и чтение legacy v1/v2."""
 
 from __future__ import annotations
 
 import json
 import math
 from dataclasses import asdict, fields, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -14,9 +15,10 @@ from ismpu.config.approach import (
     ApproachConfig,
 )
 from ismpu.config.scenarios import (
-    AircraftControlSet,
     ApproachSetup,
+    ControlProfile,
     GroundControlConfig,
+    ProfileStatus,
     SCENARIOS,
     Scenario,
     SegmentConditions,
@@ -29,7 +31,11 @@ from ismpu.control.failures import FailureMode
 from ismpu.control.trajectory import CompletionRule, VelocityLaw
 from ismpu.envs.weather import WeatherState
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+_ROOT_KEYS_V3 = {
+    "schema_version", "scenario_id", "seed", "aircraft_controls", "conditions",
+    "approach", "touchdown", "sensor_noise", "matrix_runs", "matrix_codes", "provenance",
+}
 _ROOT_KEYS_V2 = {
     "schema_version", "scenario_id", "seed", "aircraft_controls", "conditions",
     "approach", "touchdown", "sensor_noise", "matrix_codes", "provenance",
@@ -56,6 +62,16 @@ def _finite_tree(value: Any, where: str = "config") -> None:
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             _finite_tree(item, f"{where}[{index}]")
+
+
+def _primitive(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, Mapping):
+        return {str(key): _primitive(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_primitive(item) for item in value]
+    return value
 
 
 def ground_control_to_dict(config: GroundControlConfig) -> dict[str, Any]:
@@ -133,7 +149,17 @@ def scenario_to_document(scenario: Scenario) -> dict[str, Any]:
                 "approach": approach_control_to_dict(controls.approach),
                 "rollout": ground_control_to_dict(controls.rollout),
                 "taxi": ground_control_to_dict(controls.taxi),
-                "draft_segments": sorted(segment.value for segment in controls.draft_segments),
+                "statuses": {
+                    segment.value: controls.status_for(segment).value
+                    for segment in FlightSegment
+                },
+                "run_overrides": {
+                    run_id: {
+                        segment.value: _primitive(patch)
+                        for segment, patch in per_segment.items()
+                    }
+                    for run_id, per_segment in controls.run_overrides.items()
+                },
             }
             for profile, controls in scenario.aircraft_controls.items()
         },
@@ -148,6 +174,9 @@ def scenario_to_document(scenario: Scenario) -> dict[str, Any]:
         "approach": asdict(scenario.approach),
         "touchdown": asdict(scenario.touchdown),
         "sensor_noise": asdict(scenario.sensor_noise),
+        "matrix_runs": {
+            segment.value: run_id for segment, run_id in scenario.matrix_runs.items()
+        },
         "matrix_codes": {segment.value: code for segment, code in scenario.matrix_codes.items()},
         "provenance": {segment.value: source for segment, source in scenario.provenance.items()},
     }
@@ -155,21 +184,50 @@ def scenario_to_document(scenario: Scenario) -> dict[str, Any]:
     return document
 
 
-def _scenario_from_v2(data: Mapping[str, Any]) -> Scenario:
-    _reject_unknown(data, _ROOT_KEYS_V2, "root")
-    missing = {"scenario_id", "seed", "aircraft_controls", "conditions"} - set(data)
-    if missing:
-        raise ValueError(f"root: отсутствуют поля: {sorted(missing)}")
-    controls: dict[str, AircraftControlSet] = {}
+def _read_controls(
+    data: Mapping[str, Any], *, legacy_v2: bool,
+) -> dict[str, ControlProfile]:
+    controls: dict[str, ControlProfile] = {}
     for profile, raw in dict(data["aircraft_controls"]).items():
         raw = dict(raw)
-        controls[str(profile).lower()] = AircraftControlSet(
+        if legacy_v2:
+            drafts = frozenset(
+                FlightSegment(value) for value in raw.get("draft_segments", ()))
+            statuses = {
+                segment: (ProfileStatus.DRAFT if segment in drafts else ProfileStatus.ACCEPTED)
+                for segment in FlightSegment
+            }
+            overrides = {}
+        else:
+            statuses = {
+                FlightSegment(key): ProfileStatus(value)
+                for key, value in dict(raw.get("statuses", {})).items()
+            }
+            if set(statuses) != set(FlightSegment):
+                raise ValueError("control_profile.statuses: нужны статусы всех сегментов")
+            overrides = {
+                str(run_id): {
+                    FlightSegment(segment): dict(patch)
+                    for segment, patch in dict(per_segment).items()
+                }
+                for run_id, per_segment in dict(raw.get("run_overrides", {})).items()
+            }
+        controls[str(profile).lower()] = ControlProfile(
             approach=approach_control_from_dict(dict(raw["approach"])),
             rollout=ground_control_from_dict(dict(raw["rollout"])),
             taxi=ground_control_from_dict(dict(raw["taxi"])),
-            draft_segments=frozenset(
-                FlightSegment(value) for value in raw.get("draft_segments", ())),
+            statuses=statuses,
+            run_overrides=overrides,
         )
+    return controls
+
+
+def _scenario_from_v3(data: Mapping[str, Any]) -> Scenario:
+    _reject_unknown(data, _ROOT_KEYS_V3, "root")
+    missing = {"scenario_id", "seed", "aircraft_controls", "conditions"} - set(data)
+    if missing:
+        raise ValueError(f"root: отсутствуют поля: {sorted(missing)}")
+    controls = _read_controls(data, legacy_v2=False)
     raw_conditions = dict(data["conditions"])
     conditions = {
         segment: SegmentConditions(
@@ -183,6 +241,43 @@ def _scenario_from_v2(data: Mapping[str, Any]) -> Scenario:
         scenario_id=str(data["scenario_id"]),
         seed=int(data["seed"]),
         aircraft_controls=controls,
+        conditions=conditions,
+        approach=ApproachSetup(**dict(data.get("approach", {}))),
+        touchdown=TouchdownSetup(**dict(data.get("touchdown", {}))),
+        sensor_noise=SensorNoise(**dict(data.get("sensor_noise", {}))),
+        matrix_runs={
+            FlightSegment(key): str(value)
+            for key, value in dict(data.get("matrix_runs", {})).items()
+        },
+        matrix_codes={
+            FlightSegment(key): str(value)
+            for key, value in dict(data.get("matrix_codes", {})).items()
+        },
+        provenance={
+            FlightSegment(key): str(value)
+            for key, value in dict(data.get("provenance", {})).items()
+        },
+    )
+
+
+def _scenario_from_v2(data: Mapping[str, Any]) -> Scenario:
+    _reject_unknown(data, _ROOT_KEYS_V2, "root")
+    missing = {"scenario_id", "seed", "aircraft_controls", "conditions"} - set(data)
+    if missing:
+        raise ValueError(f"root: отсутствуют поля: {sorted(missing)}")
+    raw_conditions = dict(data["conditions"])
+    conditions = {
+        segment: SegmentConditions(
+            weather=WeatherState.from_dict(dict(raw_conditions[segment.value]["weather"])),
+            failures=frozenset(
+                FailureMode[name] for name in raw_conditions[segment.value].get("failures", ())),
+        )
+        for segment in FlightSegment
+    }
+    return Scenario(
+        scenario_id=str(data["scenario_id"]),
+        seed=int(data["seed"]),
+        aircraft_controls=_read_controls(data, legacy_v2=True),
         conditions=conditions,
         approach=ApproachSetup(**dict(data.get("approach", {}))),
         touchdown=TouchdownSetup(**dict(data.get("touchdown", {}))),
@@ -272,11 +367,17 @@ def _scenario_from_v1(
     draft_segments = set(affected if draft else ())
     if approach.draft:
         draft_segments.add(FlightSegment.APPROACH)
-    controls = AircraftControlSet(
+    controls = ControlProfile(
         approach=approach,
         rollout=ground,
         taxi=replace(ground),
-        draft_segments=frozenset(draft_segments),
+        statuses={
+            segment: (
+                ProfileStatus.DRAFT
+                if segment in draft_segments else ProfileStatus.ACCEPTED
+            )
+            for segment in FlightSegment
+        },
     )
     weather = WeatherState.from_dict(dict(data["weather"]))
     raw_failures = data.get("failures")
@@ -307,10 +408,13 @@ def scenario_from_document(
     _finite_tree(data)
     version = data.get("schema_version")
     if version == SCHEMA_VERSION:
+        return _scenario_from_v3(data)
+    if version == 2:
         return _scenario_from_v2(data)
     if version == 1:
         return _scenario_from_v1(data, legacy_aircraft_profile)
-    raise ValueError(f"schema_version должна быть 1 или {SCHEMA_VERSION}, получено {version!r}")
+    raise ValueError(
+        f"schema_version должна быть 1, 2 или {SCHEMA_VERSION}, получено {version!r}")
 
 
 def load_scenario(

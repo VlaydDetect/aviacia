@@ -131,8 +131,8 @@ class XPlaneSim(SimInterface):
         self._sensor_noise = scenario.sensor_noise
         self._random = random.Random(scenario.seed)
         mode = (start or "rollout").lower()
-        if mode not in {"approach", "rollout"}:
-            raise ValueError("start должен быть 'approach' или 'rollout'")
+        if mode not in {"approach", "rollout", "taxi"}:
+            raise ValueError("start должен быть 'approach', 'rollout' или 'taxi'")
 
         if self.reload_each_reset:
             self.connector.reload_aircraft()
@@ -149,7 +149,9 @@ class XPlaneSim(SimInterface):
         try:
             self.clear_failures()
             segment = (
-                FlightSegment.APPROACH if mode == "approach" else FlightSegment.ROLLOUT)
+                FlightSegment.APPROACH if mode == "approach"
+                else FlightSegment.TAXI if mode == "taxi"
+                else FlightSegment.ROLLOUT)
             conditions = scenario.conditions_for(segment)
             self.apply_weather(conditions.weather)
             if mode == "approach":

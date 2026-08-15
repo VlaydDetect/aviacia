@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 from threading import RLock
 
+from ismpu.config.run_matrix import CATALOG_SHA256, SOURCE_SHA256
 from ismpu.io.ics_connector import ICSInputs
 
 
@@ -183,6 +184,7 @@ class RunRecorder:
     ) -> None:
         now = datetime.now(timezone.utc)
         label = now.strftime("%Y%m%dT%H%M%S.%fZ")
+        self.execution_id = label
         self.directory = (Path(root) if root is not None else default_runs_root()) / label
         self.started_at = now
         self._rows: list[dict] = []
@@ -192,10 +194,17 @@ class RunRecorder:
         self._lock = RLock()
         self.metadata = {
             "schema_version": 1,
+            "execution_id": self.execution_id,
             "started_at": now.isoformat(),
             "backend": backend,
             "aircraft_profile": aircraft_profile,
             "scenario": scenario.to_dict() if hasattr(scenario, "to_dict") else str(scenario),
+            "matrix_catalog_sha256": CATALOG_SHA256,
+            "matrix_source_sha256": SOURCE_SHA256,
+            "matrix_run_ids": {
+                segment.value: run_id
+                for segment, run_id in getattr(scenario, "matrix_runs", {}).items()
+            },
             "start": start,
             **(extra_metadata or {}),
         }

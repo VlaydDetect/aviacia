@@ -4,11 +4,11 @@ behavioral cloning на эталонных коэффициентах пресе
 Запуск (нужен работающий стенд):  python -m ismpu.runtime.pretrain
 Оффлайн-валидация без стенда — `smoke_pretrain(env, scenarios, ...)` (среду подаёт вызывающий).
 
-Разметка (каноническая): каждая **не-draft** ветка `SCENARIOS` для выбранного профиля = отдельный режим/метка,
+Разметка (каноническая): каждая ветка со статусом **accepted** для выбранного профиля = отдельный режим/метка,
 цель = его собственные коэффициенты. Каждый пресет прогоняется по нескольку раз: разнообразие
 наблюдений даёт сам стенд (расстановка, ветер, шум датчиков от прогона к прогону не повторяются),
 а метка при этом не меняется. Отсев ещё-не-выверенных пресетов — через флаг
-`Scenario.is_draft(profile, FlightSegment.ROLLOUT)`, НЕ по названию.
+`Scenario.is_accepted(profile, FlightSegment.ROLLOUT)`, НЕ по названию.
 
 **Условия задаёт оператор стенда.** `build_scenarios` перечисляет, какие режимы надо снять; в
 каких именно условиях стенд их выдаст, мы не выбираем — сверяться с фактическими условиями
@@ -47,12 +47,7 @@ class PretrainRunConfig:
     Нужен, чтобы снимать матрицу прогонов частями: шифры настраиваются не все сразу, и
     доснять один режим должно быть дешевле, чем перезапустить весь SFT."""
     include_drafts: bool = False
-    """Брать ли черновые пресеты. По умолчанию нет — и это не перестраховка.
-
-    Метка SFT — это **коэффициенты самого пресета**: сеть учится воспроизводить их как эталон.
-    Черновой пресет ещё не откалиброван, то есть эталона в нём нет, и обучение на нём означает
-    поставить сети целью заведомо неверный ответ. Включать сюда шифр матрицы имеет смысл только
-    после того, как он реально настроен на стенде."""
+    """Устаревший флаг совместимости. SFT никогда не принимает draft/tuned профили."""
     backend: str = "xplane"
     start: str = "rollout"
     xplane_root: str | None = None
@@ -69,6 +64,8 @@ def build_scenarios(cfg: PretrainRunConfig) -> list:
 
 def _selected_presets(cfg: PretrainRunConfig) -> list:
     """Пресеты для захвата по конфигурации, с явным отчётом о том, что отброшено."""
+    if cfg.include_drafts:
+        raise ValueError("SFT допускает только ControlProfile со статусом accepted")
     if cfg.presets is not None:
         unknown = [n for n in cfg.presets if n not in SCENARIOS]
         if unknown:
@@ -84,18 +81,17 @@ def _selected_presets(cfg: PretrainRunConfig) -> list:
         if not scenario.matrix_codes or FlightSegment.ROLLOUT in scenario.matrix_codes
     ]
 
-    drafts = [s for s in chosen if s.is_draft(cfg.aircraft_profile, FlightSegment.ROLLOUT)]
-    if drafts and not cfg.include_drafts:
-        names = ", ".join(s.scenario_id for s in drafts)
-        print(f"[SFT] пропущены неоткалиброванные пресеты ({len(drafts)}): {names}")
+    rejected = [
+        s for s in chosen
+        if not s.is_accepted(cfg.aircraft_profile, FlightSegment.ROLLOUT)
+    ]
+    if rejected:
+        names = ", ".join(s.scenario_id for s in rejected)
+        print(f"[SFT] пропущены не-accepted пресеты ({len(rejected)}): {names}")
         chosen = [
             s for s in chosen
-            if not s.is_draft(cfg.aircraft_profile, FlightSegment.ROLLOUT)
+            if s.is_accepted(cfg.aircraft_profile, FlightSegment.ROLLOUT)
         ]
-    elif drafts:
-        names = ", ".join(s.scenario_id for s in drafts)
-        print(f"[SFT] ВНИМАНИЕ: в разметку включены черновые пресеты ({len(drafts)}): {names}. "
-              f"Их коэффициенты станут эталоном обучения — убедитесь, что они настроены.")
     if not chosen:
         raise ValueError("для SFT не осталось ни одного пресета")
     return chosen
@@ -117,7 +113,7 @@ def matrix_preset_names(
     if only_calibrated:
         cases = [
             case for case in cases
-            if not SCENARIOS[case.preset].is_draft(
+            if SCENARIOS[case.preset].is_accepted(
                 aircraft_profile,
                 FlightSegment.TAXI if case.segment == "taxi" else FlightSegment.ROLLOUT,
             )
