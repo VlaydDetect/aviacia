@@ -46,9 +46,10 @@ def test_validated_airborne_packet_contract_is_preserved():
     assert packet.ThrottleLeft == packet.ThrottleRight == 0.36
 
 
-def test_airborne_mode_switches_to_landing_before_the_observed_38ft_dropout():
-    approach = SimpleNamespace(RadioAltitudeValid=1, RadioAltitude=40.1)
-    landing = SimpleNamespace(RadioAltitudeValid=1, RadioAltitude=40.0)
+def test_airborne_mode_switches_to_landing_at_25ft():
+    assert runner.LANDING_MODE_RADIO_ALTITUDE_FT == 25.0
+    approach = SimpleNamespace(RadioAltitudeValid=1, RadioAltitude=25.1)
+    landing = SimpleNamespace(RadioAltitudeValid=1, RadioAltitude=25.0)
 
     assert runner.airborne_control_mode(approach) is ControlModeState.Approach
     assert runner.airborne_control_mode(landing) is ControlModeState.Landing

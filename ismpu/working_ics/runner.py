@@ -19,7 +19,7 @@ from .rollout_bridge import VlaydRolloutBridge
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = Path(__file__).with_name("ics_clear_weather_pid.json")
 TERMINAL_PHASE_RADIO_ALTITUDE_FT = 80.0
-LANDING_MODE_RADIO_ALTITUDE_FT = 40.0
+LANDING_MODE_RADIO_ALTITUDE_FT = 25.0
 FLARE_MODE_RADIO_ALTITUDE_FT = 100.0
 FLARE_MODE_END_RADIO_ALTITUDE_FT = 20.0
 

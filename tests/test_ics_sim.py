@@ -40,15 +40,17 @@ def test_read_telemetry_converts_icd_units_to_si():
     """
     from ismpu.utils.converts import Converts
 
-    inp = make_ics_inputs(Latitude=55.9, Longitude=37.4, TrueHeading=75.0,
-                          GroundSpeed=140.0,          # узлы
-                          IndicatedAirspeed=145.0,    # узлы
+    inp = make_ics_inputs(LatitudeValid=1, Latitude=55.9,
+                          LongitudeValid=1, Longitude=37.4,
+                          TrueHeadingValid=1, TrueHeading=75.0,
+                          GroundSpeedValid=1, GroundSpeed=140.0,       # узлы
+                          IndicatedAirspeedValid=1, IndicatedAirspeed=145.0,
                           WindSpeed=8.0,              # узлы
-                          RadioAltitude=100.0,        # футы
-                          BaroAltitude=600.0,         # футы
-                          VerticalSpeed=-120.0,       # футы/мин
-                          BodyYawRate=6.0,            # градусы/с
-                          BodyLongAccel=-0.25)
+                          RadioAltitudeValid=1, RadioAltitude=100.0,   # футы
+                          BaroAltitudeValid=1, BaroAltitude=600.0,     # футы
+                          VerticalSpeedValid=1, VerticalSpeed=-120.0, # футы/мин
+                          BodyYawRateValid=1, BodyYawRate=6.0,         # градусы/с
+                          BodyLongAccelValid=1, BodyLongAccel=-0.25)
     telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
 
     assert telem.lat == pytest.approx(55.9)
@@ -64,11 +66,29 @@ def test_read_telemetry_converts_icd_units_to_si():
     assert telem.valid
 
 
+def test_invalid_ics_signals_are_not_exposed_as_numeric_telemetry():
+    telem = Telemetry.from_ics(make_ics_inputs(
+        Latitude=55.9,
+        Longitude=37.4,
+        GroundSpeed=140.0,
+        TrueHeading=75.0,
+        RadioAltitude=100.0,
+        BaroAltitude=600.0,
+        IndicatedAirspeed=145.0,
+    ))
+
+    assert telem.lat is None and telem.lon is None
+    assert telem.groundspeed_ms is None
+    assert telem.heading_true_deg is None
+    assert telem.agl_m is None and telem.elevation_m is None
+    assert telem.radio_altitude_ft is None and telem.ias_ms is None
+
+
 def test_read_telemetry_maps_bench_only_signals():
     inp = make_ics_inputs(
         FlightPhaseValid=1, FlightPhase=int(FlightPhase.LAND_RUN),
         RunwayHeadingValid=1, RunwayHeading=75.08, RunwayLength=3700.0, RunwayWidth=60.0,
-        LateralDeviation=1.4, RunwayCondition=2,                # 2 = ICE по шкале стенда
+        LateralDeviation=1.4, RunwayCondition=4,                # 4 = ICE по фактическому пакету
         NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1, RightGearWeightOnWheels=1,
         FaultNWS=1, FaultLeftEngineReverse=1)
     telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
@@ -108,7 +128,7 @@ def test_weather_comes_from_the_bench_packet():
     """Погоду задаёт Заказчик; наш `WeatherState` — это прочитанный кадр, а не задание."""
     from ismpu.utils.converts import Converts
 
-    inp = make_ics_inputs(WindSpeed=12.0, WindDirectionTrue=165.0, RunwayCondition=1,
+    inp = make_ics_inputs(WindSpeed=12.0, WindDirectionTrue=165.0, RunwayCondition=2,
                           PrecipitationRatio=0.6, Visibility=16000.0, AirfieldTemp=-4.0)
     weather = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry().weather
 
@@ -442,12 +462,14 @@ def test_lateral_channel_uses_runway_geometry_from_telemetry():
     def rudder_for(runway_heading, lateral_deviation):
         controller = ControllingSystem()
         SCENARIOS["default"].apply_control(controller, "mc21")
-        # Курс ВПП и боковое отклонение приходят «сырым» пакетом стенда, а не отдельными полями:
-        # это те же сигналы, что читает property Telemetry.runway_heading_deg / lateral_deviation_m.
-        telem = telemetry(50.0, heading=runway_heading,   # ВС точно по курсу ВПП
-                          ics_inputs=make_ics_inputs(
-                              RunwayHeadingValid=1, RunwayHeading=runway_heading,
-                              LateralDeviation=lateral_deviation))
+        telem = Telemetry.from_ics(make_ics_inputs(
+            GroundSpeedValid=1, GroundSpeed=100.0,
+            TrueHeadingValid=1, TrueHeading=runway_heading,
+            MagneticHeadingValid=1, MagneticHeading=runway_heading,
+            TrkAngleMagneticValid=1, TrkAngleMagnetic=runway_heading,
+            RunwayHeadingValid=1, RunwayHeading=runway_heading,
+            LateralDeviation=lateral_deviation,
+        ))
         controller.control_step(DT, telem, send=False)
         return controller.state.rudder_cmd
 
@@ -461,7 +483,7 @@ def test_lateral_channel_uses_runway_geometry_from_telemetry():
 
 
 def test_geodetic_path_is_kept_when_the_bench_gives_no_runway_geometry():
-    """Стенд может не объявить `RunwayHeadingValid` — тогда ось считается по конфигурации."""
+    """Fallback работает лишь когда профиль ВПП явно приложен к кадру."""
     from ismpu.config.constants import DT
 
     controller = ControllingSystem()
@@ -469,6 +491,92 @@ def test_geodetic_path_is_kept_when_the_bench_gives_no_runway_geometry():
     telem = telemetry(50.0)
     assert telem.runway_heading_deg is None and telem.lateral_deviation_m is None
     controller.control_step(DT, telem, send=False)   # геодезический путь, без исключений
+    assert controller.lateral_channel.last_diagnostics["source"] == "geodetic"
+
+
+def test_missing_direct_and_explicit_geodetic_sources_is_neutral_and_diagnostic():
+    from ismpu.config.constants import DT
+
+    controller = ControllingSystem()
+    SCENARIOS["default"].apply_control(controller, "mc21")
+    telem = telemetry(50.0, runway_profile=None)
+
+    controller.control_step(DT, telem, send=False)
+
+    assert controller.state.rudder_cmd == 0.0
+    assert controller.lateral_channel.last_diagnostics == {
+        "xte": None,
+        "course_error": None,
+        "heading_error": None,
+        "guidance_error": None,
+        "along_track": None,
+        "source": "unavailable",
+        "event": "guidance_unavailable",
+    }
+
+
+def test_real_bench_heading_64_frame_ignores_uuee_coordinates():
+    """Характеризация стендового кадра: direct-пара имеет приоритет над UUEE fallback."""
+    from ismpu.config.constants import DT
+    from ismpu.config.runway_profiles import UUEE_06R
+
+    def result_for(lat, lon):
+        controller = ControllingSystem()
+        SCENARIOS["default"].apply_control(controller, "mc21")
+        frame = Telemetry.from_ics(make_ics_inputs(
+            LatitudeValid=1, Latitude=lat, LongitudeValid=1, Longitude=lon,
+            GroundSpeedValid=1, GroundSpeed=100.0,
+            # Намеренно несовместимые true-направления: direct-пара магнитная и не должна
+            # смешиваться ни с ними, ни с геометрией профиля UUEE.
+            TrueHeadingValid=1, TrueHeading=123.0,
+            TrkAngleTrueValid=1, TrkAngleTrue=123.0,
+            MagneticHeadingValid=1, MagneticHeading=66.0,
+            TrkAngleMagneticValid=1, TrkAngleMagnetic=64.0,
+            RunwayHeadingValid=1, RunwayHeading=64.0,
+            LateralDeviation=0.0,
+        ), runway_profile=UUEE_06R)
+        controller.control_step(DT, frame, send=False)
+        return controller.state.rudder_cmd, controller.lateral_channel.last_diagnostics
+
+    for lat, lon in ((55.96715, 37.3865417), (0.0, 0.0)):
+        rudder, diag = result_for(lat, lon)
+        assert rudder == pytest.approx(0.0, abs=1e-12)
+        assert diag["xte"] == 0.0
+        assert diag["course_error"] == 0.0
+        assert diag["heading_error"] == -2.0
+        assert diag["guidance_error"] == 0.0
+        assert diag["source"] == "ics_direct"
+
+
+def test_lateral_deviation_sign_is_an_aircraft_profile_calibration():
+    from ismpu.config.constants import DT
+    from ismpu.config.aircraft_profiles import AircraftProfile
+
+    inp = make_ics_inputs(
+        GroundSpeedValid=1, GroundSpeed=100.0,
+        MagneticHeadingValid=1, MagneticHeading=64.0,
+        TrkAngleMagneticValid=1, TrkAngleMagnetic=64.0,
+        RunwayHeadingValid=1, RunwayHeading=64.0,
+        LateralDeviation=3.0,
+    )
+    normal = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
+    flipped = ICSSim(
+        connector=FakeConnector(inp),
+        aircraft_profile=AircraftProfile(
+            "test-flipped", "test", ics_lateral_deviation_sign=-1.0),
+    ).read_telemetry()
+
+    assert normal.lateral_deviation_m == 3.0
+    assert flipped.lateral_deviation_m == -3.0
+    commands = []
+    for frame in (normal, flipped):
+        controller = ControllingSystem()
+        SCENARIOS["default"].apply_control(controller, "mc21")
+        controller.control_step(DT, frame, send=False)
+        commands.append(controller.state.rudder_cmd)
+    assert commands[0] == pytest.approx(-commands[1])
+    with pytest.raises(ValueError, match=r"\+1 или -1"):
+        AircraftProfile("bad", "bad", ics_lateral_deviation_sign=0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -639,7 +747,7 @@ def test_select_scenario_skips_draft_presets_by_default():
 
 
 def test_select_for_telemetry_reads_conditions_off_the_bench():
-    inp = on_ground(FaultNWS=1, RunwayCondition=2)      # отказ NWS на льду
+    inp = on_ground(FaultNWS=1, RunwayCondition=4)      # отказ NWS на льду
     telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
     assert select_for_telemetry(telem) is NWS_FAIL
 

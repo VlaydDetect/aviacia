@@ -5,6 +5,7 @@ import pytest
 
 from ismpu.config.constants import DT
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
+from ismpu.config.runway_profiles import UUEE_06R
 from ismpu.control.system import ControllingSystem
 from ismpu.control.channels import ControlsState
 from ismpu.envs.ics_sim import ICSSim, Telemetry
@@ -93,8 +94,7 @@ def test_observation_dim_and_names_consistent():
 
 def test_observation_in_normalized_range():
     ctrl = _ready_controller()
-    telem = Telemetry(lat=RWY_START_LAT, lon=RWY_START_LON, groundspeed_ms=50.0,
-                      heading_true_deg=float(RWY_HEADING_TRUE), roll_deg=2.0, accel_long_g=-0.3)
+    telem = _telemetry(roll_deg=2.0, accel_long_g=-0.3)
     obs = ObservationBuilder().build(telem, ctrl, SCENARIOS["nws_fail"].weather, ObserverEstimate())
     assert obs.shape == (OBS_DIM,)
     assert obs.dtype == np.float32
@@ -106,6 +106,31 @@ def test_observation_invalid_telemetry_is_zeros():
     telem = Telemetry(lat=0.0, lon=0.0, groundspeed_ms=0.0, heading_true_deg=0.0, valid=False)
     obs = ObservationBuilder().build(telem, ctrl, SCENARIOS["default"].weather)
     assert np.count_nonzero(obs) == 0
+
+
+def test_direct_guidance_uses_integrated_distance_when_along_track_is_unavailable():
+    ctrl = _ready_controller("default")
+    ctrl.longitudinal_channel.traveled_distance_m = 250.0
+    telem = Telemetry.from_ics(make_ics_inputs(
+        GroundSpeedValid=1,
+        GroundSpeed=100.0,
+        TrueHeadingValid=1,
+        TrueHeading=64.0,
+        MagneticHeadingValid=1,
+        MagneticHeading=64.0,
+        TrkAngleMagneticValid=1,
+        TrkAngleMagnetic=64.0,
+        RunwayHeadingValid=1,
+        RunwayHeading=64.0,
+        RunwayLength=1000.0,
+        LateralDeviation=0.0,
+    ))
+
+    guidance = ctrl.lateral_channel.guidance_for(telem)
+    obs = ObservationBuilder().build(telem, ctrl, SCENARIOS["default"].weather)
+
+    assert guidance is not None and guidance.along_track is None
+    assert obs[FEATURE_NAMES.index("distance_to_end")] == pytest.approx(0.75)
 
 
 # --------------------------------------------------------------------------- #
@@ -278,18 +303,29 @@ def _telemetry_at(offset_m: float, heading_deg: float, *, runway_heading=None):
         side = np.radians(RWY_HEADING_TRUE + (90.0 if offset_m > 0 else -90.0))
         lat, lon = t.destination(lat, lon, side, abs(offset_m))
     ics = None
+    magnetic_heading = magnetic_track = None
     if runway_heading is not None:
         data = {f.name: 0 for f in _fields(ICSInputs)}
-        data.update(RunwayHeadingValid=1, RunwayHeading=runway_heading)
+        data.update(
+            RunwayHeadingValid=1,
+            RunwayHeading=runway_heading,
+            MagneticHeadingValid=1,
+            MagneticHeading=heading_deg,
+            TrkAngleMagneticValid=1,
+            TrkAngleMagnetic=heading_deg,
+        )
         ics = ICSInputs.from_dict(data)
+        magnetic_heading = magnetic_track = heading_deg
     return Telemetry(lat=lat, lon=lon, groundspeed_ms=50.0, heading_true_deg=heading_deg,
-                     ics_inputs=ics)
+                     heading_magnetic_deg=magnetic_heading,
+                     track_magnetic_deg=magnetic_track,
+                     ics_inputs=ics, runway_profile=UUEE_06R)
 
 
 def test_heading_deviation_ignores_lateral_offset():
     """ТЗ 5.1.3.3 нормирует курс «от направления ВПП». Смещение от оси на него не влияет.
 
-    Ошибка команды руления (`guidance()["heading_error_deg"]`) на 5 м смещения показывает −6.35°
+    Ошибка команды руления (`guidance()["guidance_error_deg"]`) на 5 м смещения показывает −6.35°
     и объявила бы провал гейта ±5° при идеально выдержанном курсе.
     """
     tracker = RunwayTracker()
@@ -300,7 +336,7 @@ def test_heading_deviation_ignores_lateral_offset():
     # А ошибка команды на тех же данных растёт с отклонением — это разные величины.
     telem = _telemetry_at(5.0, float(RWY_HEADING_TRUE))
     command_error = tracker.guidance(telem.lat, telem.lon, telem.heading_true_deg, 50.0)
-    assert abs(command_error["heading_error_deg"]) > 5.0
+    assert abs(command_error["guidance_error_deg"]) > 5.0
 
 
 def test_heading_deviation_tracks_actual_yaw():

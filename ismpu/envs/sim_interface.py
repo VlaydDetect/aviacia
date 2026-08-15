@@ -61,7 +61,7 @@ class XPlaneDiagnostics:
 @dataclass(frozen=True)
 class ControlDiagnostics:
     segment: str
-    guidance: Mapping[str, float | None] | None = None
+    guidance: Mapping[str, float | str | None] | None = None
     values: Mapping[str, Any] = field(default_factory=dict)
 
 

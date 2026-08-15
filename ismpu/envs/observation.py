@@ -89,8 +89,8 @@ class ObservationBuilder:
         Коэффициенты PID кодируются как **абсолютные** в лог-норме gain-пространства
         (`gain_space.gain_norm_scalar`) — это «прошлые коэффициенты» (последний выход сети),
         база больше не нужна (сеть предсказывает абсолютные gain'ы, не поправки)."""
-        if not telemetry.valid or None in (telemetry.lat, telemetry.lon,
-                                           telemetry.heading_true_deg, telemetry.groundspeed_ms):
+        if not telemetry.valid or None in (
+            telemetry.heading_true_deg, telemetry.groundspeed_ms):
             return np.zeros(OBS_DIM, dtype=np.float32)
 
         if weather is None:
@@ -105,8 +105,17 @@ class ObservationBuilder:
         if g is None:
             return np.zeros(OBS_DIM, dtype=np.float32)
         feats["xte"] = clip_unit(linear(g["xte"], XTE_SCALE))
-        feats["heading_error"] = clip_unit(linear(g["heading_error_deg"], HEADING_SCALE))
-        feats["distance_to_end"] = clip_unit(linear(self.runway_length_m - g["along"], self.runway_length_m))
+        feats["heading_error"] = clip_unit(linear(
+            g["guidance_error_deg"], HEADING_SCALE))
+        runway_length = telemetry.runway_length_m
+        if runway_length is None and telemetry.runway_profile is not None:
+            runway_length = telemetry.runway_profile.length_m
+        runway_length = runway_length or self.runway_length_m
+        along = (
+            g["along_track"]
+            if g["along_track"] is not None else lon_ch.traveled_distance_m)
+        feats["distance_to_end"] = clip_unit(linear(
+            runway_length - along, runway_length))
         feats["lookahead"] = clip_unit(linear(g["lookahead"], LOOKAHEAD_SCALE))
 
         # --- Скорость ---
@@ -151,7 +160,7 @@ class ObservationBuilder:
         feats["wind_cross"] = clip_unit(linear(cross, WIND_SCALE))
         feats["friction"] = clip_unit(linear(friction, FRICTION_SCALE))
         feats["rain"] = clip_unit(weather.rain_pct)
-        feats["visibility"] = log_norm(weather.visibility_m, VIS_SCALE)
+        feats["visibility"] = clip_unit(log_norm(weather.visibility_m, VIS_SCALE))
 
         # --- Обсервер (заглушка) ---
         obs_vec = (observer or ObserverEstimate()).to_vector()

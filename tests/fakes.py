@@ -19,6 +19,7 @@ from ismpu.config.ics import (
 )
 from ismpu.io.ics_connector import ControlModeState as _Mode
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
+from ismpu.config.runway_profiles import UUEE_06R
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.io.ics_connector import ICSInputs, ControlModeState
 from ismpu.envs.ics_sim import ICSSim, Telemetry
@@ -33,7 +34,16 @@ def make_ics_inputs(**overrides) -> ICSInputs:
 
 def on_ground(**overrides) -> ICSInputs:
     """Кадр «ВС на полосе»: обжаты все стойки, курс/координаты у порога UUEE 06R."""
-    base = dict(Latitude=55.96715, Longitude=37.3865417, TrueHeading=75.079,
+    base = dict(LatitudeValid=1, Latitude=55.96715,
+                LongitudeValid=1, Longitude=37.3865417,
+                GroundSpeedValid=1, GroundSpeed=0.0,
+                IndicatedAirspeedValid=1, IndicatedAirspeed=0.0,
+                TrueHeadingValid=1, TrueHeading=75.079,
+                MagneticHeadingValid=1, MagneticHeading=75.079,
+                TrkAngleTrueValid=1, TrkAngleTrue=75.079,
+                TrkAngleMagneticValid=1, TrkAngleMagnetic=75.079,
+                RadioAltitudeValid=1, RadioAltitude=0.0,
+                BaroAltitudeValid=1, BaroAltitude=0.0,
                 NoseGearWeightOnWheels=1, LeftGearWeightOnWheels=1, RightGearWeightOnWheels=1)
     base.update(overrides)
     return make_ics_inputs(**base)
@@ -67,6 +77,7 @@ def airborne_inputs(radio_altitude_ft=1000.0, **overrides) -> ICSInputs:
         RollAngleValid=1, RollAngle=0.0,
         MagneticHeadingValid=1, MagneticHeading=float(RWY_HEADING_TRUE),
         TrkAngleMagneticValid=1, TrkAngleMagnetic=float(RWY_HEADING_TRUE),
+        TrkAngleTrueValid=1, TrkAngleTrue=float(RWY_HEADING_TRUE),
         TrueHeadingValid=1, TrueHeading=float(RWY_HEADING_TRUE),
         BodyPitchRateValid=1, BodyPitchRate=0.0,
         BodyRollRateValid=1, BodyRollRate=0.0,
@@ -86,10 +97,11 @@ def airborne_inputs(radio_altitude_ft=1000.0, **overrides) -> ICSInputs:
 
 
 def telemetry(groundspeed_ms=50.0, *, lat=RWY_START_LAT, lon=RWY_START_LON,
-              heading=float(RWY_HEADING_TRUE), **kwargs) -> Telemetry:
+              heading=float(RWY_HEADING_TRUE), runway_profile=UUEE_06R,
+              **kwargs) -> Telemetry:
     """Готовый кадр `Telemetry` для прямых вызовов `control_step(dt, telemetry, send=False)`."""
     return Telemetry(lat=lat, lon=lon, groundspeed_ms=groundspeed_ms,
-                     heading_true_deg=heading, **kwargs)
+                     heading_true_deg=heading, runway_profile=runway_profile, **kwargs)
 
 
 class FakeConnector:
@@ -170,7 +182,8 @@ def decode_airborne(outputs) -> tuple:
 def engaged_sim(**overrides):
     """(sim, connector) с завершённым рукопожатием: стенд подтвердил `AgentIsActive = 1`."""
     conn = FakeConnector(engaged_inputs(**overrides))
-    sim = ICSSim(connector=conn, aircraft_profile="mc21", validate_conditions=False)
+    sim = ICSSim(connector=conn, aircraft_profile="mc21", runway_profile=UUEE_06R,
+                 validate_conditions=False)
     sim.read_telemetry()          # снимаем подтверждение стенда + подхват пробега
     assert sim.engaged
     return sim, conn
@@ -278,7 +291,8 @@ class ScriptedFlightBench(FakeConnector):
 def flight_sim(radio_altitude_ft=1000.0, **kwargs):
     """(sim, bench) на сценарном заходе. Рукопожатие ещё не выполнено."""
     bench = ScriptedFlightBench(radio_altitude_ft=radio_altitude_ft, **kwargs)
-    sim = ICSSim(connector=bench, aircraft_profile="mc21", validate_conditions=False)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21", runway_profile=UUEE_06R,
+                 validate_conditions=False)
     return sim, bench
 
 
@@ -337,6 +351,7 @@ class KinematicBench(FakeConnector):
 def kinematic_sim(speed=60.0, lateral=0.0, **input_overrides):
     """(sim, bench) на кинематической модели — стенд уже принял управление."""
     bench = KinematicBench(speed=speed, lateral=lateral, **input_overrides)
-    sim = ICSSim(connector=bench, aircraft_profile="mc21", validate_conditions=False)
+    sim = ICSSim(connector=bench, aircraft_profile="mc21", runway_profile=UUEE_06R,
+                 validate_conditions=False)
     sim.read_telemetry()
     return sim, bench

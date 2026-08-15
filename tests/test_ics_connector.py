@@ -71,11 +71,16 @@ def test_parses_a_complete_payload():
     assert inputs.NoseGearStatus is GearState.DownLock
 
 
-def test_unknown_fields_are_ignored():
-    """Стенд может добавить сигнал — нас это ронять не должно (аналог дописывания полей)."""
+def test_unknown_fields_are_preserved_for_audit_but_not_exposed_as_signals():
+    """Новый сигнал не роняет разбор и не входит в закон, но не теряется для записи."""
     inputs = ICSInputs.from_dict(_full_payload(SomeFutureSignal=42, AnotherOne="x"))
     assert not hasattr(inputs, "SomeFutureSignal")
     assert inputs.GroundSpeed == 0.0
+    assert inputs.raw_fields == {"SomeFutureSignal": 42, "AnotherOne": "x"}
+
+
+def test_input_schema_stays_at_the_99_known_bench_fields():
+    assert len(fields(ICSInputs)) == 99
 
 
 def test_missing_fields_raise_instead_of_defaulting_to_zero():

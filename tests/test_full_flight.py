@@ -253,6 +253,28 @@ def test_approach_is_refused_in_a_non_landing_flap_configuration():
         ) is FlightSegment.APPROACH
 
 
+def test_approach_never_uses_a_value_with_its_validity_flag_cleared():
+    invalid = Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=1200.0,
+        GroundSpeedValid=0,
+        GroundSpeed=140.0,
+    ))
+    with pytest.raises(ApproachRefused, match="GroundSpeed"):
+        ControllingSystem().begin_flight(invalid)
+
+    controller = ControllingSystem()
+    SCENARIOS["default"].apply_control(controller, "mc21")
+    controller.begin_flight(Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=1200.0)))
+    invalid_pitch = Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=1100.0,
+        PitchAngleValid=0,
+        PitchAngle=2.5,
+    ))
+    assert controller.control_step(DT, invalid_pitch, send=False) is True
+    assert controller.abort_reason is not None and "PitchAngle" in controller.abort_reason
+
+
 def test_losing_ils_validity_aborts_the_approach():
     """Нулевое отклонение при снятой валидности неотличимо от «точно на оси»."""
     controller = ControllingSystem()

@@ -248,16 +248,15 @@ class LateralChannel:
         self.steering_brake_gain: float = steering_brake_gain
         self.steering_rev_gain: float = steering_rev_gain
         self.w_lat: float = 1.0
-        self.last_diagnostics: dict[str, float] = {}
+        self.last_diagnostics: dict[str, Any] = {}
         self.last_guidance: GuidanceState | None = None
-        self._last_guidance_telemetry_id: int | None = None
+        self._last_guidance_telemetry: "Telemetry | None" = None
 
         print("[LateralChannel] Запуск латерального канала.")
 
     def _guidance(
         self,
         telemetry: "Telemetry",
-        heading: float,
         groundspeed_ms: float,
     ) -> GuidanceState | None:
         """Guidance по тому, что даёт стенд. → словарь guidance или None, если данных нет.
@@ -266,65 +265,120 @@ class LateralChannel:
         нужна и, главное, не применима: координат торцов ВПП стенд не передаёт, и считать от
         захардкоженного Шереметьево значило бы вести ВС по чужой осевой линии.
 
-        Запасной геодезический путь (`config/runway.py`) остаётся на случай, когда стенд не
-        объявляет `RunwayHeadingValid`: тогда ось считается по конфигурации.
+        Геодезический путь разрешён только с явно приложенным профилем ВПП и полностью
+        валидными истинными координатами/направлениями. Поэтому два источника не смешиваются.
         """
-        if self._last_guidance_telemetry_id == id(telemetry):
+        if self._last_guidance_telemetry is telemetry:
             return self.last_guidance
-        runway_heading = telemetry.runway_heading_true_deg
-        lateral_deviation = telemetry.lateral_deviation_m
-        # Совместимость синтетических кадров: production backend всегда
-        # заполняет runway_heading_true_deg общими константами UUEE 06R.
-        if runway_heading is None and lateral_deviation is not None:
-            runway_heading = telemetry.runway_heading_deg
-            if runway_heading is not None:
-                return self.tracker.guidance_from_deviation(
-                    heading, runway_heading, lateral_deviation, groundspeed_ms)
 
-        if None in (telemetry.lat, telemetry.lon):
-            return None
-        result = self.tracker.guidance(
-            telemetry.lat, telemetry.lon, heading, groundspeed_ms)
+        runway_heading = telemetry.runway_heading_magnetic_deg
+        if runway_heading is None:
+            runway_heading = telemetry.runway_heading_deg
+        lateral_deviation = telemetry.lateral_deviation_m
+        if None not in (
+            runway_heading,
+            lateral_deviation,
+            telemetry.track_magnetic_deg,
+            telemetry.heading_magnetic_deg,
+        ):
+            result = self.tracker.guidance_from_deviation(
+                telemetry.track_magnetic_deg,
+                runway_heading,
+                lateral_deviation,
+                groundspeed_ms,
+                aircraft_heading_deg=telemetry.heading_magnetic_deg,
+                source="ics_direct" if telemetry.ics_inputs is not None else "direct",
+            )
+            self.last_guidance = result
+            self._last_guidance_telemetry = telemetry
+            return result
+
+        # В синтетических backend-независимых кадрах явно заданный true heading одновременно
+        # служит true track. Для ICS это запрещено: там есть отдельный validity-флаг track.
+        true_track = telemetry.track_true_deg
+        if true_track is None and telemetry.ics_inputs is None:
+            true_track = telemetry.heading_true_deg
+        profile = telemetry.runway_profile
+        if profile is None or None in (
+            telemetry.lat,
+            telemetry.lon,
+            true_track,
+            telemetry.heading_true_deg,
+        ):
+            result = None
+        else:
+            result = self.tracker.guidance(
+                telemetry.lat,
+                telemetry.lon,
+                true_track,
+                groundspeed_ms,
+                aircraft_heading_deg=telemetry.heading_true_deg,
+                runway_profile=profile,
+                source="geodetic",
+            )
         self.last_guidance = result
-        self._last_guidance_telemetry_id = id(telemetry)
+        self._last_guidance_telemetry = telemetry
         return result
 
     def guidance_for(self, telemetry: "Telemetry") -> GuidanceState | None:
         """Единый GuidanceState текущего кадра для control/observation/reward."""
-        if not telemetry.valid:
+        if not telemetry.valid or telemetry.groundspeed_ms is None:
             return None
-        return self._guidance(
-            telemetry, telemetry.heading_true_deg, telemetry.groundspeed_ms)
+        return self._guidance(telemetry, telemetry.groundspeed_ms)
+
+    def _guidance_unavailable(self, state: ControlsState) -> None:
+        state.rudder_cmd = 0.0
+        state.quality_lateral = 0.0
+        state.quality_heading = 0.0
+        self.last_diagnostics = {
+            "xte": None,
+            "course_error": None,
+            "heading_error": None,
+            "guidance_error": None,
+            "along_track": None,
+            "source": "unavailable",
+            "event": "guidance_unavailable",
+        }
 
     def calc_commands(self, dt: float, state: ControlsState, telemetry: "Telemetry") -> None:
-        heading = telemetry.heading_true_deg
         groundspeed_ms = telemetry.groundspeed_ms
         # `valid` — первым: см. комментарий в LongitudinalChannel.calc_commands.
-        if not telemetry.valid or None in (heading, groundspeed_ms):
+        if not telemetry.valid or groundspeed_ms is None:
             cprint(f"[RunwayCenteringSystem] Error: telemetry is invalid", "red")
-            state.rudder_cmd = 0.0
+            self._guidance_unavailable(state)
             return
 
-        guidance = self._guidance(telemetry, heading, groundspeed_ms)
+        guidance = self._guidance(telemetry, groundspeed_ms)
         if guidance is None:
-            cprint(f"[RunwayCenteringSystem] Error: telemetry is invalid", "red")
-            state.rudder_cmd = 0.0
+            cprint("[RunwayCenteringSystem] guidance_unavailable", "red")
+            self._guidance_unavailable(state)
             return
 
-        error = guidance["heading_error_deg"]
+        error = guidance.guidance_error_deg
+        measured_track = telemetry.track_magnetic_deg
+        if guidance.source == "geodetic":
+            measured_track = (
+                telemetry.track_true_deg
+                if telemetry.track_true_deg is not None else telemetry.heading_true_deg)
         self.last_diagnostics = {
-            "value": heading,
-            "setpoint": guidance["desired_heading_deg"],
+            "value": measured_track,
+            "setpoint": guidance.desired_heading_deg,
             "error": error,
-            "xte_m": guidance["xte"],
-            "lookahead_m": guidance["lookahead"],
+            "xte": guidance.xte,
+            "course_error": guidance.course_error_deg,
+            "heading_error": guidance.heading_error_deg,
+            "guidance_error": guidance.guidance_error_deg,
+            "along_track": guidance.along_track,
+            "lookahead": guidance.lookahead,
+            "source": guidance.source,
+            "event": None,
         }
-        # Показатели выдерживания (ТЗ 5.1.5): боковое уклонение в **метрах** от осевой и ошибка
-        # курса в градусах. На пробеге их обязан заполнять именно этот канал — иначе на стенд
+        # Показатели выдерживания (ТЗ 5.1.5): XTE в метрах и ошибка магнитного track относительно
+        # направления ВПП. На пробеге их обязан заполнять именно этот канал — иначе на стенд
         # уходили бы замороженные величины момента касания (в точках курсового маяка!), а при
         # старте с полосы — постоянные нули, то есть «идеальное выдерживание» при любом сносе.
-        state.quality_lateral = abs(guidance["xte"])
-        state.quality_heading = abs(error)
+        state.quality_lateral = abs(guidance.xte)
+        state.quality_heading = abs(guidance.course_error_deg)
 
         # w_lat — вес влияния латерального канала (=1 у классики); масштабирует руль и дифф. микс.
         state.rudder_cmd = self.w_lat * self.pid.compute(error, dt)
@@ -339,9 +393,9 @@ class LateralChannel:
             state.cmd_rev_r -= diff_rev
 
         cprint(
-            f"[LateralChannel] XTE={guidance['xte']:+6.2f} м | "
-            f"Herr={error:+6.2f}° | "
-            f"L={guidance['lookahead']:5.1f} м | "
+            f"[LateralChannel] XTE={guidance.xte:+6.2f} м | "
+            f"Cerr={guidance.course_error_deg:+6.2f}° | Gerr={error:+6.2f}° | "
+            f"L={guidance.lookahead:5.1f} м | "
             f"Rudder={state.rudder_cmd:+.3f}",
             "yellow"
         )

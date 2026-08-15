@@ -38,12 +38,13 @@ class RunwayProfile:
     @property
     def length_m(self) -> float:
         from ismpu.control.runway_tracker import RunwayTracker
-        return RunwayTracker().runway_length_m()
+        return RunwayTracker(runway_profile=self).runway_length_m()
 
     def point_on_centerline(self, distance_before_threshold_m: float) -> tuple[float, float]:
         """Точка на продолжении оси; положительное расстояние — до порога."""
         from ismpu.control.runway_tracker import RunwayTracker
-        return RunwayTracker().point_on_centerline(distance_before_threshold_m)
+        return RunwayTracker(runway_profile=self).point_on_centerline(
+            distance_before_threshold_m)
 
     def discover_ils(self, xplane_root: str | Path) -> ILSStation:
         nav_path = find_earth_nav_dat(xplane_root)

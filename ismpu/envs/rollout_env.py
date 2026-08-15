@@ -28,7 +28,6 @@ import numpy as np
 
 from ismpu.config.constants import DT
 from ismpu.config.segments import FlightSegment
-from ismpu.config.runway import RWY_HEADING_TRUE
 from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
 from ismpu.control.runway_tracker import RunwayTracker
@@ -83,18 +82,20 @@ def heading_deviation_deg(telemetry) -> float:
     """Отклонение курса ВС от направления ВПП — приёмочная величина ТЗ 5.1.3.3 / 5.1.2.4.
 
     ТЗ формулирует требование как «удержание курса в пределах ±5° **от направления ВПП**», то есть
-    нормируется состояние ВС, а не команда. `RunwayTracker.guidance()["heading_error_deg"]` для
-    этого не годится: там пеленг на точку упреждения минус курс плюс Stanley-коррекция по сносу,
-    то есть **ошибка команды руления**. При смещении 5 м от оси и идеально выдержанном курсе она
-    показывает −6.35° и объявила бы провал гейта ±5°, хотя отклонение курса ровно нулевое.
+    нормируется ориентация корпуса, а не итоговая `guidance_error` со Stanley-коррекцией по XTE.
 
-    Курс ВПП берётся из телеметрии, если стенд его объявляет, иначе — из конфигурации
-    (`config/runway.py`).
+    Магнитная стендовая пара сравнивается только с магнитным heading; геодезический fallback
+    использует только истинный heading и явно приложенный профиль ВПП.
     """
     runway_heading = getattr(telemetry, "runway_heading_deg", None)
-    if runway_heading is None:
-        runway_heading = RWY_HEADING_TRUE
-    return RunwayTracker.wrap_deg(telemetry.heading_true_deg - runway_heading)
+    if runway_heading is not None and telemetry.heading_magnetic_deg is not None:
+        return RunwayTracker.wrap_deg(
+            telemetry.heading_magnetic_deg - runway_heading)
+    profile = getattr(telemetry, "runway_profile", None)
+    if profile is not None and telemetry.heading_true_deg is not None:
+        return RunwayTracker.wrap_deg(
+            telemetry.heading_true_deg - profile.heading_true_deg)
+    raise ValueError("нет согласованного источника направления ВПП и heading")
 
 
 def _snapshot_command(state: ControlsState) -> ControlsState:
@@ -249,13 +250,13 @@ class RolloutEnv:
         """
         gs_kts = (telemetry.groundspeed_ms or 0.0) * Converts.MS_TO_KTS
         heading_dev = 0.0
-        if telemetry.valid and telemetry.heading_true_deg is not None:
-            heading_dev = heading_deviation_deg(telemetry)
+        guidance = self.controller.lateral_channel.guidance_for(telemetry)
+        if guidance is not None:
+            heading_dev = -guidance.heading_error_deg
         return RuntimeState(groundspeed_kts=gs_kts, heading_error_deg=heading_dev)
 
     def _reward(self, telemetry, command, shield_report):
-        if not telemetry.valid or None in (telemetry.lat, telemetry.lon,
-                                           telemetry.heading_true_deg, telemetry.groundspeed_ms):
+        if not telemetry.valid or telemetry.groundspeed_ms is None:
             comp = compute_reward(xte_m=0.0, heading_error_deg=0.0, speed_error_ms=0.0,
                                   command=command, prev_command=self._prev_command,
                                   weights=self.reward_weights)
@@ -278,7 +279,7 @@ class RolloutEnv:
         saturation = saturation_fraction(command, self.controller.pids)
         roll_deg = telemetry.roll_deg or 0.0
         yaw_rate = telemetry.r_rad or 0.0
-        heading_dev = heading_deviation_deg(telemetry)
+        heading_dev = -g.heading_error_deg
 
         comp = compute_reward(
             xte_m=g["xte"], heading_error_deg=heading_dev,
@@ -296,8 +297,7 @@ class RolloutEnv:
             roll_deg=roll_deg, yaw_rate=yaw_rate,
             traveled_distance_m=lon_channel.traveled_distance_m,
             shield_report=shield_report)
-        # `heading_error_deg` из guidance — ошибка КОМАНДЫ руления, полезная для диагностики
-        # контура, но не приёмочная величина; кладём её рядом, не подменяя ею отклонение курса.
+        # Guidance хранит отдельно ориентацию корпуса и итоговую ошибку команды.
         guidance = dict(g)
         guidance["heading_deviation_deg"] = heading_dev
         return comp.total, comp, guidance

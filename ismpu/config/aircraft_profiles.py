@@ -41,6 +41,12 @@ class AircraftProfile:
     name: str
     description: str
     xplane: XPlaneAircraftBinding | None = None
+    ics_lateral_deviation_sign: float = 1.0
+    """Знак стендового ``LateralDeviation`` относительно принятого XTE (>0 справа)."""
+
+    def __post_init__(self) -> None:
+        if self.ics_lateral_deviation_sign not in (-1.0, 1.0):
+            raise ValueError("ics_lateral_deviation_sign должен быть +1 или -1")
 
     def require_xplane(self) -> XPlaneAircraftBinding:
         if self.xplane is None:
@@ -144,6 +150,8 @@ A330_300 = AircraftProfile(
 MC21 = AircraftProfile(
     name="mc21",
     description="МС-21 на стенде ICS",
+    # Начальная гипотеза до статической стендовой проверки смещений ±XTE.
+    ics_lateral_deviation_sign=1.0,
 )
 
 AIRCRAFT_PROFILES: dict[str, AircraftProfile] = {

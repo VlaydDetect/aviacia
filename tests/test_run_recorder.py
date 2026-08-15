@@ -1,5 +1,6 @@
 import csv
 import json
+from dataclasses import fields
 
 import pytest
 
@@ -7,8 +8,9 @@ from ismpu.control.system import ControllingSystem
 from ismpu.envs.scenario import Scenario
 from ismpu.config.segments import FlightSegment
 from ismpu.runtime.run_recorder import TELEMETRY_FIELDS, RunRecorder
+from ismpu.io.ics_connector import ICSInputs
 
-from tests.fakes import telemetry
+from tests.fakes import engaged_inputs, telemetry
 
 
 def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_path):
@@ -114,3 +116,37 @@ def test_zero_sample_run_has_a_replayable_csv_header(tmp_path):
         reader = csv.DictReader(stream)
         assert tuple(reader.fieldnames or ()) == TELEMETRY_FIELDS
         assert list(reader) == []
+
+
+def test_recorder_keeps_all_known_ics_fields_and_unknown_raw_fields(tmp_path):
+    from ismpu.envs.ics_sim import Telemetry
+
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller, "mc21")
+    sample = Telemetry.from_ics(engaged_inputs(
+        GroundSpeed=100.0,
+        RunwayHeadingValid=1,
+        RunwayHeading=64.0,
+        LateralDeviation=2.5,
+        SomeFutureSignal={"value": 42},
+    ))
+    recorder = RunRecorder(
+        root=tmp_path,
+        backend="ics",
+        aircraft_profile="mc21",
+        scenario=scenario,
+    )
+
+    controller.control_step(0.05, sample, send=False)
+    recorder.record(sample, controller, elapsed_s=0.05)
+    recorder.finish()
+
+    with (recorder.directory / "telemetry.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        row = next(csv.DictReader(stream))
+    assert len(fields(ICSInputs)) == 99
+    assert all(f"ics_{field.name}" in row for field in fields(ICSInputs))
+    assert row["ics_RunwayHeading"] == "64.0"
+    assert json.loads(row["ics_raw_json"]) == {"SomeFutureSignal": {"value": 42}}

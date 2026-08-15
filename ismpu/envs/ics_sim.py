@@ -37,7 +37,7 @@ from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
 from ismpu.config.envelope import LandingFlapConfiguration
 from ismpu.config.aircraft_profiles import AircraftProfile, get_aircraft_profile
-from ismpu.config.runway import RWY_HEADING_TRUE
+from ismpu.config.runway_profiles import RunwayProfile, get_runway_profile
 from ismpu.config.segments import FlightSegment
 from ismpu.config.scenarios import ConditionMatch, Scenario, match_conditions
 from ismpu.control.channels import ControlsState
@@ -50,6 +50,14 @@ logger = logging.getLogger(__name__)
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _signal_valid(flag: int, value: object) -> bool:
+    """Validity-флаг стенда плюс конечное числовое значение."""
+    try:
+        return bool(flag) and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def _throttle_rate(reverse_level: float, actual_angle_deg: float) -> float:
@@ -99,12 +107,13 @@ class Telemetry:
     Поэтому пакет прикладывается целиком (`ics_inputs`), а сигналы выводятся из него через
     property. Хранимые поля — только те, что нужны контуру и наблюдению в СИ.
     """
-    lat: float
-    lon: float
-    groundspeed_ms: float
-    heading_true_deg: float
+    lat: Optional[float]
+    lon: Optional[float]
+    groundspeed_ms: Optional[float]
+    heading_true_deg: Optional[float]
     heading_magnetic_deg: Optional[float] = None
     track_magnetic_deg: Optional[float] = None
+    track_true_deg: Optional[float] = None
     runway_heading_true_deg: Optional[float] = None
     runway_heading_magnetic_deg: Optional[float] = None
     pitch_deg: Optional[float] = None
@@ -120,6 +129,8 @@ class Telemetry:
     accel_side_g: Optional[float] = None
     wind_speed_ms: Optional[float] = None
     wind_dir_from_deg: Optional[float] = None
+    runway_profile: Optional[RunwayProfile] = None
+    lateral_deviation_sign: float = 1.0
 
     # Общий воздушный срез. Для ICS это сам ICSInputs (он имеет тот же набор полей),
     # для X-Plane — ApproachData. Сырой пакет ICS остаётся только для аудита.
@@ -147,38 +158,70 @@ class Telemetry:
     valid: bool = True   # False — телеметрии нет (таймаут приёма)
 
     @classmethod
-    def from_ics(cls, inp: ICSInputs) -> "Telemetry":
+    def from_ics(
+        cls,
+        inp: ICSInputs,
+        *,
+        runway_profile: RunwayProfile | None = None,
+        lateral_deviation_sign: float = 1.0,
+    ) -> "Telemetry":
         """`ICSInputs` → `Telemetry`: поля в СИ + «сырой» пакет для property.
 
         Стенд отдаёт узлы, футы, футы/мин и градусы/с. Пропущенный здесь перевод — не косметика:
         путевая скорость в узлах, положенная в поле м/с, даёт ошибку в 1.94 раза, и продольный
         канал прочитает 140 узлов как 272 и немедленно даст полное торможение.
         """
+        if lateral_deviation_sign not in (-1.0, 1.0):
+            raise ValueError("lateral_deviation_sign должен быть +1 или -1")
         return cls(
-            lat=inp.Latitude,
-            lon=inp.Longitude,
-            groundspeed_ms=inp.GroundSpeed * Converts.KTS_TO_MS,        # kt → м/с
-            heading_true_deg=inp.TrueHeading,
+            lat=inp.Latitude if _signal_valid(inp.LatitudeValid, inp.Latitude) else None,
+            lon=inp.Longitude if _signal_valid(inp.LongitudeValid, inp.Longitude) else None,
+            groundspeed_ms=(
+                inp.GroundSpeed * Converts.KTS_TO_MS
+                if _signal_valid(inp.GroundSpeedValid, inp.GroundSpeed) else None),
+            heading_true_deg=(
+                inp.TrueHeading if _signal_valid(inp.TrueHeadingValid, inp.TrueHeading) else None),
             heading_magnetic_deg=(
-                inp.MagneticHeading if inp.MagneticHeadingValid else None),
+                inp.MagneticHeading
+                if _signal_valid(inp.MagneticHeadingValid, inp.MagneticHeading) else None),
             track_magnetic_deg=(
-                inp.TrkAngleMagnetic if inp.TrkAngleMagneticValid else None),
-            runway_heading_true_deg=float(RWY_HEADING_TRUE),
+                inp.TrkAngleMagnetic
+                if _signal_valid(inp.TrkAngleMagneticValid, inp.TrkAngleMagnetic) else None),
+            track_true_deg=(
+                inp.TrkAngleTrue
+                if _signal_valid(inp.TrkAngleTrueValid, inp.TrkAngleTrue) else None),
             runway_heading_magnetic_deg=(
-                inp.RunwayHeading if inp.RunwayHeadingValid else None),
-            pitch_deg=inp.PitchAngle,
-            roll_deg=inp.RollAngle,
-            elevation_m=inp.BaroAltitude * Converts.FT_TO_M,            # ft → м
-            agl_m=inp.RadioAltitude * Converts.FT_TO_M,                 # ft → м
-            vy_ms=inp.VerticalSpeed * Converts.FTM_TO_MS,               # ft/min → м/с
-            p_rad=math.radians(inp.BodyRollRate),                       # deg/s → рад/с
-            q_rad=math.radians(inp.BodyPitchRate),
-            r_rad=math.radians(inp.BodyYawRate),
-            accel_long_g=inp.BodyLongAccel,
-            accel_norm_g=inp.BodyNormAccel,
-            accel_side_g=inp.BodyLatAccel,
+                inp.RunwayHeading
+                if _signal_valid(inp.RunwayHeadingValid, inp.RunwayHeading) else None),
+            pitch_deg=(
+                inp.PitchAngle if _signal_valid(inp.PitchAngleValid, inp.PitchAngle) else None),
+            roll_deg=(
+                inp.RollAngle if _signal_valid(inp.RollAngleValid, inp.RollAngle) else None),
+            elevation_m=(
+                inp.BaroAltitude * Converts.FT_TO_M
+                if _signal_valid(inp.BaroAltitudeValid, inp.BaroAltitude) else None),
+            agl_m=(
+                inp.RadioAltitude * Converts.FT_TO_M
+                if _signal_valid(inp.RadioAltitudeValid, inp.RadioAltitude) else None),
+            vy_ms=(
+                inp.VerticalSpeed * Converts.FTM_TO_MS
+                if _signal_valid(inp.VerticalSpeedValid, inp.VerticalSpeed) else None),
+            p_rad=(math.radians(inp.BodyRollRate)
+                   if _signal_valid(inp.BodyRollRateValid, inp.BodyRollRate) else None),
+            q_rad=(math.radians(inp.BodyPitchRate)
+                   if _signal_valid(inp.BodyPitchRateValid, inp.BodyPitchRate) else None),
+            r_rad=(math.radians(inp.BodyYawRate)
+                   if _signal_valid(inp.BodyYawRateValid, inp.BodyYawRate) else None),
+            accel_long_g=(inp.BodyLongAccel
+                          if _signal_valid(inp.BodyLongAccelValid, inp.BodyLongAccel) else None),
+            accel_norm_g=(inp.BodyNormAccel
+                          if _signal_valid(inp.BodyNormAccelValid, inp.BodyNormAccel) else None),
+            accel_side_g=(inp.BodyLatAccel
+                          if _signal_valid(inp.BodyLatAccelValid, inp.BodyLatAccel) else None),
             wind_speed_ms=inp.WindSpeed * Converts.KTS_TO_MS,           # kt → м/с
             wind_dir_from_deg=inp.WindDirectionTrue,
+            runway_profile=runway_profile,
+            lateral_deviation_sign=lateral_deviation_sign,
             approach_inputs=inp,
             ics_inputs=inp,
         )
@@ -195,6 +238,29 @@ class Telemetry:
         return bool(self.valid and self.approach_inputs is not None)
 
     @property
+    def invalid_approach_signals(self) -> tuple[str, ...]:
+        """Невалидные ICS-сигналы, которые воздушный закон читает безусловно."""
+        i = self.ics_inputs
+        if i is None:
+            return ()
+        required = {
+            "RadioAltitude": _signal_valid(i.RadioAltitudeValid, i.RadioAltitude),
+            "IndicatedAirspeed": _signal_valid(
+                i.IndicatedAirspeedValid, i.IndicatedAirspeed),
+            "TrueAirspeed": _signal_valid(i.TrueAirspeedValid, i.TrueAirspeed),
+            "GroundSpeed": _signal_valid(i.GroundSpeedValid, i.GroundSpeed),
+            "VerticalSpeed": _signal_valid(i.VerticalSpeedValid, i.VerticalSpeed),
+            "PitchAngle": _signal_valid(i.PitchAngleValid, i.PitchAngle),
+            "RollAngle": _signal_valid(i.RollAngleValid, i.RollAngle),
+            "TrkAngleMagnetic": _signal_valid(
+                i.TrkAngleMagneticValid, i.TrkAngleMagnetic),
+            "RunwayHeading": _signal_valid(i.RunwayHeadingValid, i.RunwayHeading),
+            "BodyPitchRate": _signal_valid(i.BodyPitchRateValid, i.BodyPitchRate),
+            "BodyNormAccel": _signal_valid(i.BodyNormAccelValid, i.BodyNormAccel),
+        }
+        return tuple(name for name, valid in required.items() if not valid)
+
+    @property
     def faults_available(self) -> bool:
         return bool(self.valid and (self.faults_direct is not None or self.ics_inputs is not None))
 
@@ -204,7 +270,14 @@ class Telemetry:
         if self.ias_ms_direct is not None:
             return self.ias_ms_direct
         source = self.approach_inputs
-        return source.IndicatedAirspeed * Converts.KTS_TO_MS if source is not None else None
+        if source is None:
+            return None
+        if self.ics_inputs is not None and not _signal_valid(
+            self.ics_inputs.IndicatedAirspeedValid,
+            self.ics_inputs.IndicatedAirspeed,
+        ):
+            return None
+        return source.IndicatedAirspeed * Converts.KTS_TO_MS
 
     @property
     def radio_altitude_ft(self) -> Optional[float]:
@@ -217,7 +290,10 @@ class Telemetry:
         if self.radio_altitude_ft_direct is not None:
             return self.radio_altitude_ft_direct
         i = self.ics_inputs
-        return i.RadioAltitude if (i is not None and i.RadioAltitudeValid) else None
+        return (
+            i.RadioAltitude
+            if i is not None and _signal_valid(i.RadioAltitudeValid, i.RadioAltitude)
+            else None)
 
     @property
     def ils_valid(self) -> Optional[bool]:
@@ -233,7 +309,9 @@ class Telemetry:
         i = self.ics_inputs
         if i is None:
             return None
-        return bool(i.LocDeviationValid and i.GSDeviationValid)
+        return bool(
+            _signal_valid(i.LocDeviationValid, i.LocDeviation)
+            and _signal_valid(i.GSDeviationValid, i.GSDeviation))
 
     @property
     def landing_flaps(self):
@@ -267,26 +345,48 @@ class Telemetry:
         if self.runway_heading_deg_direct is not None:
             return self.runway_heading_deg_direct
         i = self.ics_inputs
-        return i.RunwayHeading if (i is not None and i.RunwayHeadingValid) else None
+        return (
+            i.RunwayHeading
+            if i is not None and _signal_valid(i.RunwayHeadingValid, i.RunwayHeading)
+            else None)
 
     @property
     def runway_length_m(self) -> Optional[float]:
         if self.runway_length_m_direct is not None:
             return self.runway_length_m_direct
-        return self.ics_inputs.RunwayLength if self.ics_inputs else None
+        i = self.ics_inputs
+        return (
+            i.RunwayLength
+            if i is not None
+            and _signal_valid(i.RunwayHeadingValid, i.RunwayHeading)
+            and math.isfinite(i.RunwayLength)
+            else None)
 
     @property
     def runway_width_m(self) -> Optional[float]:
         if self.runway_width_m_direct is not None:
             return self.runway_width_m_direct
-        return self.ics_inputs.RunwayWidth if self.ics_inputs else None
+        i = self.ics_inputs
+        return (
+            i.RunwayWidth
+            if i is not None
+            and _signal_valid(i.RunwayHeadingValid, i.RunwayHeading)
+            and math.isfinite(i.RunwayWidth)
+            else None)
 
     @property
     def lateral_deviation_m(self) -> Optional[float]:
         """Боковое отклонение от оси, измеренное стендом. Позволяет не считать геодезию самим."""
         if self.lateral_deviation_m_direct is not None:
             return self.lateral_deviation_m_direct
-        return self.ics_inputs.LateralDeviation if self.ics_inputs else None
+        i = self.ics_inputs
+        if (
+            i is None
+            or not _signal_valid(i.RunwayHeadingValid, i.RunwayHeading)
+            or not math.isfinite(i.LateralDeviation)
+        ):
+            return None
+        return self.lateral_deviation_sign * i.LateralDeviation
 
     @property
     def weight_on_wheels(self) -> Optional[bool]:
@@ -379,12 +479,16 @@ class ICSSim(SimInterface):
                  listen_ip: str = LISTEN_IP_ANY, listen_port: int = 3030, timeout: float = 1.0,
                  engagement: Optional[IcsEngagement] = None,
                  aircraft_profile: AircraftProfile | str | None = None,
+                 runway_profile: RunwayProfile | str | None = None,
                  validate_conditions: bool = True):
         if aircraft_profile is None:
             raise ValueError("для ICS требуется явный aircraft_profile")
         self.aircraft_profile = (
             get_aircraft_profile(aircraft_profile)
             if isinstance(aircraft_profile, str) else aircraft_profile)
+        self.runway_profile = (
+            get_runway_profile(runway_profile)
+            if isinstance(runway_profile, str) else runway_profile)
         self.connector = connector if connector is not None else ICSBenchConnector(listen_ip, listen_port)
         self.timeout = timeout
         self.engagement = engagement if engagement is not None else IcsEngagement()
@@ -470,7 +574,11 @@ class ICSSim(SimInterface):
 
     def read_telemetry(self) -> Telemetry:
         inputs = self.connector.receive_inputs(timeout=self.timeout)
-        telemetry = Telemetry.invalid() if inputs is None else Telemetry.from_ics(inputs)
+        telemetry = Telemetry.invalid() if inputs is None else Telemetry.from_ics(
+            inputs,
+            runway_profile=self.runway_profile,
+            lateral_deviation_sign=self.aircraft_profile.ics_lateral_deviation_sign,
+        )
 
         self._last_telemetry = telemetry
         self.engagement.step(self._engagement_inputs(telemetry))

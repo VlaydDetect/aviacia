@@ -85,9 +85,13 @@ def test_xte_sign_left_is_negative():
 def test_guidance_on_centerline_small_heading_error():
     tracker = RunwayTracker(lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0)
     g = tracker.guidance(RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE, ground_speed=50.0)
-    assert set(g) == {"xte", "along", "lookahead", "heading_error_deg", "desired_heading_deg"}
+    assert set(g) == {
+        "xte", "along_track", "lookahead", "course_error_deg", "heading_error_deg",
+        "guidance_error_deg", "desired_heading_deg", "source",
+    }
     assert g["xte"] == pytest.approx(0.0, abs=1e-6)
-    assert abs(g["heading_error_deg"]) < 15.0
+    assert abs(g["guidance_error_deg"]) < 15.0
+    assert g["source"] == "geodetic"
     assert g["lookahead"] == pytest.approx(10.0 + 1.8 * 50.0)
 
 

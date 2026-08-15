@@ -334,17 +334,18 @@ class ControllingSystem:
         if self.go_around is not None:
             return self._go_around_step(dt, telemetry)
 
-        approach = telemetry.approach_inputs
-        criteria_ra = approach.RadioAltitude if approach is not None else None
-        if (
-            criteria_ra is not None
-            and criteria_ra <= self.approach_criteria.config.cutoff_radio_altitude_ft
-            and not self.approach_criteria.cutoff_reached
-        ):
-            self.approach_criteria.observe(
-                telemetry, self.approach_channel.result.flight_path_angle_deg)
-
         if touched_down(telemetry):
+            # Касание важнее потери воздушного датчика: управление уже обязано перейти земле.
+            # При этом отчётный cutoff обновляем только по полностью валидному воздушному кадру.
+            if (
+                telemetry.radio_altitude_ft is not None
+                and not telemetry.invalid_approach_signals
+                and telemetry.radio_altitude_ft
+                <= self.approach_criteria.config.cutoff_radio_altitude_ft
+                and not self.approach_criteria.cutoff_reached
+            ):
+                self.approach_criteria.observe(
+                    telemetry, self.approach_channel.result.flight_path_angle_deg)
             self.hand_over_to_rollout()
             return self._ground_step(dt)
 
@@ -352,6 +353,19 @@ class ControllingSystem:
             # Без кадра стенда воздушный закон считать не по чему: размерный расчёт по нулям
             # выдал бы правдоподобное отклонение по несуществующим данным.
             return self._abort_approach("нет валидной телеметрии со стенда")
+
+        blocker = approach_blocker(telemetry)
+        if blocker is not None:
+            return self._abort_approach(blocker)
+
+        criteria_ra = telemetry.radio_altitude_ft
+        if (
+            criteria_ra is not None
+            and criteria_ra <= self.approach_criteria.config.cutoff_radio_altitude_ft
+            and not self.approach_criteria.cutoff_reached
+        ):
+            self.approach_criteria.observe(
+                telemetry, self.approach_channel.result.flight_path_angle_deg)
 
         # Прерывание по потере наведения живёт здесь, а не в законе: закон читает отклонения
         # безусловно (как и эталон), и решение «дальше вести нечем» принимает контур над ним.
@@ -366,14 +380,13 @@ class ControllingSystem:
 
         # Проверка допусков ТЗ на каждом такте. Если выше высоты решения они устойчиво не
         # выполняются — садиться нельзя: заход прерывается уходом на второй круг.
-        ## TODO:
-        # self.tolerance_report = evaluate_approach_tolerances(
-        #     telemetry, self.approach_channel.result, self.approach_channel.result.limits,
-        #     telemetry.faults, at_decision_gate=at_lateral_alignment_gate(telemetry))
-        # reason = self._should_go_around(telemetry, self.tolerance_report)
-        # if reason is not None:
-        #     self._start_go_around(reason, telemetry)
-        #     self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
+        self.tolerance_report = evaluate_approach_tolerances(
+            telemetry, self.approach_channel.result, self.approach_channel.result.limits,
+            telemetry.faults, at_decision_gate=at_lateral_alignment_gate(telemetry))
+        reason = self._should_go_around(telemetry, self.tolerance_report)
+        if reason is not None:
+            self._start_go_around(reason, telemetry)
+            self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
         return False
 
     def _abort_approach(self, reason: str) -> bool:

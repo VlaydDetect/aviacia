@@ -162,7 +162,7 @@ def main(
     start: str | None = None,
     xplane_root: str | None = None,
     aircraft_profile: str | None = None,
-    runway_profile: str = "uuee-06r",
+    runway_profile: str | None = None,
     dashboard: bool = False,
     dashboard_tune: bool = False,
 ):

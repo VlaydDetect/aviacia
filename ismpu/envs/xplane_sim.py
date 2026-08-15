@@ -68,7 +68,7 @@ class XPlaneSim(SimInterface):
         self.ready_timeout_s = ready_timeout_s
         self.ils_verify_timeout_s = ils_verify_timeout_s
         self.settle_s = settle_s
-        self._tracker = RunwayTracker()
+        self._tracker = RunwayTracker(runway_profile=runway_profile)
         self._active_failures: set[FailureMode] = set()
         self._ignored_failures: set[FailureMode] = set()
         self._engaged = False
@@ -239,6 +239,9 @@ class XPlaneSim(SimInterface):
             (value(dr.MAG_TRACK) + heading_noise) % 360.0
             if magnetic_available else math.nan)
         mag_variation = value(dr.MAGNETIC_VARIATION)
+        true_track = (
+            (mag_track + mag_variation) % 360.0
+            if magnetic_available else true_heading)
         runway_mag = (self.runway.heading_true_deg - mag_variation) % 360.0
         radio_alt = max(0.0, value(dr.RADIO_ALT_FT, value(dr.Y_AGL) / Converts.FT_TO_M))
         ias = max(0.0, value(dr.IAS_KTS, groundspeed / Converts.KTS_TO_MS))
@@ -288,6 +291,7 @@ class XPlaneSim(SimInterface):
             heading_true_deg=true_heading,
             heading_magnetic_deg=(mag_heading if magnetic_available else None),
             track_magnetic_deg=(mag_track if magnetic_available else None),
+            track_true_deg=true_track,
             runway_heading_true_deg=self.runway.heading_true_deg,
             runway_heading_magnetic_deg=runway_mag,
             pitch_deg=approach.PitchAngle,
@@ -303,6 +307,7 @@ class XPlaneSim(SimInterface):
             accel_side_g=value(dr.G_SIDE),
             wind_speed_ms=wind_speed,
             wind_dir_from_deg=wind_dir,
+            runway_profile=self.runway,
             approach_inputs=approach,
             extensions=TelemetryExtensions(
                 ias_ms=ias * Converts.KTS_TO_MS,

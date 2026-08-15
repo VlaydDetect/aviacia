@@ -12,6 +12,7 @@ import pytest
 
 from ismpu.config.constants import DT
 from ismpu.config.requirements import GO_AROUND_CONFIRM_TICKS
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.control.flight import FlightSegment
 from ismpu.control.system import ControllingSystem, GoAroundManeuver
 from ismpu.envs.ics_sim import ICSSim, Telemetry
@@ -68,6 +69,22 @@ def test_no_go_around_below_decision_height():
     """Ниже высоты решения (30 м) заход не прерывается даже при невыполнении допусков."""
     c = _armed_controller()
     _drive(c, _frame(50.0, LocDeviation=0.1), GO_AROUND_CONFIRM_TICKS + 5)   # 50 футов < 30 м
+    assert c.go_around is None
+
+
+def test_touchdown_wins_over_bad_ils_and_enters_rollout():
+    """Касание проверяется до tolerance: начатую посадку не превращаем в уход."""
+    c = ControllingSystem()
+    c.bind_scenario(SCENARIOS["default"], "mc21")
+    c.begin_flight(_frame(1000.0))
+    touchdown = _frame(
+        0.5,
+        LocDeviation=0.1,
+        LeftGearWeightOnWheels=1,
+    )
+
+    assert c.control_step(DT, telemetry=touchdown, send=False) is False
+    assert c.segment is FlightSegment.ROLLOUT
     assert c.go_around is None
 
 

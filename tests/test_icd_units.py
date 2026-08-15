@@ -121,15 +121,23 @@ def test_every_declared_channel_has_a_documented_scale():
 def test_telemetry_conversions_match_the_documented_input_units():
     """Стенд шлёт узлы, футы, фут/мин и град/с — граница пересчёта в СИ проходит в `Telemetry`."""
     inp = make_ics_inputs(
-        Latitude=55.9, Longitude=37.4,
-        GroundSpeed=140.0, IndicatedAirspeed=145.0, TrueAirspeed=150.0,   # kt
-        RadioAltitude=1000.0, BaroAltitude=1630.0,                        # ft
-        VerticalSpeed=-750.0,                                             # ft/min
-        BodyRollRate=3.0, BodyPitchRate=-2.0, BodyYawRate=1.0,            # deg/s
-        BodyLongAccel=0.1, BodyNormAccel=0.2, BodyLatAccel=-0.05,         # g
-        TrueHeading=75.0, PitchAngle=2.5, RollAngle=-1.0,                 # deg
+        LatitudeValid=1, Latitude=55.9, LongitudeValid=1, Longitude=37.4,
+        GroundSpeedValid=1, GroundSpeed=140.0,
+        IndicatedAirspeedValid=1, IndicatedAirspeed=145.0,
+        TrueAirspeedValid=1, TrueAirspeed=150.0,                          # kt
+        RadioAltitudeValid=1, RadioAltitude=1000.0,
+        BaroAltitudeValid=1, BaroAltitude=1630.0,                         # ft
+        VerticalSpeedValid=1, VerticalSpeed=-750.0,                       # ft/min
+        BodyRollRateValid=1, BodyRollRate=3.0,
+        BodyPitchRateValid=1, BodyPitchRate=-2.0,
+        BodyYawRateValid=1, BodyYawRate=1.0,                              # deg/s
+        BodyLongAccelValid=1, BodyLongAccel=0.1,
+        BodyNormAccelValid=1, BodyNormAccel=0.2,
+        BodyLatAccelValid=1, BodyLatAccel=-0.05,                          # g
+        TrueHeadingValid=1, TrueHeading=75.0,
+        PitchAngleValid=1, PitchAngle=2.5,
+        RollAngleValid=1, RollAngle=-1.0,                                # deg
         WindSpeed=20.0, WindDirectionTrue=180.0,                          # kt / deg
-        RadioAltitudeValid=1,
     )
     t = Telemetry.from_ics(inp)
 
@@ -163,13 +171,15 @@ def test_visibility_is_converted_from_feet():
 
 
 def test_runway_condition_codes_are_remapped_not_passed_through():
-    """Коды стенда не упорядочены по скользкости, поэтому есть своя монотонная шкала."""
-    assert runway_condition_from_bench(0) is RunwayCondition.DRY
-    assert runway_condition_from_bench(1) is RunwayCondition.WET          # WET=1
-    assert runway_condition_from_bench(2) is RunwayCondition.ICY          # ICE=2 у стенда
-    assert runway_condition_from_bench(3) is RunwayCondition.PUDDLY       # FLOODED=3
-    # В шкале стенда 2 < 3, а по скользкости лёд хуже залитой полосы — порядок обратный.
-    assert (runway_condition_from_bench(2).value
+    """Коды из фактических пакетов переводятся в свою шкалу скользкости."""
+    assert runway_condition_from_bench(1) is RunwayCondition.DRY
+    assert runway_condition_from_bench(2) is RunwayCondition.WET
+    assert runway_condition_from_bench(3) is RunwayCondition.PUDDLY       # FLOODED
+    assert runway_condition_from_bench(4) is RunwayCondition.ICY
+    assert runway_condition_from_bench(5) is RunwayCondition.SNOWY
+    assert runway_condition_from_bench(7) is RunwayCondition.PUDDLY       # SLUSH
+    assert runway_condition_from_bench(14) is RunwayCondition.WET         # WET RUBBER
+    assert (runway_condition_from_bench(4).value
             > runway_condition_from_bench(3).value)
     # Неизвестный код — самый скользкий вариант, а не «сухо».
     assert runway_condition_from_bench(99) is RunwayCondition.ICY

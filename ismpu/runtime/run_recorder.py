@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from threading import RLock
+
+from ismpu.io.ics_connector import ICSInputs
 
 
 PID_NAMES = (
@@ -49,12 +51,22 @@ BASE_TELEMETRY_FIELDS = (
     "gs_deviation",
     "magnetic_track_deg",
     "vertical_speed_fpm",
+    "guidance_xte_m",
+    "guidance_course_error_deg",
+    "guidance_heading_error_deg",
+    "guidance_error_deg",
+    "guidance_along_track_m",
+    "guidance_source",
+    "guidance_event",
+    "ics_raw_json",
 )
+ICS_INPUT_FIELDS = tuple(field.name for field in fields(ICSInputs))
+ICS_TELEMETRY_FIELDS = tuple(f"ics_{name}" for name in ICS_INPUT_FIELDS)
 PID_TELEMETRY_FIELDS = (
     "kp", "ki", "kd", "value", "setpoint", "error", "output",
     "p", "i", "d", "saturated",
 )
-TELEMETRY_FIELDS = BASE_TELEMETRY_FIELDS + tuple(
+TELEMETRY_FIELDS = BASE_TELEMETRY_FIELDS + ICS_TELEMETRY_FIELDS + tuple(
     f"pid_{name}_{field}"
     for name in PID_NAMES
     for field in PID_TELEMETRY_FIELDS
@@ -162,6 +174,9 @@ class RunRecorder:
                 raise RuntimeError("прогон уже завершён")
             state = controller.state
             approach = getattr(telemetry, "approach_inputs", None)
+            lateral = getattr(
+                getattr(controller, "lateral_channel", None), "last_diagnostics", {})
+            ics_inputs = getattr(telemetry, "ics_inputs", None)
             row = {
                 "sequence": self._sequence,
                 "time_s": elapsed_s,
@@ -193,9 +208,24 @@ class RunRecorder:
                 "quality_speed": state.quality_speed,
                 "loc_deviation": getattr(approach, "LocDeviation", None),
                 "gs_deviation": getattr(approach, "GSDeviation", None),
-                "magnetic_track_deg": getattr(approach, "TrkAngleMagnetic", None),
+                "magnetic_track_deg": telemetry.track_magnetic_deg,
                 "vertical_speed_fpm": getattr(approach, "VerticalSpeed", None),
+                "guidance_xte_m": lateral.get("xte"),
+                "guidance_course_error_deg": lateral.get("course_error"),
+                "guidance_heading_error_deg": lateral.get("heading_error"),
+                "guidance_error_deg": lateral.get("guidance_error"),
+                "guidance_along_track_m": lateral.get("along_track"),
+                "guidance_source": lateral.get("source"),
+                "guidance_event": lateral.get("event"),
+                # Один JSON-столбец сохраняет имена будущих полей без изменения CSV-схемы
+                # посреди прогона и без превращения внешних имён в заголовки CSV.
+                "ics_raw_json": (
+                    json.dumps(ics_inputs.raw_fields, ensure_ascii=False, sort_keys=True)
+                    if ics_inputs is not None else None),
             }
+            for name in ICS_INPUT_FIELDS:
+                row[f"ics_{name}"] = (
+                    _jsonable(getattr(ics_inputs, name)) if ics_inputs is not None else None)
             operating_points = pid_operating_points(controller)
             for name, pid in controller_pids(controller).items():
                 if pid:

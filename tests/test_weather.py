@@ -75,23 +75,24 @@ def test_from_ics_wind_decomposes_relative_to_the_runway():
 # --------------------------------------------------------------------------- #
 
 def test_bench_codes_map_to_a_monotone_slipperiness_scale():
-    """Коды стенда не упорядочены по скользкости: ICE=2 стоит между WET=1 и FLOODED=3.
+    """Коды стенда не упорядочены по скользкости: WET RUBBER=14 близок к WET=2.
 
     Подать код в сеть как число значило бы сообщить ей неверное отношение порядка — лёд
     оказался бы «менее скользким», чем лужи.
     """
-    dry = runway_condition_from_bench(0).value
-    wet = runway_condition_from_bench(1).value
-    ice = runway_condition_from_bench(2).value
+    dry = runway_condition_from_bench(1).value
+    wet = runway_condition_from_bench(2).value
     flooded = runway_condition_from_bench(3).value
+    ice = runway_condition_from_bench(4).value
+    wet_rubber = runway_condition_from_bench(14).value
 
     assert dry < wet < flooded < ice          # порядок по скользкости, а не по коду
-    assert ice > flooded                      # ...в отличие от порядка кодов (2 < 3)
+    assert wet_rubber == wet
 
 
 def test_every_documented_bench_code_is_mapped():
-    """ICD перечисляет ровно семь состояний — незакрытый код молча стал бы «льдом»."""
-    assert set(BENCH_RUNWAY_CONDITION) == set(range(7))
+    """Все семь кодов из фактических пакетов закрыты явно."""
+    assert set(BENCH_RUNWAY_CONDITION) == {1, 2, 3, 4, 5, 7, 14}
 
 
 def test_unknown_bench_code_is_treated_as_slippery():

@@ -84,11 +84,13 @@ def approach_blocker(telemetry: "Telemetry | None") -> "str | None":
     """
     if telemetry is None or not telemetry.airborne_data_available:
         return "нет воздушных сигналов backend"
-    ## TODO:
-    # if telemetry.landing_flaps is None:
-    #     angle = telemetry.approach_inputs.FlapsAngle
-    #     return (f"механизация не в посадочной конфигурации (закрылки {angle:.1f}°): таблицы "
-    #             f"захода МС-21 к ней неприменимы")
+    invalid = telemetry.invalid_approach_signals
+    if invalid:
+        return "невалидны обязательные воздушные сигналы: " + ", ".join(invalid)
+    if telemetry.landing_flaps is None:
+        angle = telemetry.approach_inputs.FlapsAngle
+        return (f"механизация не в посадочной конфигурации (закрылки {angle:.1f}°): таблицы "
+                f"захода МС-21 к ней неприменимы")
     return None
 
 

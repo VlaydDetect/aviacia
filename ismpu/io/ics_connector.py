@@ -181,7 +181,8 @@ class ICSInputs:
         """Разбор телеметрии стенда с совместимостью вперёд.
 
         Асимметрия намеренная (JSON-аналог дописывания полей в бинарный payload):
-        **лишние** ключи игнорируются — стенд может добавить сигнал, и нас это не должно ронять;
+        **лишние** ключи сохраняются для аудита — стенд может добавить сигнал, и нас это не
+        должно ронять;
         **отсутствующие** ключи — ошибка. Подставить им ноль значило бы выдумать телеметрию,
         по которой потом считается управление.
         """
@@ -194,7 +195,16 @@ class ICSInputs:
         # Конвертируем сырые значения в IntEnum, где это необходимо
         for gear_field in ('NoseGearStatus', 'LeftGearStatus', 'RightGearStatus'):
             payload[gear_field] = GearState(payload[gear_field])
-        return cls(**payload)
+        result = cls(**payload)
+        # Не объявляем extras полем dataclass: публичная схема остаётся ровно той же, что у
+        # стенда (99 полей), а будущие добавления всё равно не теряются в RunRecorder.
+        result._raw_fields = {k: v for k, v in data.items() if k not in known}
+        return result
+
+    @property
+    def raw_fields(self) -> dict[str, object]:
+        """Неизвестные поля исходного JSON; они доступны аудиту, но не закону управления."""
+        return dict(getattr(self, "_raw_fields", {}))
 
 
 @dataclass
