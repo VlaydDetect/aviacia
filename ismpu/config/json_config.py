@@ -24,8 +24,9 @@ from ismpu.config.scenarios import (
     TouchdownSetup,
 )
 from ismpu.config.segments import FlightSegment
+from ismpu.config.runway_profiles import UUEE_06R
 from ismpu.control.failures import FailureMode
-from ismpu.control.trajectory import VelocityLaw
+from ismpu.control.trajectory import CompletionRule, VelocityLaw
 from ismpu.envs.weather import WeatherState
 
 SCHEMA_VERSION = 2
@@ -68,8 +69,19 @@ def ground_control_to_dict(config: GroundControlConfig) -> dict[str, Any]:
         "mixing": {
             "steering_brake_gain": config.steering_brake_gain,
             "steering_rev_gain": config.steering_rev_gain,
+            "failure_yaw_compensation_gain": config.failure_yaw_compensation_gain,
         },
-        "trajectory": {"law": config.law.name},
+        "trajectory": {
+            "law": config.law.name,
+            "target_speed_kts": config.target_speed_kts,
+            "braking_distance_m": config.braking_distance_m,
+            "completion_rule": config.completion_rule.value,
+        },
+        "rate_limits": {
+            "steering_per_s": config.steering_rate_per_s,
+            "brake_per_s": config.brake_rate_per_s,
+            "reverse_per_s": config.reverse_rate_per_s,
+        },
     }
 
 
@@ -80,6 +92,7 @@ def ground_control_from_dict(data: Mapping[str, Any]) -> GroundControlConfig:
     guidance = dict(data.get("guidance", {}))
     mixing = dict(data.get("mixing", {}))
     trajectory = dict(data.get("trajectory", {}))
+    rate_limits = dict(data.get("rate_limits", {}))
     return GroundControlConfig(
         **{name: dict(pids[name]) for name in _PID_NAMES},
         lookahead_min=float(guidance.get("lookahead_min", 10.0)),
@@ -87,7 +100,16 @@ def ground_control_from_dict(data: Mapping[str, Any]) -> GroundControlConfig:
         xte_gain=float(guidance.get("xte_gain", 2.0)),
         steering_brake_gain=float(mixing.get("steering_brake_gain", 0.4)),
         steering_rev_gain=float(mixing.get("steering_rev_gain", 0.0)),
+        failure_yaw_compensation_gain=float(
+            mixing.get("failure_yaw_compensation_gain", 1.0)),
         law=VelocityLaw[str(trajectory.get("law", "GAUSS_BELL"))],
+        target_speed_kts=float(trajectory.get("target_speed_kts", 7.5)),
+        braking_distance_m=float(trajectory.get("braking_distance_m", UUEE_06R.length_m)),
+        completion_rule=CompletionRule(
+            str(trajectory.get("completion_rule", CompletionRule.HANDOVER_TAXI.value))),
+        steering_rate_per_s=float(rate_limits.get("steering_per_s", 1.0)),
+        brake_rate_per_s=float(rate_limits.get("brake_per_s", 1.0)),
+        reverse_rate_per_s=float(rate_limits.get("reverse_per_s", 1.0)),
     )
 
 

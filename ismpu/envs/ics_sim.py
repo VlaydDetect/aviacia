@@ -765,7 +765,7 @@ class ICSSim(SimInterface):
         out.ControlValidMask = int(AIRBORNE_CONTROL_MASK)
         out.ElevatorCmd = command.cmd_elevator                      # g
         out.AileronCmd = _clamp(command.cmd_aileron, -AILERON_MAX_DEG, AILERON_MAX_DEG)
-        out.RudderCmd = command.rudder_cmd * RUDDER_MAX_DEG
+        out.RudderCmd = command.cmd_rudder * RUDDER_MAX_DEG
         out.ThrottleLeftRate = _clamp(command.cmd_throttle_l_rate,
                                       -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
         out.ThrottleRightRate = _clamp(command.cmd_throttle_r_rate,
@@ -797,10 +797,10 @@ class ICSSim(SimInterface):
         out.BrakeRightCmd = command.cmd_brake_r * BRAKE_CMD_MAX_MM
 
         if taxi:
-            out.NoseWheelTillerCmd = command.rudder_cmd * TILLER_MAX_MM
+            out.NoseWheelTillerCmd = command.cmd_tiller * TILLER_MAX_MM
         else:
-            out.RudderCmd = command.rudder_cmd * RUDDER_MAX_DEG
-            out.RudderPedalCmd = command.rudder_cmd * RUDDER_PEDAL_MAX_MM
+            out.RudderCmd = command.cmd_rudder * RUDDER_MAX_DEG
+            out.RudderPedalCmd = command.cmd_pedal * RUDDER_PEDAL_MAX_MM
 
         # Реверс: команда [-1, 0] — это желаемый уровень обратной тяги. Задаётся он **скоростью**
         # перемещения РУД (единственный документированный канал управления тягой), а не записью

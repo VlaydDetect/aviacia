@@ -169,7 +169,8 @@ def test_step_converts_commands_to_icd_units():
     sim, conn = engaged_sim()
     cmd = ControlsState()
     cmd.cmd_brake_l, cmd.cmd_brake_r = 1.0, 0.5
-    cmd.rudder_cmd = 1.0
+    cmd.cmd_rudder = 1.0
+    cmd.cmd_pedal = 1.0
     cmd.cmd_rev_l, cmd.cmd_rev_r = -1.0, 0.0
     sim.step(cmd)
     out = conn.sent_outputs[-1]
@@ -201,13 +202,13 @@ def test_step_converts_commands_to_icd_units():
 def test_taxi_steers_with_the_tiller_not_the_rudder():
     """Разделение органов из таблицы Заказчика: тиллер — на рулении, педальный пост — на пробеге.
 
-    На скорости пробега отклонять тиллер нельзя, на скорости руления руль направления
-    бесполезен, поэтому один и тот же нормированный `rudder_cmd` уходит в разные поля.
+    На скорости пробега отклонять тиллер нельзя, а в Taxi allocator выдаёт отдельную
+    `cmd_tiller`; руль направления и педальный пост остаются нулевыми.
     """
     sim, conn = engaged_sim()
     sim.request_taxi()
     cmd = ControlsState()
-    cmd.rudder_cmd = 1.0
+    cmd.cmd_tiller = 1.0
     sim.step(cmd)
     out = conn.sent_outputs[-1]
 
@@ -491,7 +492,7 @@ def test_geodetic_path_is_kept_when_the_bench_gives_no_runway_geometry():
     telem = telemetry(50.0)
     assert telem.runway_heading_deg is None and telem.lateral_deviation_m is None
     controller.control_step(DT, telem, send=False)   # геодезический путь, без исключений
-    assert controller.lateral_channel.last_diagnostics["source"] == "geodetic"
+    assert controller.lateral_channel.last_diagnostics.source == "geodetic"
 
 
 def test_missing_direct_and_explicit_geodetic_sources_is_neutral_and_diagnostic():
@@ -504,15 +505,14 @@ def test_missing_direct_and_explicit_geodetic_sources_is_neutral_and_diagnostic(
     controller.control_step(DT, telem, send=False)
 
     assert controller.state.rudder_cmd == 0.0
-    assert controller.lateral_channel.last_diagnostics == {
-        "xte": None,
-        "course_error": None,
-        "heading_error": None,
-        "guidance_error": None,
-        "along_track": None,
-        "source": "unavailable",
-        "event": "guidance_unavailable",
-    }
+    diag = controller.lateral_channel.last_diagnostics
+    assert diag.xte is None
+    assert diag.course_error is None
+    assert diag.heading_error is None
+    assert diag.guidance_error is None
+    assert diag.along_track is None
+    assert diag.source == "unavailable"
+    assert diag.event == "guidance_unavailable"
 
 
 def test_real_bench_heading_64_frame_ignores_uuee_coordinates():
@@ -541,11 +541,11 @@ def test_real_bench_heading_64_frame_ignores_uuee_coordinates():
     for lat, lon in ((55.96715, 37.3865417), (0.0, 0.0)):
         rudder, diag = result_for(lat, lon)
         assert rudder == pytest.approx(0.0, abs=1e-12)
-        assert diag["xte"] == 0.0
-        assert diag["course_error"] == 0.0
-        assert diag["heading_error"] == -2.0
-        assert diag["guidance_error"] == 0.0
-        assert diag["source"] == "ics_direct"
+        assert diag.xte == 0.0
+        assert diag.course_error == 0.0
+        assert diag.heading_error == -2.0
+        assert diag.guidance_error == 0.0
+        assert diag.source == "ics_direct"
 
 
 def test_lateral_deviation_sign_is_an_aircraft_profile_calibration():
@@ -715,21 +715,23 @@ def test_scenario_roundtrip_with_weather_and_failures():
 
 
 def test_select_scenario_matches_the_reported_failure():
-    """Ради этого отказы и остались в сценарии: по ним подбирается откалиброванный пресет."""
-    assert select_scenario((FailureMode.NWS_FAIL,)) is NWS_FAIL
-    assert select_scenario(()) is DEFAULT
+    """Старые gains теперь draft; для настройки их надо запросить явно."""
+    with pytest.raises(ValueError, match="нет допущенных сценариев"):
+        select_scenario((FailureMode.NWS_FAIL,))
+    assert select_scenario((FailureMode.NWS_FAIL,), include_draft=True) is NWS_FAIL
+    assert select_scenario((), include_draft=True) is DEFAULT
 
 
 def test_failure_match_outweighs_any_weather_similarity():
     """Пресет под отказ NWS в штатной конфигурации ведёт себя не так, как нужно, — и никакая
     близость по погоде этого не компенсирует."""
-    chosen = select_scenario((), WEATHER_PRESETS["icy"])
+    chosen = select_scenario((), WEATHER_PRESETS["icy"], include_draft=True)
     assert chosen.failures == ()
 
 
 def test_select_scenario_prefers_closer_weather_within_the_same_failure_set():
-    chosen = select_scenario((), WEATHER_PRESETS["icy"])
-    calm = select_scenario((), WEATHER_PRESETS["clear_dry"])
+    chosen = select_scenario((), WEATHER_PRESETS["icy"], include_draft=True)
+    calm = select_scenario((), WEATHER_PRESETS["clear_dry"], include_draft=True)
     assert chosen.scenario_id != calm.scenario_id
     assert weather_distance(chosen.weather, WEATHER_PRESETS["icy"]) < \
            weather_distance(calm.weather, WEATHER_PRESETS["icy"])
@@ -737,25 +739,24 @@ def test_select_scenario_prefers_closer_weather_within_the_same_failure_set():
 
 def test_select_scenario_skips_draft_presets_by_default():
     """Молча выбрать невыверенный пресет — вести пробег на непроверенных коэффициентах."""
-    drafts = [
-        scenario for scenario in SCENARIOS.values()
-        if scenario.is_draft("mc21", FlightSegment.ROLLOUT)
-    ]
-    for scenario in drafts:
-        chosen = select_scenario(scenario.failures, scenario.weather)
-        assert not chosen.is_draft("mc21", FlightSegment.ROLLOUT)
+    assert all(
+        scenario.is_draft("mc21", FlightSegment.ROLLOUT)
+        for scenario in SCENARIOS.values()
+    )
+    with pytest.raises(ValueError, match="нет допущенных сценариев"):
+        select_scenario(())
 
 
 def test_select_for_telemetry_reads_conditions_off_the_bench():
     inp = on_ground(FaultNWS=1, RunwayCondition=4)      # отказ NWS на льду
     telem = ICSSim(connector=FakeConnector(inp), aircraft_profile="mc21").read_telemetry()
-    assert select_for_telemetry(telem) is NWS_FAIL
+    assert select_for_telemetry(telem, include_draft=True) is NWS_FAIL
 
 
 def test_select_for_telemetry_falls_back_to_default_without_telemetry():
     """Без кадра о конфигурации борта неизвестно ничего — безопасен только штатный пресет."""
-    assert select_for_telemetry(Telemetry.invalid()) is DEFAULT
-    assert select_for_telemetry(None) is DEFAULT
+    assert select_for_telemetry(Telemetry.invalid(), include_draft=True) is DEFAULT
+    assert select_for_telemetry(None, include_draft=True) is DEFAULT
 
 
 # --------------------------------------------------------------------------- #

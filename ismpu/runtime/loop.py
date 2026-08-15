@@ -19,6 +19,7 @@ import time
 
 from ismpu.control.system import ControllingSystem
 from ismpu.control.flight import FlightSegment, initial_segment
+from ismpu.control.trajectory import CompletionRule
 from ismpu.config.constants import DT
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.envs.backend_factory import build_sim
@@ -81,8 +82,11 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                         elapsed_s=time.monotonic() - run_started)
                 if finished:
                     if controller.segment is FlightSegment.ROLLOUT:
-                        # Пробег окончен — передаём управление в руление (ControlMode 3 → 4).
-                        controller.hand_over_to_taxi()
+                        rule = controller.longitudinal_channel.trajectory.completion_rule
+                        if rule is CompletionRule.HANDOVER_TAXI:
+                            # Эксплуатационный полёт: ControlMode 3 → 4 на 7,5 узла.
+                            controller.hand_over_to_taxi()
+                        # Матричный FULL_STOP завершается на месте и ниже снимает каналы.
                         reason = RunStopReason.COMPLETED
                     elif controller.go_around_reason is not None:
                         # Уход на второй круг: заявка каналов снимается ниже (control_exception),

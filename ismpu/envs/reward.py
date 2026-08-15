@@ -112,6 +112,10 @@ def _effort_saturated(value: float, pid, tol: float) -> bool:
     return False
 
 
+def _ground_steering(command) -> float:
+    return max((command.cmd_rudder, command.cmd_pedal, command.cmd_tiller), key=abs)
+
+
 def saturation_fraction(command, pids: dict, *, tol: float = 1e-6) -> float:
     """Доля из 5 команд, исчерпавших авторитет (упёршихся в ненулевую границу PID).
 
@@ -119,7 +123,7 @@ def saturation_fraction(command, pids: dict, *, tol: float = 1e-6) -> float:
     Границы берутся из самих PID, а не хардкодятся, — они часть пресета сценария.
     """
     pairs = (
-        ("runway_center_pid", command.rudder_cmd),
+        ("runway_center_pid", _ground_steering(command)),
         ("pid_brake_l", command.cmd_brake_l),
         ("pid_brake_r", command.cmd_brake_r),
         ("pid_rev_l", command.cmd_rev_l),
@@ -172,7 +176,7 @@ def _command_jerk(command, prev_command) -> float:
             + abs(command.cmd_brake_r - prev_command.cmd_brake_r)
             + abs(command.cmd_rev_l - prev_command.cmd_rev_l)
             + abs(command.cmd_rev_r - prev_command.cmd_rev_r)
-            + abs(command.rudder_cmd - prev_command.rudder_cmd))
+            + abs(_ground_steering(command) - _ground_steering(prev_command)))
 
 
 def _speed_penalty(speed_error_ms: float) -> float:
@@ -298,10 +302,10 @@ class EpisodeObjective:
             self._rates["brake_r"].append(abs(command.cmd_brake_r - p["brake_r"]))
             self._rates["rev_l"].append(abs(command.cmd_rev_l - p["rev_l"]))
             self._rates["rev_r"].append(abs(command.cmd_rev_r - p["rev_r"]))
-            self._rates["rudder"].append(abs(command.rudder_cmd - p["rudder"]))
+            self._rates["rudder"].append(abs(_ground_steering(command) - p["rudder"]))
         self._prev_command = {"brake_l": command.cmd_brake_l, "brake_r": command.cmd_brake_r,
                               "rev_l": command.cmd_rev_l, "rev_r": command.cmd_rev_r,
-                              "rudder": command.rudder_cmd}
+                              "rudder": _ground_steering(command)}
 
         if shield_report is not None:
             if getattr(shield_report, "active", False):

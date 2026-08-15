@@ -1,41 +1,34 @@
 """Пропорционально-интегрально-дифференциальный регулятор.
 
-Улучшенный PID с leaky-интегратором и апериодическим фильтром D-составляющей первого порядка.
-Перенесён из main.ipynb без изменения численного поведения; отладочный вывод переведён с
-`cprint` на `logging` (на 20 Гц × 5 регуляторов cprint забивал консоль). По умолчанию логгер
-молчит; для трассировки:
-`logging.getLogger("ismpu.control.pid").setLevel(logging.DEBUG)`.
-
-## Опциональные улучшения численности (заимствованы из `roman_repo/xp_pid_bridge/pid.py`)
-
-Четыре независимых флага, **по умолчанию выключенных**: при значениях по умолчанию численное
-поведение бит-в-бит совпадает с прежним, поэтому парити классики и калибровка пресетов не
-затрагиваются. Каждый флаг включается отдельно и требует перетюна пресетов.
-
-* `tracking_tau_s` — **back-calculation**. Самый важный для нашего контура: фактически
-  применённая команда ≠ выходу PID, потому что `ControlsState.apply_failures()` домножает её
-  на эффективность актуатора, `clamp_all()` дожимает после дифференциального микса, а
-  `LateralChannel` добавляет разницу к тормозам. Интегратор об этом не знает и копит на
-  отказавший актуатор — при `steering_eff = 0` (`NWS_FAIL`) это классический windup.
-  `track(applied)` возвращает интегратор к тому, что реально применили.
-* `derivative_on_measurement` — производная по измерению, а не по ошибке. Продольный канал ведёт
-  цель по `ReferenceTrajectory` (`GAUSS_BELL`), т.е. **уставка непрерывно движется**, и
-  производная по ошибке даёт паразитный вклад от движения уставки, а не от динамики объекта.
-* `conditional_anti_windup` — интегрировать только если это не загоняет глубже в насыщение
-  (выход из насыщения разрешён всегда). Наши тормоза зажаты в `[0,1]`, реверсы в `[-1,0]` и на
-  пробеге в насыщении почти постоянно, так что жёсткий клип интеграла работает грубо.
-* `exact_discretization` — точные решения вместо аппроксимаций: `alpha = -expm1(-dt/T_f)`
-  вместо `dt/(dt+T_f)`, и `error·τ·(1−exp(−dt/τ))` вместо `error·dt` для утечки. На фиксированных
-  20 Гц разница мала, но `control_step(dt)` принимает dt параметром, и при просадке цикла
-  аппроксимация уплывает.
+Класс сохраняет прежнюю численность по умолчанию для совместимости воздушного контура.
+Наземная фабрика включает вариант из `working_ics`: derivative-on-measurement, точный ZOH-фильтр,
+`dt` 0,001–0,25 с, conditional anti-windup и отдельные пределы интегратора. Опциональный
+`track(applied)` возвращает интегратор к фактически распределённой allocator-ом команде.
 """
 
 import logging
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PIDDiagnostics:
+    """Типизированный снимок последнего такта регулятора."""
+
+    error: float
+    measurement: float | None
+    p: float
+    i: float
+    d: float
+    unconstrained: float
+    output: float
+    integral: float
+    derivative: float
+    saturated: bool
 
 
 class PIDController:
@@ -45,7 +38,12 @@ class PIDController:
                  derivative_on_measurement: bool = False,
                  conditional_anti_windup: bool = False,
                  exact_discretization: bool = False,
-                 tracking_tau_s: float | None = None) -> None:
+                 tracking_tau_s: float | None = None,
+                 integral_min: float | None = None,
+                 integral_max: float | None = None,
+                 clamp_dt: bool = False,
+                 dt_min_s: float = 0.001,
+                 dt_max_s: float = 0.25) -> None:
         self.kp: float = kp
         self.ki: float = ki
         self.kd: float = kd
@@ -59,6 +57,10 @@ class PIDController:
         self.prev_error: float | None = None
 
         self.anti_windup: float = anti_windup
+        self.integral_min: float = -anti_windup if integral_min is None else integral_min
+        self.integral_max: float = anti_windup if integral_max is None else integral_max
+        if self.integral_min > self.integral_max:
+            raise ValueError("integral_min must not exceed integral_max")
         # Коэффициент экспоненциального затухания интеграла
         self.integral_decay: float = integral_decay
         # Постоянная времени фильтра низких частот D-составляющей (T_f в секундах)
@@ -79,6 +81,11 @@ class PIDController:
         self.conditional_anti_windup: bool = conditional_anti_windup
         self.exact_discretization: bool = exact_discretization
         self.tracking_tau_s: float | None = tracking_tau_s
+        self.clamp_dt: bool = clamp_dt
+        self.dt_min_s: float = dt_min_s
+        self.dt_max_s: float = dt_max_s
+        if self.dt_min_s <= 0.0 or self.dt_min_s > self.dt_max_s:
+            raise ValueError("dt limits must satisfy 0 < dt_min_s <= dt_max_s")
         # вход D-составляющей прошлого такта (ошибка или измерение)
         self._prev_deriv_input: float | None = None
 
@@ -115,7 +122,7 @@ class PIDController:
         return (self._clip_integral(leaked) if self.conditional_anti_windup else leaked), candidate
 
     def _clip_integral(self, value: float) -> float:
-        return max(-self.anti_windup, min(self.anti_windup, value))
+        return max(self.integral_min, min(self.integral_max, value))
 
     # ------------------------------------------------------------------ #
     # Такт
@@ -123,8 +130,10 @@ class PIDController:
 
     def compute(self, error: float, dt: float, measurement: float | None = None) -> float:
         """Такт регулятора. `measurement` обязателен при `derivative_on_measurement=True`."""
-        if dt <= 0.0:
+        if not self.clamp_dt and dt <= 0.0:
             return 0.0
+        if self.clamp_dt:
+            dt = max(self.dt_min_s, min(self.dt_max_s, dt))
 
         if self.derivative_on_measurement and measurement is None:
             raise ValueError(
@@ -175,10 +184,12 @@ class PIDController:
         self.last_error = error
         self.last_measurement = measurement
         self.last_p_term = self.kp * error
-        self.last_i_term = self.ki * self.integral
+        # Компоненты описывают именно рассчитанный выход этого такта. При conditional
+        # anti-windup сохранённое состояние интегратора может отклонить candidate уже после
+        # расчёта команды; оно отдельно доступно как `integral` в диагностике.
+        self.last_i_term = self.ki * candidate_integral
         self.last_d_term = self.kd * derivative
-        self.last_unconstrained = (
-            self.last_p_term + self.last_i_term + self.last_d_term)
+        self.last_unconstrained = unconstrained
         self.last_output = self.clamp(unconstrained)
         return self.last_output
 
@@ -192,6 +203,9 @@ class PIDController:
         if self.tracking_tau_s is None or self.ki == 0.0 or dt <= 0.0:
             return
 
+        if self.clamp_dt:
+            dt = max(self.dt_min_s, min(self.dt_max_s, dt))
+
         reference = self.last_output if commanded_output is None else commanded_output
         alpha = -math.expm1(-dt / self.tracking_tau_s)
         correction = (applied_output - reference) * alpha / self.ki
@@ -199,6 +213,23 @@ class PIDController:
 
     def clamp(self, value: float) -> float:
         return max(self.min_out, min(self.max_out, value))
+
+    def diagnostics(self) -> PIDDiagnostics:
+        return PIDDiagnostics(
+            error=self.last_error,
+            measurement=self.last_measurement,
+            p=self.last_p_term,
+            i=self.last_i_term,
+            d=self.last_d_term,
+            unconstrained=self.last_unconstrained,
+            output=self.last_output,
+            integral=self.integral,
+            derivative=self.filtered_derivative,
+            saturated=(
+                self.last_unconstrained < self.min_out
+                or self.last_unconstrained > self.max_out
+            ),
+        )
 
     def reset(self) -> None:
         """Сброс внутренних состояний (используется при выключении системы)."""

@@ -153,7 +153,7 @@ def test_profile_rejects_unknown_aircraft_and_clamps_commands():
     command = ControlsState(
         cmd_aileron=100.0,
         cmd_elevator=-2.0,
-        rudder_cmd=3.0,
+        cmd_rudder=3.0,
         cmd_throttle_norm=2.0,
     )
     values = A330_300.airborne_commands(command)
@@ -227,7 +227,7 @@ def test_commands_failures_and_close_release_overrides():
         cmd_brake_r=-1.0,
         cmd_rev_l=-2.0,
         cmd_rev_r=1.0,
-        rudder_cmd=2.0,
+        cmd_rudder=2.0,
     )
     sim.step(command)
     writes = dict(mock.writes)

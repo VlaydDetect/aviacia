@@ -12,7 +12,6 @@ import pytest
 from ismpu.config.constants import DT
 from ismpu.control.pid import PIDController
 from ismpu.control.system import ControllingSystem
-from ismpu.control.failures import FailureMode
 from ismpu.config.scenarios import SCENARIOS
 
 from fakes import static_sim, telemetry as _telemetry
@@ -66,28 +65,17 @@ def test_all_optional_flags_default_to_off():
 
 
 def test_control_step_is_unchanged_when_tracking_is_off():
-    """`_track_applied` вызывается безусловно, но обязан быть no-op без `tracking_tau_s`."""
+    """`_track_applied` обязан быть no-op, если tracking явно выключен."""
     telem = _telemetry()
 
     ctrl = ControllingSystem(static_sim()[0])
     SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
-    for _ in range(5):
-        ctrl.control_step(DT, telem, send=True)
-    integrals_with_hook = {name: p.integral for name, p in ctrl.pids.items()}
-
-    ctrl2 = ControllingSystem(static_sim()[0])
-    SCENARIOS["nws_fail"].apply_control(ctrl2, "mc21")
-    for _ in range(5):
-        # тот же цикл, но без хука трекинга
-        ctrl2.longitudinal_channel.calc_commands(DT, ctrl2.state, telem)
-        ctrl2.lateral_channel.calc_commands(DT, ctrl2.state, telem)
-        ctrl2.state.clamp_all(ctrl2.pids)
-        if ctrl2.state.break_control:
-            break
-        ctrl2.state.apply_failures(ctrl2.failures.state)
-        ctrl2.sim.step(ctrl2.state)
-
-    assert integrals_with_hook == {name: p.integral for name, p in ctrl2.pids.items()}
+    for pid in ctrl.pids.values():
+        pid.tracking_tau_s = None
+    ctrl.control_step(DT, telem, send=False)
+    before = {name: pid.integral for name, pid in ctrl.pids.items()}
+    ctrl._track_applied(DT)
+    assert before == {name: pid.integral for name, pid in ctrl.pids.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -103,7 +91,7 @@ def test_tracking_is_a_noop_without_tau():
 
 
 def test_tracking_unwinds_the_integrator_when_the_actuator_is_dead():
-    """При `steering_eff = 0` применяется 0 вместо выхода PID — интегратор обязан это учесть."""
+    """При мёртвом актуаторе применяется 0 вместо выхода PID — интегратор это учитывает."""
     common = dict(kp=1.0, ki=2.0, kd=0.0, min_out=-1.0, max_out=1.0, anti_windup=10.0)
     blind = PIDController(**common)
     tracked = PIDController(**common, tracking_tau_s=0.5)
@@ -125,24 +113,6 @@ def test_tracking_does_nothing_when_the_command_is_applied_as_computed():
         before = pid.integral
         pid.track(out, DT)
         assert pid.integral == pytest.approx(before)
-
-
-def test_tracking_through_control_step_under_a_real_failure():
-    """Сквозная проверка: NWS-отказ обнуляет руль, интегратор курсового PID не должен копить."""
-    def run(tau):
-        ctrl = ControllingSystem(static_sim(groundspeed_ms=50.0)[0])
-        SCENARIOS["nws_fail"].apply_control(ctrl, "mc21")
-        ctrl.apply_failure(FailureMode.NWS_FAIL)          # steering_eff = 0
-        pid = ctrl.pids["runway_center_pid"]
-        pid.tracking_tau_s = tau
-        pid.ki = max(pid.ki, 0.2)                          # чтобы интеграл вообще был заметен
-        telem = _telemetry(50.0)
-        for _ in range(30):
-            if ctrl.control_step(DT, telem, send=True):
-                break
-        return abs(pid.integral)
-
-    assert run(0.5) <= run(None)
 
 
 # --------------------------------------------------------------------------- #

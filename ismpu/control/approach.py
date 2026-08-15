@@ -196,7 +196,7 @@ class ApproachChannel:
         state.cmd_elevator = res.elevator_g
         # Руль направления живёт в общем нормированном поле: на заходе он нулевой, а когда
         # появится закон парирования сноса, он будет выражен так же, как на пробеге.
-        state.rudder_cmd = res.rudder_deg / RUDDER_MAX_DEG
+        state.cmd_rudder = res.rudder_deg / RUDDER_MAX_DEG
         state.cmd_throttle_l_rate = res.throttle_left_rate_deg_s
         state.cmd_throttle_r_rate = res.throttle_right_rate_deg_s
         state.cmd_throttle_norm = res.throttle_norm
@@ -257,7 +257,7 @@ class ApproachChannel:
 
         state.cmd_aileron = res.aileron_deg
         state.cmd_elevator = res.elevator_g
-        state.rudder_cmd = res.rudder_deg / RUDDER_MAX_DEG
+        state.cmd_rudder = res.rudder_deg / RUDDER_MAX_DEG
         state.cmd_throttle_l_rate = res.throttle_left_rate_deg_s
         state.cmd_throttle_r_rate = res.throttle_right_rate_deg_s
         state.cmd_throttle_norm = res.throttle_norm

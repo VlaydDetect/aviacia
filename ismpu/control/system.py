@@ -1,8 +1,8 @@
 """Оркестратор классического контура управления — на всём интервале полёта.
 
 `ControllingSystem` на каждом такте выбирает участок (`control/flight.py`) и вызывает его закон:
-в воздухе — `ApproachChannel` (заход по ILS и выравнивание), на земле — продольный и латеральный
-каналы, деградация отказов и отправка команд.
+в воздухе — `ApproachChannel` (заход по ILS и выравнивание), на земле — speed controller,
+guidance и allocator органов управления.
 
 **Транспорта здесь нет.** Контур получает объект стенда (`envs.ics_sim.ICSSim`) и общается с ним
 только через `read_telemetry`/`step`; ни JSON, ни UDP, ни единиц ICD он не знает — их переводит
@@ -19,9 +19,10 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from dataclasses import dataclass
 
 from ismpu.control.pid import PIDController
-from ismpu.control.trajectory import ReferenceTrajectory, VelocityLaw
+from ismpu.control.trajectory import CompletionRule, ReferenceTrajectory, VelocityLaw
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
+from ismpu.control.ground_allocator import GroundControlAllocator
 from ismpu.control.approach import ApproachChannel
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
 from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerances
@@ -31,13 +32,14 @@ from ismpu.control.flight import (
     approach_blocker, ils_blocker, above_decision_height, at_lateral_alignment_gate,
 )
 from ismpu.config.approach import ApproachConfig
-from ismpu.config.constants import INITIAL_SPEED_KTS, TARGET_SPEED_KTS
+from ismpu.config.constants import TARGET_SPEED_KTS
 from ismpu.config.requirements import GO_AROUND_CONFIRM_TICKS
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON
 from ismpu.envs.ics_sim import Telemetry
 from ismpu.envs.sim_interface import SimInterface
 from ismpu.config.regulators import PidMap
 from ismpu.config.scenarios import ConditionMatch
+from ismpu.utils.converts import Converts
 
 if TYPE_CHECKING:
     from ismpu.config.scenarios import Scenario
@@ -87,6 +89,7 @@ class ControllingSystem:
         # Каналы создаются в setup(); аннотации фиксируют их публичный контракт.
         self.lateral_channel: LateralChannel
         self.longitudinal_channel: LongitudinalChannel
+        self.ground_allocator: GroundControlAllocator
 
         self.segment: FlightSegment = FlightSegment.ROLLOUT
         self._segment_decided: bool = True
@@ -156,6 +159,13 @@ class ControllingSystem:
         steering_brake_gain: float = 0.4,
         steering_rev_gain: float = 0.0,
         law: VelocityLaw = VelocityLaw.GAUSS_BELL,
+        target_speed_kts: float = TARGET_SPEED_KTS,
+        braking_distance_m: float | None = None,
+        completion_rule: CompletionRule = CompletionRule.HANDOVER_TAXI,
+        steering_rate_per_s: float = 1.0,
+        brake_rate_per_s: float = 1.0,
+        reverse_rate_per_s: float = 1.0,
+        failure_yaw_compensation_gain: float = 1.0,
     ) -> None:
         self.pids = pids
 
@@ -170,14 +180,25 @@ class ControllingSystem:
         self._violation_ticks = 0
 
         tracker = RunwayTracker(lookahead_min, lookahead_gain, xte_gain)
-        self.lateral_channel = LateralChannel(pids["runway_center_pid"], tracker,
-                                              steering_brake_gain, steering_rev_gain)
+        self.lateral_channel = LateralChannel(pids["runway_center_pid"], tracker)
+        self.ground_allocator = GroundControlAllocator(
+            steering_brake_gain=steering_brake_gain,
+            steering_rev_gain=steering_rev_gain,
+            steering_rate_per_s=steering_rate_per_s,
+            brake_rate_per_s=brake_rate_per_s,
+            reverse_rate_per_s=reverse_rate_per_s,
+            failure_yaw_compensation_gain=failure_yaw_compensation_gain,
+        )
 
         trajectory = ReferenceTrajectory(
-            INITIAL_SPEED_KTS,
-            TARGET_SPEED_KTS,
-            tracker.haversine_distance(RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON),
-            law)
+            target_speed_kts,
+            target_speed_kts,
+            (tracker.haversine_distance(
+                RWY_START_LAT, RWY_START_LON, RWY_END_LAT, RWY_END_LON)
+             if braking_distance_m is None else braking_distance_m),
+            law,
+            completion_rule,
+        )
         self.longitudinal_channel = LongitudinalChannel(
             pids["pid_brake_l"], pids["pid_brake_r"], pids["pid_rev_l"], pids["pid_rev_r"],
             trajectory)
@@ -207,8 +228,8 @@ class ControllingSystem:
         self.lateral_channel.tracker.xte_gain = xte_gain
 
     def set_lateral_params(self, steering_brake_gain: float, steering_rev_gain: float) -> None:
-        self.lateral_channel.steering_brake_gain = steering_brake_gain
-        self.lateral_channel.steering_rev_gain = steering_rev_gain
+        self.ground_allocator.steering_brake_gain = steering_brake_gain
+        self.ground_allocator.steering_rev_gain = steering_rev_gain
 
     def set_channel_weights(self, w_lon: float, w_lat: float) -> None:
         """Веса влияния каналов (актор, §6): множители к выходам каналов. 1.0 = классика."""
@@ -216,7 +237,7 @@ class ControllingSystem:
         self.lateral_channel.w_lat = w_lat
 
     def set_velocity_law(self, law: VelocityLaw) -> None:
-        self.longitudinal_channel.trajectory.law = law
+        self.longitudinal_channel.trajectory.set_law(law)
 
     def apply_failure(self, mode: FailureMode) -> None:
         self.failures.activate(mode)
@@ -276,9 +297,11 @@ class ControllingSystem:
         if self._segment_decided or not segment_is_decidable(telemetry):
             return
         self._segment_decided = True
-        if initial_segment(telemetry) is not FlightSegment.APPROACH:
+        settled = initial_segment(telemetry)
+        if settled is not FlightSegment.APPROACH:
+            self.segment = settled
             if self.scenario is not None:
-                self.activate_segment(FlightSegment.ROLLOUT, telemetry)
+                self.activate_segment(settled, telemetry)
             return
         blocker = approach_blocker(telemetry)
         if blocker is not None:
@@ -482,21 +505,37 @@ class ControllingSystem:
         return bool(climbing and gained)
 
     def _ground_step(self, dt: float) -> bool:
-        """Такт пробега/руления: два канала, финальные пределы, деградация отказов."""
+        """Три блока: speed controller → guidance → allocator."""
         telemetry = self.last_telemetry
-        self.longitudinal_channel.calc_commands(dt, self.state, telemetry)
-        self.lateral_channel.calc_commands(dt, self.state, telemetry)
-        self.state.clamp_all(self.pids)
+        longitudinal = self.longitudinal_channel.compute(dt, telemetry)
+        lateral = self.lateral_channel.compute(dt, telemetry)
+        allocation = self.ground_allocator.allocate(
+            self.segment,
+            longitudinal,
+            lateral,
+            self.failures.state,
+            self.state,
+            telemetry,
+            dt,
+        )
+        command = allocation.limited
+        self.state.cmd_rudder = command.rudder
+        self.state.cmd_pedal = command.pedal
+        self.state.cmd_tiller = command.tiller
+        self.state.cmd_brake_l = command.brake_left
+        self.state.cmd_brake_r = command.brake_right
+        self.state.cmd_rev_l = command.reverse_left
+        self.state.cmd_rev_r = command.reverse_right
+        self.state.quality_speed = (
+            abs(longitudinal.error * Converts.MS_TO_KTS)
+            if longitudinal.error is not None else 0.0)
+        self.state.quality_lateral = abs(lateral.xte) if lateral.xte is not None else 0.0
+        self.state.quality_heading = (
+            abs(lateral.course_error) if lateral.course_error is not None else 0.0)
+        self.state.break_control = longitudinal.stop_requested
 
-        if self.state.break_control:
-            return True
-
-        self.state.apply_failures(self.failures.state)
-        # Обратная связь по фактически применённой команде — только для наземных регуляторов:
-        # на заходе они вообще не считались, и подтягивать их интеграторы к чужим полям значит
-        # копить в них мусор к моменту касания.
         self._track_applied(dt)
-        return False
+        return longitudinal.stop_requested
 
     def hand_over_to_rollout(self) -> None:
         """Передать управление с захода на пробег (`ControlMode 1 → 3`).
@@ -513,6 +552,9 @@ class ControllingSystem:
         # Воздушные команды больше не выдаются — маска пробега их не заявляет, но оставлять в
         # структуре последнее отклонение элеронов значит хранить мусор в логах и в отчёте.
         self.state.neutralize_airborne()
+        telemetry = self.last_telemetry
+        if telemetry is not None and telemetry.valid and telemetry.groundspeed_ms is not None:
+            self.longitudinal_channel.begin(telemetry.groundspeed_ms)
         if self.sim is not None:
             self.sim.request_rollout()
 
@@ -539,6 +581,9 @@ class ControllingSystem:
         self.segment = FlightSegment.TAXI
         if self.scenario is not None:
             self.activate_segment(FlightSegment.TAXI, self.last_telemetry)
+        telemetry = self.last_telemetry
+        if telemetry is not None and telemetry.valid and telemetry.groundspeed_ms is not None:
+            self.longitudinal_channel.begin(telemetry.groundspeed_ms)
         for _ in range(max(1, frames)):
             sim.step(self.state)
         return True
@@ -554,22 +599,54 @@ class ControllingSystem:
                 "кадр параметром и используйте send=False.")
         return self.sim
 
-    # Фактически применённая команда ≠ выходу PID: её меняют вес канала, дифференциальный микс,
-    # `clamp_all` и деградация отказов. Без обратной связи интегратор копит на отказавший
-    # актуатор (при `steering_eff = 0` — классический windup).
+    # Фактически применённая команда ≠ выходу PID: её меняют вес канала, allocator, rate limit
+    # и доступность актуатора. Без tracking интегратор копит на недоступный орган.
     def _track_applied(self, dt: float) -> None:
         """Back-calculation по итоговым командам. No-op, пока у PID не задан `tracking_tau_s`."""
+        allocation = self.ground_allocator.last_diagnostics
+        steering = allocation.steering_applied if allocation is not None else self.state.cmd_rudder
+        base = allocation.base if allocation is not None else None
+        failures = self.failures.state
+        brake_left = (
+            min(base.brake_left * failures.brake_left_eff, self.state.cmd_brake_l)
+            if base is not None else self.state.cmd_brake_l)
+        brake_right = (
+            min(base.brake_right * failures.brake_right_eff, self.state.cmd_brake_r)
+            if base is not None else self.state.cmd_brake_r)
+        reverse_left = (
+            -min(abs(base.reverse_left * failures.reverse_left_eff * failures.thrust_left_eff),
+                 abs(self.state.cmd_rev_l))
+            if base is not None else self.state.cmd_rev_l)
+        reverse_right = (
+            -min(abs(base.reverse_right * failures.reverse_right_eff * failures.thrust_right_eff),
+                 abs(self.state.cmd_rev_r))
+            if base is not None else self.state.cmd_rev_r)
         applied = (
-            ("runway_center_pid", self.state.rudder_cmd),
-            ("pid_brake_l", self.state.cmd_brake_l),
-            ("pid_brake_r", self.state.cmd_brake_r),
-            ("pid_rev_l", self.state.cmd_rev_l),
-            ("pid_rev_r", self.state.cmd_rev_r),
+            ("runway_center_pid", steering,
+             allocation.steering_request if allocation is not None else steering,
+             self.lateral_channel.w_lat),
+            ("pid_brake_l", brake_left,
+             base.brake_left if base is not None else brake_left,
+             self.longitudinal_channel.w_lon),
+            ("pid_brake_r", brake_right,
+             base.brake_right if base is not None else brake_right,
+             self.longitudinal_channel.w_lon),
+            ("pid_rev_l", reverse_left,
+             base.reverse_left if base is not None else reverse_left,
+             self.longitudinal_channel.w_lon),
+            ("pid_rev_r", reverse_right,
+             base.reverse_right if base is not None else reverse_right,
+             self.longitudinal_channel.w_lon),
         )
-        for regulator, command in applied:
+        for regulator, command, requested, weight in applied:
             pid = self.pids.get(regulator)
             if pid is not None:
-                pid.track(command, dt)
+                if abs(weight) > 1e-12:
+                    command /= weight
+                    requested /= weight
+                else:
+                    command, requested = 0.0, pid.last_output
+                pid.track(command, dt, commanded_output=requested)
 
     def control_exception(self) -> None:
         """Аварийная остановка: обнулить органы и **снять заявку каналов**.

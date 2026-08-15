@@ -116,7 +116,7 @@ class AircraftProfile:
                 self.roll_sign * command.cmd_aileron / self.aileron_full_scale_deg, -1.0, 1.0),
             dr.YOKE_PITCH_RATIO: clamp(
                 self.pitch_sign * command.cmd_elevator / self.elevator_full_scale_g, -1.0, 1.0),
-            dr.YOKE_HEADING_RATIO: clamp(self.yaw_sign * command.rudder_cmd, -1.0, 1.0),
+            dr.YOKE_HEADING_RATIO: clamp(self.yaw_sign * command.cmd_rudder, -1.0, 1.0),
             left: clamp(command.cmd_throttle_norm, 0.0, 1.0),
             right: clamp(command.cmd_throttle_norm, 0.0, 1.0),
         }
@@ -124,12 +124,14 @@ class AircraftProfile:
     def ground_commands(self, command: "ControlsState") -> dict[str, float]:
         """Преобразовать нормированные команды пробега в DataRef X-Plane."""
         left, right = self.throttle_command_refs
+        steering = max(
+            (command.cmd_rudder, command.cmd_pedal, command.cmd_tiller), key=abs)
         return {
             dr.LEFT_BRAKE_RATIO: clamp(command.cmd_brake_l, 0.0, 1.0),
             dr.RIGHT_BRAKE_RATIO: clamp(command.cmd_brake_r, 0.0, 1.0),
             left: clamp(command.cmd_rev_l, -1.0, 0.0),
             right: clamp(command.cmd_rev_r, -1.0, 0.0),
-            dr.YOKE_HEADING_RATIO: clamp(self.yaw_sign * command.rudder_cmd, -1.0, 1.0),
+            dr.YOKE_HEADING_RATIO: clamp(self.yaw_sign * steering, -1.0, 1.0),
         }
 
 

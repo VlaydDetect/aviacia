@@ -1,8 +1,8 @@
 """Участки полёта и переходы между ними.
 
 Управление ведётся на всём интервале — от захода по ILS до скорости руления, — но законы на
-участках разные: в воздухе работает `control/approach.py`, на земле — продольный и латеральный
-каналы `control/channels.py`. Здесь описано, **какой участок сейчас** и когда он сменяется.
+участках разные: в воздухе работает `control/approach.py`, на земле — speed controller,
+guidance и allocator. Здесь описано, **какой участок сейчас** и когда он сменяется.
 
 Два свойства этой машины важнее её простоты:
 
@@ -64,7 +64,11 @@ def segment_is_decidable(telemetry: "Telemetry | None") -> bool:
 
 def initial_segment(telemetry: "Telemetry | None", **kwargs: float) -> FlightSegment:
     """С какого участка начинать. Пробег — ответ по умолчанию (см. модуль)."""
-    return FlightSegment.APPROACH if is_airborne(telemetry, **kwargs) else FlightSegment.ROLLOUT
+    if is_airborne(telemetry, **kwargs):
+        return FlightSegment.APPROACH
+    if telemetry is not None and telemetry.flight_phase == int(FlightPhase.TAXI_IN):
+        return FlightSegment.TAXI
+    return FlightSegment.ROLLOUT
 
 
 def approach_blocker(telemetry: "Telemetry | None") -> "str | None":

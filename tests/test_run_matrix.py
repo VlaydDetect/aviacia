@@ -101,12 +101,17 @@ def test_compose_matrix_scenario_combines_air_and_ground_control_and_failures():
 
 
 def test_drafts_are_never_selected_automatically():
+    with pytest.raises(ValueError, match="нет допущенных сценариев"):
+        select_scenario(
+            (FailureMode.NWS_FAIL,), aircraft_profile="mc21",
+            segment=FlightSegment.ROLLOUT,
+        )
     selected = select_scenario(
         (FailureMode.NWS_FAIL,), aircraft_profile="mc21",
-        segment=FlightSegment.ROLLOUT,
+        segment=FlightSegment.ROLLOUT, include_draft=True,
     )
     assert selected.scenario_id == "nws_fail"
-    assert not selected.is_draft("mc21", FlightSegment.ROLLOUT)
+    assert selected.is_draft("mc21", FlightSegment.ROLLOUT)
 
 
 def test_b42_has_phase_specific_engine_and_reverse_failures():
@@ -158,18 +163,17 @@ def test_matrix_battery_follows_the_table_order():
 
 
 def test_sft_filters_by_profile_and_draft(capsys):
-    scenarios = build_scenarios(PretrainRunConfig(
-        variants_per_preset=1, aircraft_profile="mc21", backend="ics",
-    ))
-    assert scenarios
-    assert all(not scenario.is_draft("mc21", FlightSegment.ROLLOUT) for scenario in scenarios)
+    with pytest.raises(ValueError, match="SFT"):
+        build_scenarios(PretrainRunConfig(
+            variants_per_preset=1, aircraft_profile="mc21", backend="ics",
+        ))
     assert "пропущены неоткалиброванные" in capsys.readouterr().out
 
 
 def test_sft_named_presets_and_matrix_names(capsys):
     scenarios = build_scenarios(PretrainRunConfig(
         variants_per_preset=2, presets=("default", "nws_fail"),
-        aircraft_profile="mc21", backend="ics",
+        aircraft_profile="mc21", backend="ics", include_drafts=True,
     ))
     assert {scenario.scenario_id.split("-v", 1)[0] for scenario in scenarios} == {
         "default", "nws_fail",

@@ -223,7 +223,7 @@ def test_the_first_ground_tick_is_computed_by_the_ground_channels():
     assert controller._configured_segment is FlightSegment.ROLLOUT
     rollout = scenario.control_for("mc21", FlightSegment.ROLLOUT)
     assert controller.pids["pid_rev_l"].kp == rollout.rev_l["kp"]
-    assert controller.longitudinal_channel.last_diagnostics["value"] > 0.0
+    assert controller.longitudinal_channel.last_diagnostics.value > 0.0
     assert controller.state.cmd_elevator == 0.0
     assert controller.state.cmd_rev_l <= 0.0
 
@@ -405,7 +405,10 @@ def test_quality_fields_are_reported_on_the_rollout_too():
 
     out = bench.sent_outputs[-1]
     assert out.QualityLateralError == pytest.approx(6.0, abs=0.5)   # метры от оси
-    assert out.QualitySpeedError > 0.0                              # узлы от эталонной кривой
+    # Первый кадр bumpless: профиль начинается с фактической скорости касания.
+    assert out.QualitySpeedError == pytest.approx(0.0)
+    controller.control_step(DT)
+    assert bench.sent_outputs[-1].QualitySpeedError > 0.0
 
 
 def test_ground_frame_still_declares_only_the_ground_channels():

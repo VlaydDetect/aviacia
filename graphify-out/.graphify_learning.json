@@ -1,8 +1,24 @@
 {
-  "generated_at": "2026-08-14T22:38:55.603576+00:00",
+  "generated_at": "2026-08-15T18:49:02.568415+00:00",
   "nodes": {
+    "ismpu_control_channels_lateralchannel": {
+      "code_fingerprint": "b61a48974ef922cce2ca3f76748f56b83352ba2ef5f90b45dfab14e8277312e7",
+      "label": "LateralChannel",
+      "last": "2026-08-14T23:05:50.773201+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T23:05:50.773201+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
+        }
+      ],
+      "score": 0.981194594,
+      "source_file": "ismpu/control/channels.py",
+      "status": "tentative",
+      "uses": 1
+    },
     "ismpu_control_flight_approach_blocker": {
-      "code_fingerprint": "587fc72df3d60e4c5b85e5ddabcb941e64dc8f54b7b51844e56a593c42e77df6",
+      "code_fingerprint": "f6953a1a67f3e813076a3bacf4179445a1f303de4a749628aea9bee598d5e306",
       "label": "approach_blocker()",
       "last": "2026-08-14T22:36:00.679819+00:00",
       "provenance": [
@@ -12,13 +28,29 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.999953223,
+      "score": 0.980725005,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
     },
+    "ismpu_control_runway_tracker_runwaytracker": {
+      "code_fingerprint": "75cc0a97ba9de019f1d5ee74b139f07deea06a16f0ece8a3cdb1f172cda96dd9",
+      "label": "RunwayTracker",
+      "last": "2026-08-14T23:05:50.773201+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T23:05:50.773201+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
+        }
+      ],
+      "score": 0.981194594,
+      "source_file": "ismpu/control/runway_tracker.py",
+      "status": "tentative",
+      "uses": 1
+    },
     "ismpu_control_system_controllingsystem": {
-      "code_fingerprint": "b0dd830f76e0cba316c277ca917f83e85e2e0c30c798ca5163ed48be0f98f642",
+      "code_fingerprint": "5f58b2bacaa6a57fa4774c8c5edd6b9c369035c8d2f8e68ddde49abea074f370",
       "label": "ControllingSystem",
       "last": "2026-08-14T22:36:00.679819+00:00",
       "provenance": [
@@ -28,26 +60,47 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.999953223,
+      "score": 0.980725005,
       "source_file": "ismpu/control/system.py",
       "status": "tentative",
       "uses": 1
     },
-    "ismpu_envs_observation_observationbuilder": {
-      "code_fingerprint": "8f586844bee59f6480a28a597b22d505dbe1a5138f50a177e22b900f7ac58c45",
-      "label": "ObservationBuilder",
-      "last": "2026-08-14T22:36:00.679819+00:00",
+    "ismpu_envs_ics_sim_telemetry": {
+      "code_fingerprint": "418768bb125be2e14c6d4041449d26302a5448d61ea870c6bfcc7ed5b8b1a4d2",
+      "label": "Telemetry",
+      "last": "2026-08-14T23:05:50.773201+00:00",
       "provenance": [
+        {
+          "date": "2026-08-14T23:05:50.773201+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
+        }
+      ],
+      "score": 0.981194594,
+      "source_file": "ismpu/envs/ics_sim.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "ismpu_envs_observation_observationbuilder": {
+      "code_fingerprint": "556f2333aaabd0e1483a7691ecd5bdb8130001a1f9ddfaa5288b258d510afd28",
+      "label": "ObservationBuilder",
+      "last": "2026-08-14T23:05:50.773201+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T23:05:50.773201+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
+        },
         {
           "date": "2026-08-14T22:36:00.679819+00:00",
           "outcome": "useful",
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.999953223,
+      "score": 1.961919599,
       "source_file": "ismpu/envs/observation.py",
-      "status": "tentative",
-      "uses": 1
+      "status": "preferred",
+      "uses": 2
     },
     "ismpu_envs_weather_weatherstate": {
       "code_fingerprint": "0219dfad51a8a8c2b2e3fe30d0103c7b65cdcfb704b8040f2226cb7e31d98366",
@@ -60,8 +113,24 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.999953223,
+      "score": 0.980725005,
       "source_file": "ismpu/envs/weather.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "ismpu_runtime_run_recorder_runrecorder": {
+      "code_fingerprint": "d691837baa311e2568749dda98e37cb04e4b1ddf65b1ee92d77a70d274ec2812",
+      "label": "RunRecorder",
+      "last": "2026-08-14T23:05:50.773201+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-14T23:05:50.773201+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
+        }
+      ],
+      "score": 0.981194594,
+      "source_file": "ismpu/runtime/run_recorder.py",
       "status": "tentative",
       "uses": 1
     }

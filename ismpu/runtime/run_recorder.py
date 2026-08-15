@@ -40,6 +40,8 @@ BASE_TELEMETRY_FIELDS = (
     "cmd_aileron_deg",
     "cmd_throttle_norm",
     "cmd_rudder_norm",
+    "cmd_pedal_norm",
+    "cmd_tiller_norm",
     "cmd_brake_l",
     "cmd_brake_r",
     "cmd_reverse_l",
@@ -58,19 +60,50 @@ BASE_TELEMETRY_FIELDS = (
     "guidance_along_track_m",
     "guidance_source",
     "guidance_event",
+    "ground_reference_speed_ms",
+    "ground_speed_error_ms",
+    "ground_acceleration_ms2",
+    "ground_distance_m",
+    "ground_completion_rule",
+    "ground_completion_reached",
+    "ground_reverse_allowed",
+    "lateral_pid_requested",
+    "lateral_pid_limited",
+    "lateral_pid_saturated",
+    "allocator_steering_applied",
+    "allocator_failure_compensation",
+    "allocator_saturated",
     "ics_raw_json",
+)
+ACTUATOR_NAMES = (
+    "rudder", "pedal", "tiller", "brake_left", "brake_right", "reverse_left", "reverse_right",
+)
+ALLOCATOR_TELEMETRY_FIELDS = tuple(
+    f"allocator_{stage}_{name}"
+    for stage in ("base", "lateral", "requested", "limited")
+    for name in ACTUATOR_NAMES
+)
+ACTUATOR_FEEDBACK_FIELDS = (
+    "feedback_rudder_deg", "feedback_nose_wheel_deg",
+    "feedback_brake_left_mm", "feedback_brake_right_mm",
+    "feedback_throttle_left_deg", "feedback_throttle_right_deg",
+    "feedback_thrust_left", "feedback_thrust_right",
+    "feedback_longitudinal_accel_g", "feedback_lateral_accel_g",
+    "feedback_yaw_rate_rad_s",
 )
 ICS_INPUT_FIELDS = tuple(field.name for field in fields(ICSInputs))
 ICS_TELEMETRY_FIELDS = tuple(f"ics_{name}" for name in ICS_INPUT_FIELDS)
 PID_TELEMETRY_FIELDS = (
     "kp", "ki", "kd", "value", "setpoint", "error", "output",
-    "p", "i", "d", "saturated",
+    "p", "i", "d", "integral", "derivative", "unconstrained", "saturated",
 )
-TELEMETRY_FIELDS = BASE_TELEMETRY_FIELDS + ICS_TELEMETRY_FIELDS + tuple(
+TELEMETRY_FIELDS = (
+    BASE_TELEMETRY_FIELDS + ALLOCATOR_TELEMETRY_FIELDS + ACTUATOR_FEEDBACK_FIELDS
+    + ICS_TELEMETRY_FIELDS + tuple(
     f"pid_{name}_{field}"
     for name in PID_NAMES
     for field in PID_TELEMETRY_FIELDS
-)
+))
 
 
 def default_runs_root() -> Path:
@@ -106,12 +139,12 @@ def pid_operating_points(controller) -> dict:
     telemetry = controller.last_telemetry
     airborne = getattr(telemetry, "approach_inputs", None)
     lateral = getattr(getattr(controller, "lateral_channel", None),
-                      "last_diagnostics", {})
+                      "last_diagnostics", None)
     longitudinal = getattr(getattr(controller, "longitudinal_channel", None),
-                           "last_diagnostics", {})
+                           "last_diagnostics", None)
     speed_pair = {
-        "value": longitudinal.get("value"),
-        "setpoint": longitudinal.get("setpoint"),
+        "value": getattr(longitudinal, "value", None),
+        "setpoint": getattr(longitudinal, "setpoint", None),
     }
     return {
         "roll": {
@@ -127,8 +160,8 @@ def pid_operating_points(controller) -> dict:
             "setpoint": result.target_ias_kt,
         },
         "steer": {
-            "value": lateral.get("value"),
-            "setpoint": lateral.get("setpoint"),
+            "value": getattr(lateral, "value", None),
+            "setpoint": getattr(lateral, "setpoint", None),
         },
         "brake_l": dict(speed_pair),
         "brake_r": dict(speed_pair),
@@ -175,7 +208,11 @@ class RunRecorder:
             state = controller.state
             approach = getattr(telemetry, "approach_inputs", None)
             lateral = getattr(
-                getattr(controller, "lateral_channel", None), "last_diagnostics", {})
+                getattr(controller, "lateral_channel", None), "last_diagnostics", None)
+            longitudinal = getattr(
+                getattr(controller, "longitudinal_channel", None), "last_diagnostics", None)
+            allocation = getattr(
+                getattr(controller, "ground_allocator", None), "last_diagnostics", None)
             ics_inputs = getattr(telemetry, "ics_inputs", None)
             row = {
                 "sequence": self._sequence,
@@ -198,7 +235,9 @@ class RunRecorder:
                 "cmd_elevator_g": state.cmd_elevator,
                 "cmd_aileron_deg": state.cmd_aileron,
                 "cmd_throttle_norm": state.cmd_throttle_norm,
-                "cmd_rudder_norm": state.rudder_cmd,
+                "cmd_rudder_norm": state.cmd_rudder,
+                "cmd_pedal_norm": state.cmd_pedal,
+                "cmd_tiller_norm": state.cmd_tiller,
                 "cmd_brake_l": state.cmd_brake_l,
                 "cmd_brake_r": state.cmd_brake_r,
                 "cmd_reverse_l": state.cmd_rev_l,
@@ -210,19 +249,58 @@ class RunRecorder:
                 "gs_deviation": getattr(approach, "GSDeviation", None),
                 "magnetic_track_deg": telemetry.track_magnetic_deg,
                 "vertical_speed_fpm": getattr(approach, "VerticalSpeed", None),
-                "guidance_xte_m": lateral.get("xte"),
-                "guidance_course_error_deg": lateral.get("course_error"),
-                "guidance_heading_error_deg": lateral.get("heading_error"),
-                "guidance_error_deg": lateral.get("guidance_error"),
-                "guidance_along_track_m": lateral.get("along_track"),
-                "guidance_source": lateral.get("source"),
-                "guidance_event": lateral.get("event"),
+                "guidance_xte_m": getattr(lateral, "xte", None),
+                "guidance_course_error_deg": getattr(lateral, "course_error", None),
+                "guidance_heading_error_deg": getattr(lateral, "heading_error", None),
+                "guidance_error_deg": getattr(lateral, "guidance_error", None),
+                "guidance_along_track_m": getattr(lateral, "along_track", None),
+                "guidance_source": getattr(lateral, "source", None),
+                "guidance_event": getattr(lateral, "event", None),
+                "ground_reference_speed_ms": getattr(longitudinal, "setpoint", None),
+                "ground_speed_error_ms": getattr(longitudinal, "error", None),
+                "ground_acceleration_ms2": getattr(
+                    longitudinal, "acceleration_ms2", None),
+                "ground_distance_m": getattr(longitudinal, "distance_m", None),
+                "ground_completion_rule": getattr(
+                    getattr(longitudinal, "completion_rule", None), "value", None),
+                "ground_completion_reached": int(bool(getattr(
+                    longitudinal, "completion_reached", False))),
+                "ground_reverse_allowed": int(bool(getattr(
+                    longitudinal, "reverse_allowed", False))),
+                "lateral_pid_requested": getattr(lateral, "steering_requested", None),
+                "lateral_pid_limited": getattr(lateral, "steering_limited", None),
+                "lateral_pid_saturated": int(bool(getattr(lateral, "saturated", False))),
+                "allocator_steering_applied": getattr(
+                    allocation, "steering_applied", None),
+                "allocator_failure_compensation": getattr(
+                    allocation, "failure_compensation", None),
+                "allocator_saturated": (
+                    ";".join(allocation.saturated) if allocation is not None else None),
                 # Один JSON-столбец сохраняет имена будущих полей без изменения CSV-схемы
                 # посреди прогона и без превращения внешних имён в заголовки CSV.
                 "ics_raw_json": (
                     json.dumps(ics_inputs.raw_fields, ensure_ascii=False, sort_keys=True)
                     if ics_inputs is not None else None),
             }
+            if allocation is not None:
+                for stage in ("base", "lateral", "requested", "limited"):
+                    vector = getattr(allocation, stage)
+                    for name in ACTUATOR_NAMES:
+                        row[f"allocator_{stage}_{name}"] = getattr(vector, name)
+                feedback = allocation.feedback
+                row.update({
+                    "feedback_rudder_deg": feedback.rudder_deg,
+                    "feedback_nose_wheel_deg": feedback.nose_wheel_deg,
+                    "feedback_brake_left_mm": feedback.brake_left_mm,
+                    "feedback_brake_right_mm": feedback.brake_right_mm,
+                    "feedback_throttle_left_deg": feedback.throttle_left_deg,
+                    "feedback_throttle_right_deg": feedback.throttle_right_deg,
+                    "feedback_thrust_left": feedback.thrust_left,
+                    "feedback_thrust_right": feedback.thrust_right,
+                    "feedback_longitudinal_accel_g": feedback.longitudinal_accel_g,
+                    "feedback_lateral_accel_g": feedback.lateral_accel_g,
+                    "feedback_yaw_rate_rad_s": feedback.yaw_rate_rad_s,
+                })
             for name in ICS_INPUT_FIELDS:
                 row[f"ics_{name}"] = (
                     _jsonable(getattr(ics_inputs, name)) if ics_inputs is not None else None)
@@ -241,6 +319,9 @@ class RunRecorder:
                         prefix + "p": pid.last_p_term,
                         prefix + "i": pid.last_i_term,
                         prefix + "d": pid.last_d_term,
+                        prefix + "integral": pid.integral,
+                        prefix + "derivative": pid.filtered_derivative,
+                        prefix + "unconstrained": pid.last_unconstrained,
                         prefix + "saturated": int(
                             pid.last_unconstrained < pid.min_out
                             or pid.last_unconstrained > pid.max_out),

@@ -133,7 +133,8 @@ class ObservationBuilder:
         feats["brake_r"] = clip_unit(st.cmd_brake_r)
         feats["reverse_l"] = clip_unit(-st.cmd_rev_l)   # реверс [-1,0] → магнитуда [0,1]
         feats["reverse_r"] = clip_unit(-st.cmd_rev_r)
-        feats["rudder"] = clip_unit(st.rudder_cmd)
+        feats["rudder"] = clip_unit(max(
+            (st.cmd_rudder, st.cmd_pedal, st.cmd_tiller), key=abs))
 
         # --- PID × 5 (динамические признаки; абсолютные gain'ы в лог-норме) ---
         for reg in REGULATOR_ORDER:

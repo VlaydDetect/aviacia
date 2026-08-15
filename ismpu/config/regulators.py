@@ -3,7 +3,7 @@
 Нейтральный низкоуровневый модуль, чтобы `shield` и `gain_space` могли ссылаться на него без
 циклического импорта.
 
-`REGULATOR_ORDER` = ключи словаря `pids` в `ControllingSystem` (см. `system.setup`/`clamp_all`).
+`REGULATOR_ORDER` = ключи словаря `pids` в `ControllingSystem` (см. `system.setup`).
 Действие NPGS = `[gains×15, w_lon, w_lat]` (15 = 5 регуляторов × (kp, ki, kd)); совпадает с
 порядком слотов gain-пространства (`agent.gain_space`).
 
@@ -88,7 +88,8 @@ REGULATOR_SPECS: tuple[RegulatorSpec, ...] = (
 
 FORBIDDEN_DIRECT_OUTPUTS = frozenset({
     # пробег
-    "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r", "rudder_cmd",
+    "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r",
+    "cmd_rudder", "cmd_pedal", "cmd_tiller", "rudder_cmd",
     # воздушный участок (заход и выравнивание)
     "cmd_elevator", "cmd_aileron",
     "cmd_throttle_l_rate", "cmd_throttle_r_rate", "cmd_throttle_norm",

@@ -163,7 +163,7 @@ def test_controls_state_has_real_dataclass_fields():
     """
     from dataclasses import fields
     names = [f.name for f in fields(ControlsState)]
-    assert names == ["break_control", "rudder_cmd",
+    assert names == ["break_control", "cmd_rudder", "cmd_pedal", "cmd_tiller",
                      "cmd_brake_l", "cmd_brake_r", "cmd_rev_l", "cmd_rev_r",
                      # воздушный участок
                      "cmd_elevator", "cmd_aileron",

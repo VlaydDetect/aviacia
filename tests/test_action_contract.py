@@ -121,13 +121,15 @@ def _snapshot(ctrl) -> dict:
             snap[f"pids.{name}.{field}"] = getattr(pid, field)
 
     lat, lon = ctrl.lateral_channel, ctrl.longitudinal_channel
-    snap["lateral.steering_brake_gain"] = lat.steering_brake_gain
-    snap["lateral.steering_rev_gain"] = lat.steering_rev_gain
+    snap["allocator.steering_brake_gain"] = ctrl.ground_allocator.steering_brake_gain
+    snap["allocator.steering_rev_gain"] = ctrl.ground_allocator.steering_rev_gain
     snap["lateral.w_lat"] = lat.w_lat
     snap["longitudinal.w_lon"] = lon.w_lon
-    for field in ("v_target_ms", "v_touchdown_ms", "landing_distance_m", "mode"):
-        if hasattr(lon.trajectory, field):
-            snap[f"trajectory.{field}"] = getattr(lon.trajectory, field)
+    for field in (
+        "v_target_ms", "v_start_ms", "distance", "law", "completion_rule",
+        "two_b_squared", "a_req",
+    ):
+        snap[f"trajectory.{field}"] = getattr(lon.trajectory, field)
     return snap
 
 
@@ -135,7 +137,7 @@ def test_applying_an_action_moves_nothing_but_gains():
     """Действие сети меняет только kp/ki/kd и веса каналов — всё остальное неприкосновенно.
 
     Это структурное свойство `apply_gains_to_pids`, и именно оно защищает пределы выхода,
-    anti-windup, фильтры и коэффициенты дифференциального микса: они принадлежат пресету
+    anti-windup, фильтры и коэффициенты allocator-а: они принадлежат пресету
     (контуру безопасности), а не обучаемому слою.
     """
     ctrl = _controller()

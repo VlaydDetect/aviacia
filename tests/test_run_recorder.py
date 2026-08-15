@@ -57,6 +57,9 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert len(rows) == 1
     assert rows[0]["segment"] == "rollout"
     assert "pid_pitch_p" in rows[0]
+    assert "pid_brake_l_integral" in rows[0]
+    assert "pid_reverse_r_derivative" in rows[0]
+    assert "pid_steer_unconstrained" in rows[0]
     assert "pid_reverse_r_saturated" in rows[0]
 
     snapshot = json.loads(exported.read_text(encoding="utf-8"))
@@ -129,6 +132,20 @@ def test_recorder_keeps_all_known_ics_fields_and_unknown_raw_fields(tmp_path):
         RunwayHeadingValid=1,
         RunwayHeading=64.0,
         LateralDeviation=2.5,
+        RudderAngle=2.0,
+        NoseWheelAngle=3.0,
+        LeftBrakePedal=12.0,
+        RightBrakePedal=13.0,
+        LeftThrottleAngle=-4.0,
+        RightThrottleAngle=-5.0,
+        EngLeftThrust=101.0,
+        EngRigntThrust=102.0,
+        BodyLongAccelValid=1,
+        BodyLongAccel=-0.2,
+        BodyLatAccelValid=1,
+        BodyLatAccel=0.03,
+        BodyYawRateValid=1,
+        BodyYawRate=1.5,
         SomeFutureSignal={"value": 42},
     ))
     recorder = RunRecorder(
@@ -149,4 +166,14 @@ def test_recorder_keeps_all_known_ics_fields_and_unknown_raw_fields(tmp_path):
     assert len(fields(ICSInputs)) == 99
     assert all(f"ics_{field.name}" in row for field in fields(ICSInputs))
     assert row["ics_RunwayHeading"] == "64.0"
+    assert row["ground_reference_speed_ms"]
+    assert row["lateral_pid_requested"]
+    assert row["allocator_limited_rudder"]
+    assert row["allocator_requested_pedal"]
+    assert row["feedback_rudder_deg"] == "2.0"
+    assert row["feedback_nose_wheel_deg"] == "3.0"
+    assert row["feedback_brake_left_mm"] == "12.0"
+    assert row["feedback_throttle_right_deg"] == "-5.0"
+    assert row["feedback_thrust_left"] == "101.0"
+    assert float(row["feedback_yaw_rate_rad_s"]) == pytest.approx(0.0261799388)
     assert json.loads(row["ics_raw_json"]) == {"SomeFutureSignal": {"value": 42}}

@@ -138,7 +138,7 @@ def test_control_step_emits_five_bounded_commands():
 
 
 def test_nws_fail_preset_injects_failure():
-    """NWS_FAIL активирует отказ руления: steering_eff→0, руль обнуляется на выходе."""
+    """NWS_FAIL отключает стойку/педаль, но оставляет руль и дифференциальные органы."""
     from ismpu.config.scenarios import NWS_FAIL
 
     sim, conn = static_sim(groundspeed_ms=50.0)
@@ -147,8 +147,11 @@ def test_nws_fail_preset_injects_failure():
 
     assert controller.failures.state.steering_eff == 0.0  # отказ активирован
     controller.control_step(0.05, telemetry(50.0))
-    # apply_failures обнулил руль перед отправкой (удержание — дифф. торможением/тягой)
-    assert decode_outputs(conn.sent_outputs[-1])[4] == pytest.approx(0.0)
+    out = conn.sent_outputs[-1]
+    assert out.RudderPedalCmd == pytest.approx(0.0)
+    assert out.NoseWheelTillerCmd == pytest.approx(0.0)
+    assert math.isfinite(decode_outputs(out)[4])
+    assert out.BrakeLeftCmd != pytest.approx(out.BrakeRightCmd)
 
 
 def test_default_preset_leaves_all_actuators_healthy():

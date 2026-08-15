@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from ismpu.control.trajectory import VelocityLaw
+from ismpu.control.trajectory import CompletionRule, VelocityLaw
 from ismpu.control.failures import FailureMode
 from ismpu.config.aircraft_profiles import A330_300, MC21, AircraftProfile
 from ismpu.config.approach import (
@@ -20,6 +20,7 @@ from ismpu.config.approach import (
 )
 from ismpu.config.constants import INITIAL_SPEED_KTS
 from ismpu.config.runway import RWY_HEADING_TRUE
+from ismpu.config.runway_profiles import UUEE_06R
 from ismpu.config.segments import FlightSegment
 from ismpu.envs.weather import WeatherState, WEATHER_PRESETS
 from ismpu.envs.weather import decompose_wind
@@ -48,6 +49,13 @@ class GroundControlConfig:
     steering_brake_gain: float = 0.4
     steering_rev_gain: float = 0.0
     law: VelocityLaw = VelocityLaw.GAUSS_BELL
+    target_speed_kts: float = 7.5
+    braking_distance_m: float = UUEE_06R.length_m
+    completion_rule: CompletionRule = CompletionRule.HANDOVER_TAXI
+    steering_rate_per_s: float = 1.0
+    brake_rate_per_s: float = 1.0
+    reverse_rate_per_s: float = 1.0
+    failure_yaw_compensation_gain: float = 1.0
 
     def build_pids(self) -> dict[str, "PIDController"]:
         from ismpu.factories.control import build_pids
@@ -76,6 +84,13 @@ class _GroundPresetSpec:
     steering_brake_gain: float = 0.4
     steering_rev_gain: float = 0.0
     law: VelocityLaw = VelocityLaw.GAUSS_BELL
+    target_speed_kts: float = 7.5
+    braking_distance_m: float = UUEE_06R.length_m
+    completion_rule: CompletionRule = CompletionRule.HANDOVER_TAXI
+    steering_rate_per_s: float = 1.0
+    brake_rate_per_s: float = 1.0
+    reverse_rate_per_s: float = 1.0
+    failure_yaw_compensation_gain: float = 1.0
     draft: bool = False  # True = черновой наземный пресет, требует калибровки
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
@@ -87,13 +102,20 @@ class _GroundPresetSpec:
             lookahead_min=self.lookahead_min, lookahead_gain=self.lookahead_gain,
             xte_gain=self.xte_gain, steering_brake_gain=self.steering_brake_gain,
             steering_rev_gain=self.steering_rev_gain, law=self.law,
+            target_speed_kts=self.target_speed_kts,
+            braking_distance_m=self.braking_distance_m,
+            completion_rule=self.completion_rule,
+            steering_rate_per_s=self.steering_rate_per_s,
+            brake_rate_per_s=self.brake_rate_per_s,
+            reverse_rate_per_s=self.reverse_rate_per_s,
+            failure_yaw_compensation_gain=self.failure_yaw_compensation_gain,
         )
 
 
 _DEFAULT_SPEC = _GroundPresetSpec(
     name="default",
     failure=FailureMode.NONE,
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, integral_decay=0.5, name="Runway_Center"),
+    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -104,18 +126,18 @@ _DEFAULT_SPEC = _GroundPresetSpec(
 _NWS_FAIL_SPEC = _GroundPresetSpec(
     name="nws_fail",
     failure=FailureMode.NWS_FAIL,
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, integral_decay=0.5, name="Runway_Center"),
-    brake_l=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, integral_decay=0.5, der_filter_tf=0.1, anti_windup=5, name="Brake_L"),
-    brake_r=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, integral_decay=0.5, der_filter_tf=0.1, anti_windup=5, name="Brake_R"),
-    rev_l=dict(kp=0.12, ki=0.0065, kd=0.1, min_out=-1.0, max_out=0.0, integral_decay=0.7, name="Rev_L"),
-    rev_r=dict(kp=0.12, ki=0.0065, kd=0.1, min_out=-1.0, max_out=0.0, integral_decay=0.7, name="Rev_R"),
+    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
+    brake_l=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, der_filter_tf=0.1, anti_windup=5, name="Brake_L"),
+    brake_r=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, der_filter_tf=0.1, anti_windup=5, name="Brake_R"),
+    rev_l=dict(kp=0.12, ki=0.0065, kd=0.1, min_out=-1.0, max_out=0.0, name="Rev_L"),
+    rev_r=dict(kp=0.12, ki=0.0065, kd=0.1, min_out=-1.0, max_out=0.0, name="Rev_R"),
     lookahead_min=10.0, lookahead_gain=1.2, xte_gain=0.8, steering_brake_gain=0.75, steering_rev_gain=0.5,
 )
 
 _LEFT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     name="left_reverse_fail",
     failure=FailureMode.REVERSE_LEFT_FAIL,
-    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, integral_decay=0.15, name="Runway_Center"),
+    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -126,7 +148,7 @@ _LEFT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
 _RIGHT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     name="right_reverse_fail",
     failure=FailureMode.REVERSE_RIGHT_FAIL,
-    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, integral_decay=0.15, name="Runway_Center"),
+    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -144,7 +166,7 @@ _RIGHT_WIND_SPEC = _GroundPresetSpec(
     # rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
     # rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
     # lookahead_min=5.0, lookahead_gain=1.4, xte_gain=1.7, steering_brake_gain=0.3, steering_rev_gain=0.5
-    runway_center=dict(kp=0.001, ki=0.0073, kd=0.09, min_out=-1, max_out=1, anti_windup=2.13, integral_decay=0.63, name="Runway_Center"),
+    runway_center=dict(kp=0.001, ki=0.0073, kd=0.09, min_out=-1, max_out=1, anti_windup=2.13, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -156,7 +178,7 @@ _FWD_WIND_SPEC = _GroundPresetSpec(
     name="fwd_wind",
     failure=FailureMode.NONE,
     weather=WeatherState.from_crosswind(0.0, 10.0),
-    runway_center=dict(kp=0.0015, ki=0.0005, kd=0.065, min_out=-1, max_out=1, anti_windup=2.5, integral_decay=0.5, name="Runway_Center"),
+    runway_center=dict(kp=0.0015, ki=0.0005, kd=0.065, min_out=-1, max_out=1, anti_windup=2.5, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -168,7 +190,7 @@ _WET_RWY_SPEC = _GroundPresetSpec(
     name="wet_rwy",
     failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["wet"],
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, integral_decay=0.5, name="Runway_Center"),
+    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -180,7 +202,7 @@ _PUDDLY_RWY_SPEC = _GroundPresetSpec(
     name="puddly_rwy",
     failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["puddly"],
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, integral_decay=0.5, name="Runway_Center"),
+    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -192,7 +214,7 @@ _ICY_RWY_SPEC = _GroundPresetSpec(
     name="icy_rwy",
     failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["icy"],
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, integral_decay=0.5, name="Runway_Center"),
+    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
@@ -227,6 +249,10 @@ def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
         runway_center=dict(base.runway_center), brake_l=dict(base.brake_l),
         brake_r=dict(base.brake_r), rev_l=dict(base.rev_l), rev_r=dict(base.rev_r),
     )
+    if code == "Б.1.2":
+        spec.update(target_speed_kts=15.0, completion_rule=CompletionRule.OPERATOR)
+    else:
+        spec.update(target_speed_kts=0.0, completion_rule=CompletionRule.FULL_STOP)
     spec.update(overrides)
     return replace(base, **spec)
 
@@ -343,7 +369,8 @@ class ConditionMatch:
 
     @property
     def exact(self) -> bool:
-        return self.failures_match and self.weather_distance <= 1e-3
+        return self.failures_match
+        # return self.failures_match and self.weather_distance <= 1e-3
 
 
 @dataclass(frozen=True)
@@ -536,7 +563,9 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
     rollout_ground = own_ground if FlightSegment.ROLLOUT in affected else default_ground
     taxi_ground = own_ground if FlightSegment.TAXI in affected else _copy_ground(rollout_ground)
 
-    mc21_drafts = frozenset(affected if spec.draft else ())
+    # Численность PID и allocator изменены на этапе 2: все прежние наземные gains требуют
+    # повторной настройки, даже если до рефакторинга считались рабочими.
+    mc21_drafts = frozenset({FlightSegment.ROLLOUT, FlightSegment.TAXI})
     a330_drafts = mc21_drafts | {FlightSegment.APPROACH}
     controls = {
         MC21.name: AircraftControlSet(
@@ -854,6 +883,7 @@ def select_scenario(
             f"и участка {segment.value!r}")
     return min(pool, key=lambda scenario: (
         scenario_distance(scenario, failures, weather, segment=segment),
+        bool(scenario.matrix_codes),
         scenario.scenario_id != "default",
         scenario.scenario_id,
     ))

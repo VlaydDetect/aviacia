@@ -32,6 +32,7 @@ from ismpu.utils.converts import Converts
 from ismpu.control.channels import ControlsState
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
+from ismpu.control.trajectory import CompletionRule
 from ismpu.envs.sim_interface import SimInterface
 
 
@@ -200,7 +201,11 @@ class RolloutEnv:
         # `reset` всё равно сбрасывает автомат и выводит режим заново из телеметрии стенда, а
         # вставка лишних отправок внутрь `step` сломала бы учёт «один шаг — один кадр», на
         # котором держатся парити классики, джерк и эпизодный objective.
-        if break_control:
+        if (
+            break_control
+            and self.controller.longitudinal_channel.trajectory.completion_rule
+            is CompletionRule.HANDOVER_TAXI
+        ):
             self.sim.request_taxi()
 
         off_runway = guidance is not None and abs(guidance["xte"]) > OFF_RUNWAY_XTE_M
