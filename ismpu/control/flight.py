@@ -17,6 +17,7 @@ guidance и allocator. Здесь описано, **какой участок с
 
 from ismpu.config.ics import (
     ENGAGE_MIN_RADIO_ALTITUDE_FT, TERMINAL_RADIO_ALTITUDE_FT, FlightPhase,
+    AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES,
 )
 from ismpu.config.segments import FlightSegment
 from ismpu.config.requirements import (
@@ -88,6 +89,10 @@ def approach_blocker(telemetry: "Telemetry | None") -> "str | None":
     """
     if telemetry is None or not telemetry.airborne_data_available:
         return "нет воздушных сигналов backend"
+    phase = telemetry.flight_phase
+    if phase is not None and int(phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES:
+        return (f"FlightPhase={FlightPhase(int(phase)).name} несовместим с заходом: "
+                "стенд сохранил взлётную/наборную фазу")
     invalid = telemetry.invalid_approach_signals
     if invalid:
         return "невалидны обязательные воздушные сигналы: " + ", ".join(invalid)

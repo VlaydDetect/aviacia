@@ -60,6 +60,7 @@ from ismpu.config.ics import (
     ENGAGE_MAX_GROUNDSPEED_KTS, ENGAGE_READY_DWELL_S, ENGAGE_MIN_READY_FRAMES,
     ENGAGE_AIR_READY_DWELL_S, ENGAGE_MIN_RADIO_ALTITUDE_FT, TERMINAL_RADIO_ALTITUDE_FT,
     ROLLOUT_FLIGHT_PHASES, AIRBORNE_CONTROL_MASK,
+    AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES,
 )
 from ismpu.io.ics_connector import ControlModeState
 
@@ -331,10 +332,15 @@ class IcsEngagement:
         Радиовысота обязана быть **объявлена** — отсутствующая (`None`) высота не «ноль», а
         «стенд не сообщил», и включаться по ней нельзя.
         """
+        phase_blocks_approach = (
+            inputs.flight_phase is not None
+            and int(inputs.flight_phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES
+        )
         if (inputs.agent_is_active
                 and not inputs.all_gear_on_ground
                 and inputs.radio_altitude_ft is not None
-                and inputs.radio_altitude_ft > self.min_radio_altitude_ft):
+                and inputs.radio_altitude_ft > self.min_radio_altitude_ft
+                and not phase_blocks_approach):
             return ControlModeState.Approach
         if self._forced_arm_target is ControlModeState.Taxi and inputs.all_gear_on_ground:
             return ControlModeState.Taxi
@@ -461,6 +467,10 @@ class IcsEngagement:
             if ra is None:
                 return ("обжаты не все стойки, а радиовысота стендом не объявлена — "
                         "включаться не по чему: ни наземное условие, ни воздушное не проверить")
+            if (inputs.flight_phase is not None
+                    and int(inputs.flight_phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES):
+                return (f"FlightPhase={int(inputs.flight_phase)} означает взлёт/набор; "
+                        "воздушный startup захода запрещён")
             if ra > self.min_radio_altitude_ft and not inputs.agent_is_active:
                 return "воздушный startup ждёт AgentIsActive=1 до начала выдержки"
             return (f"обжаты не все стойки, радиовысота {ra:.0f} футов ≤ "

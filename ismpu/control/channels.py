@@ -270,8 +270,25 @@ class LateralChannel:
         self.last_diagnostics: LateralDiagnostics | None = None
         self.last_guidance: GuidanceState | None = None
         self._last_guidance_telemetry: "Telemetry | None" = None
-        self._previous_track_deg: float | None = None
-        self._unwrapped_track_deg: float | None = None
+        self._previous_course_deg: float | None = None
+        self._unwrapped_course_deg: float | None = None
+
+    @staticmethod
+    def _measured_course(
+        track_deg: float | None,
+        heading_deg: float | None,
+        groundspeed_ms: float,
+    ) -> float | None:
+        """Путевой угол на пробеге, курс фюзеляжа на малой скорости.
+
+        При стремящейся к нулю скорости направление вектора скорости физически не определено.
+        Стенд при этом оставляет validity ненулевым, но выдаёт ``TrkAngleMagnetic=0``. Ниже
+        границы 30 kt из ТЗ поэтому ведём прямой участок по устойчивому курсу фюзеляжа.
+        """
+        if (groundspeed_ms * Converts.MS_TO_KTS < HEADING_HOLD_UNTIL_KTS
+                and heading_deg is not None):
+            return heading_deg
+        return track_deg
 
     def _guidance(
         self,
@@ -294,14 +311,19 @@ class LateralChannel:
         if runway_heading is None:
             runway_heading = telemetry.runway_heading_deg
         lateral_deviation = telemetry.lateral_deviation_m
+        magnetic_course = self._measured_course(
+            telemetry.track_magnetic_deg,
+            telemetry.heading_magnetic_deg,
+            groundspeed_ms,
+        )
         if None not in (
             runway_heading,
             lateral_deviation,
-            telemetry.track_magnetic_deg,
+            magnetic_course,
             telemetry.heading_magnetic_deg,
         ):
             result = self.tracker.guidance_from_deviation(
-                telemetry.track_magnetic_deg,
+                magnetic_course,
                 runway_heading,
                 lateral_deviation,
                 groundspeed_ms,
@@ -314,7 +336,11 @@ class LateralChannel:
 
         # В синтетических backend-независимых кадрах явно заданный true heading одновременно
         # служит true track. Для ICS это запрещено: там есть отдельный validity-флаг track.
-        true_track = telemetry.track_true_deg
+        true_track = self._measured_course(
+            telemetry.track_true_deg,
+            telemetry.heading_true_deg,
+            groundspeed_ms,
+        )
         if true_track is None and telemetry.ics_inputs is None:
             true_track = telemetry.heading_true_deg
         profile = telemetry.runway_profile
@@ -376,17 +402,23 @@ class LateralChannel:
             return self._guidance_unavailable()
 
         error = guidance.guidance_error_deg
-        measured_track = telemetry.track_magnetic_deg
+        measured_course = self._measured_course(
+            telemetry.track_magnetic_deg,
+            telemetry.heading_magnetic_deg,
+            groundspeed_ms,
+        )
         if guidance.source == "geodetic":
-            measured_track = (
-                telemetry.track_true_deg
-                if telemetry.track_true_deg is not None else telemetry.heading_true_deg)
-        measurement = self._unwrap_track(measured_track)
+            measured_course = self._measured_course(
+                telemetry.track_true_deg,
+                telemetry.heading_true_deg,
+                groundspeed_ms,
+            )
+        measurement = self._unwrap_course(measured_course)
         limited = self.pid.compute(error, dt, measurement=measurement)
         requested = self.pid.last_unconstrained
         result = LateralDiagnostics(
             valid=True,
-            value=measured_track,
+            value=measured_course,
             setpoint=guidance.desired_heading_deg,
             error=error,
             xte=guidance.xte,
@@ -405,13 +437,13 @@ class LateralChannel:
         logger.debug("ground lateral: %s", result)
         return result
 
-    def _unwrap_track(self, track_deg: float | None) -> float:
-        if track_deg is None:
+    def _unwrap_course(self, course_deg: float | None) -> float:
+        if course_deg is None:
             return 0.0
-        if self._previous_track_deg is None or self._unwrapped_track_deg is None:
-            self._unwrapped_track_deg = track_deg
+        if self._previous_course_deg is None or self._unwrapped_course_deg is None:
+            self._unwrapped_course_deg = course_deg
         else:
-            delta = (track_deg - self._previous_track_deg + 180.0) % 360.0 - 180.0
-            self._unwrapped_track_deg += delta
-        self._previous_track_deg = track_deg
-        return self._unwrapped_track_deg
+            delta = (course_deg - self._previous_course_deg + 180.0) % 360.0 - 180.0
+            self._unwrapped_course_deg += delta
+        self._previous_course_deg = course_deg
+        return self._unwrapped_course_deg

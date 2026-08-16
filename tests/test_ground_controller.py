@@ -27,18 +27,34 @@ from tests.fakes import airborne_inputs, engaged_inputs, telemetry
 
 def _direct_ground_frame(
     *, speed_kts: float, xte_m: float = 0.0, fault_nws: bool = False,
+    heading_deg: float = 64.0, track_deg: float = 64.0,
 ) -> Telemetry:
     return Telemetry.from_ics(engaged_inputs(
         GroundSpeed=speed_kts,
         MagneticHeadingValid=1,
-        MagneticHeading=64.0,
+        MagneticHeading=heading_deg,
         TrkAngleMagneticValid=1,
-        TrkAngleMagnetic=64.0,
+        TrkAngleMagnetic=track_deg,
         RunwayHeadingValid=1,
         RunwayHeading=64.0,
         LateralDeviation=xte_m,
         FaultNWS=int(fault_nws),
     ))
+
+
+def test_low_speed_guidance_uses_heading_when_the_bench_track_collapses_to_zero():
+    """Регресс реального прогона: valid track=0 при 20 kt не является поворотом на 64°."""
+    controller = ControllingSystem()
+    SCENARIOS["default"].apply_control(controller, "mc21")
+
+    frame = _direct_ground_frame(speed_kts=20.0, heading_deg=64.0, track_deg=0.0)
+    controller.control_step(DT, frame, send=False)
+
+    lateral = controller.lateral_channel.last_diagnostics
+    assert lateral.value == pytest.approx(64.0)
+    assert lateral.course_error == pytest.approx(0.0)
+    assert lateral.steering_limited == pytest.approx(0.0)
+    assert controller.state.cmd_brake_l == pytest.approx(controller.state.cmd_brake_r)
 
 
 def test_ground_pids_use_working_ics_numerics_and_explicit_integrator_limits():

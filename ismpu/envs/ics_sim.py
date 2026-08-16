@@ -33,7 +33,8 @@ from ismpu.config.ics import (
     REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
     AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK, FlightPhase,
     FLARE_MODE_RADIO_ALTITUDE_FT, FLARE_MODE_END_RADIO_ALTITUDE_FT,
-    ENGAGE_AIR_NEUTRAL_SETTLE_S,
+    ENGAGE_AIR_NEUTRAL_SETTLE_S, ENGAGE_MIN_RADIO_ALTITUDE_FT,
+    AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES,
 )
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
@@ -661,7 +662,24 @@ class ICSSim(SimInterface):
             airborne_startup = self.engagement.airborne_stimulus
             sent = self.send_controls(neutral, neutral=airborne_startup)
             sent_output = self.last_outputs
-            self.read_telemetry()
+            telemetry = self.read_telemetry()
+            phase = telemetry.flight_phase
+            if (
+                telemetry.valid
+                and not telemetry.main_gear_contact
+                and telemetry.radio_altitude_ft is not None
+                and telemetry.radio_altitude_ft > ENGAGE_MIN_RADIO_ALTITUDE_FT
+                and phase is not None
+                and int(phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES
+            ):
+                # Реальный сбой 2026-08-16: reset вернул координаты захода, но оставил
+                # INIT_TAKEOFF/INIT_CLIMB и РУД на 45°. Останавливаемся до фронта Approach,
+                # иначе handshake передаст PID самолёт, уже разогнанный взлётным автоматом.
+                raise RuntimeError(
+                    "[ICS] воздушное включение запрещено: "
+                    f"FlightPhase={FlightPhase(int(phase)).name}; "
+                    "сбросьте взлётную/наборную фазу и положение РУД на стенде"
+                )
             sent_airborne_target = (
                 sent
                 and sent_output is not None

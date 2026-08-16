@@ -288,6 +288,21 @@ class FlightPhase(IntEnum):
     GATE_ARRIVAL = 14
 
 
+AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES = frozenset({
+    FlightPhase.INIT_TAKEOFF_BELOW_V1,
+    FlightPhase.INIT_TAKEOFF_BEFORE_LIFT_OFF,
+    FlightPhase.INIT_CLIMB,
+    FlightPhase.CLIMB,
+})
+"""Фазы стенда, несовместимые с началом захода.
+
+Радиовысоты и выпущенных закрылков недостаточно: после неполного reset ICS может вернуть ВС в
+точку захода, сохранив взлётную фазу и взлётное положение РУД. В таком состоянии воздушный
+handshake лишь передаст нам уже разгоняющийся и набирающий самолёт. Неизвестная фаза и наблюдавшиеся
+на исправном заходе служебные ``TAXI_OUT``/``LAND_FLARE`` здесь намеренно не запрещены.
+"""
+
+
 ROLLOUT_FLIGHT_PHASES = frozenset({FlightPhase.LAND_RUN})
 """Фазы, по которым мы заключаем, что пробег уже идёт (и режим мог быть включён извне).
 

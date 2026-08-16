@@ -302,6 +302,18 @@ def test_approach_is_refused_in_a_non_landing_flap_configuration():
         ) is FlightSegment.APPROACH
 
 
+def test_approach_is_refused_when_the_bench_retains_a_takeoff_phase():
+    """Координаты захода не делают безопасным кадр с оставшимся INIT_CLIMB и взлётным РУД."""
+    stale_takeoff = Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=1200.0,
+        FlightPhase=int(FlightPhase.INIT_CLIMB),
+        LeftThrottleAngle=45.0,
+        RightThrottleAngle=45.0,
+    ))
+    with pytest.raises(ApproachRefused, match="INIT_CLIMB"):
+        ControllingSystem().begin_flight(stale_takeoff)
+
+
 def test_approach_never_uses_a_value_with_its_validity_flag_cleared():
     invalid = Telemetry.from_ics(airborne_inputs(
         radio_altitude_ft=1200.0,
@@ -591,6 +603,31 @@ def test_the_airborne_handshake_is_actually_transmitted_before_approach():
         and o.ModeSpeed == 0 and o.ModeThrust == 0
         for o in effective
     )
+
+
+def test_airborne_handshake_stops_before_approach_if_takeoff_phase_appears(monkeypatch):
+    """Не ждать десять секунд и не принимать управление уже набирающим самолётом."""
+    bench = HandshakeBench(
+        airborne_inputs(
+            radio_altitude_ft=900.0,
+            AgentIsActive=1,
+            FlightPhase=int(FlightPhase.INIT_TAKEOFF_BEFORE_LIFT_OFF),
+            LeftThrottleAngle=45.0,
+            RightThrottleAngle=45.0,
+        ),
+        target_mode=ControlModeState.Approach,
+    )
+    sim = ICSSim(connector=bench, aircraft_profile="mc21")
+    sim.read_telemetry()
+    monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="INIT_TAKEOFF_BEFORE_LIFT_OFF"):
+        sim.warm_up(timeout_s=30.0)
+
+    assert not any(output.ControlMode is ControlModeState.Approach
+                   for output in bench.sent_outputs)
+    assert not any(output.ControlValidMask == int(AIRBORNE_CONTROL_MASK)
+                   for output in bench.sent_outputs)
 
 
 def test_airborne_neutral_settle_restarts_after_activity_drop(monkeypatch):

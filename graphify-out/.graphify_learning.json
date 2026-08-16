@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-16T21:44:20.387751+00:00",
+  "generated_at": "2026-08-16T22:27:24.594141+00:00",
   "nodes": {
     "approachchannel": {
       "code_fingerprint": "",
@@ -12,7 +12,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.977247798,
+      "score": 0.976572692,
       "source_file": "",
       "status": "tentative",
       "uses": 1
@@ -33,7 +33,7 @@
           "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 1.989605352,
+      "score": 1.988230885,
       "source_file": "ismpu/agent/pid_gain_regressor.py",
       "status": "preferred",
       "uses": 2
@@ -49,7 +49,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.978062201,
+      "score": 0.977386532,
       "source_file": "ismpu/config/json_config.py",
       "status": "tentative",
       "uses": 1
@@ -65,7 +65,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.978062201,
+      "score": 0.977386532,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
@@ -91,7 +91,7 @@
           "q": "Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 2.98124288,
+      "score": 2.979183365,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "preferred",
       "uses": 3
@@ -107,7 +107,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.978062201,
+      "score": 0.977386532,
       "source_file": "ismpu/config/scenarios.py",
       "status": "tentative",
       "uses": 1
@@ -128,7 +128,7 @@
           "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.931298235,
+      "score": 1.929964048,
       "source_file": "ismpu/control/channels.py",
       "status": "preferred",
       "uses": 2
@@ -144,7 +144,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.975207095,
+      "score": 0.974533398,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
@@ -160,7 +160,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.955633566,
+      "score": 0.954973391,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
@@ -176,17 +176,22 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.975207095,
+      "score": 0.974533398,
       "source_file": "ismpu/control/ground_allocator.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_envs_ics_sim_icssim": {
-      "code_fingerprint": "1e03e875f1c6d8f3002f411b48e1f98a5376bfcfe72ddf864191d078873b80d4",
+      "code_fingerprint": "71f5a6f18ac9c3fa3918d48b93851659568f45de00a2ba6f1d67d42bae6fd373",
       "label": "ICSSim",
-      "last": "2026-08-16T21:24:48.185629+00:00",
+      "last": "2026-08-16T22:00:35.695308+00:00",
       "neg": 1,
       "provenance": [
+        {
+          "date": "2026-08-16T22:00:35.695308+00:00",
+          "outcome": "useful",
+          "q": "Проанализировать run 20260816T213847.114116Z, сравнить управление с working_ics и исправить уход по GLIDESLOPE и неисполняемый go-around."
+        },
         {
           "date": "2026-08-16T21:24:48.185629+00:00",
           "outcome": "corrected",
@@ -206,17 +211,12 @@
           "date": "2026-08-15T21:49:56.486344+00:00",
           "outcome": "useful",
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
-        },
-        {
-          "date": "2026-08-15T19:39:39.514520+00:00",
-          "outcome": "useful",
-          "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 2.94900775,
+      "score": 3.946540348,
       "source_file": "ismpu/envs/ics_sim.py",
       "status": "contested",
-      "uses": 4,
+      "uses": 5,
       "verdict": "useful"
     },
     "ismpu_envs_xplane_sim_xplanesim": {
@@ -240,13 +240,13 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 2.967667554,
+      "score": 2.965617417,
       "source_file": "ismpu/envs/xplane_sim.py",
       "status": "preferred",
       "uses": 3
     },
     "ismpu_runtime_loop": {
-      "code_fingerprint": "e6f270a78def99b160236333c2f0d7919d0177f188e9e2091147efe37de14289",
+      "code_fingerprint": "fae02f1671a4c0772a6f68cdb8d065630a1de98131b15bef8c5660a1a463425e",
       "label": "loop.py",
       "last": "2026-08-16T12:27:36.943921+00:00",
       "provenance": [
@@ -261,7 +261,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.968354898,
+      "score": 1.96699511,
       "source_file": "ismpu/runtime/loop.py",
       "status": "preferred",
       "uses": 2
@@ -282,7 +282,7 @@
           "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 1.989605352,
+      "score": 1.988230885,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "preferred",
       "uses": 2
@@ -298,8 +298,24 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.977247798,
+      "score": 0.976572692,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
+      "status": "tentative",
+      "uses": 1
+    },
+    "tests_fakes_handshakebench": {
+      "code_fingerprint": "31abd3e287aa727c28deec77f4ed522dca1210748703c9b283a8b3ff90b166c7",
+      "label": "HandshakeBench",
+      "last": "2026-08-16T22:00:35.695308+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-16T22:00:35.695308+00:00",
+          "outcome": "useful",
+          "q": "Проанализировать run 20260816T213847.114116Z, сравнить управление с working_ics и исправить уход по GLIDESLOPE и неисполняемый go-around."
+        }
+      ],
+      "score": 0.999569844,
+      "source_file": "tests/fakes.py",
       "status": "tentative",
       "uses": 1
     }
