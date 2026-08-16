@@ -265,3 +265,10 @@ class PIDController:
         self.last_unconstrained = 0.0
         self.last_p_term = self.last_i_term = self.last_d_term = 0.0
         self.last_output = 0.0
+
+    def reset_derivative(self) -> None:
+        """Забыть разрыв измерения, сохранив накопленный интеграл и текущий выход."""
+        self.prev_error = None
+        self._prev_deriv_input = None
+        self.filtered_derivative = 0.0
+        self.last_d_term = 0.0

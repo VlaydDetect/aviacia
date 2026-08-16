@@ -136,6 +136,11 @@ def _metrics(reader: RunReader) -> dict:
     previous_segment = None
     handover = None
     saturation_by_channel: dict[str, int] = {}
+    go_around_samples = 0
+    go_elevator_command_max = None
+    go_elevator_min = go_elevator_max = None
+    go_pitch_min = go_pitch_max = None
+    go_vs_min = go_vs_max = None
     for row in reader.rows():
         samples += 1
         time_s = _number(row.get("time_s"), 0.0)
@@ -228,6 +233,34 @@ def _metrics(reader: RunReader) -> dict:
                 tolerance_violation_ticks += 1
             for warning in row.get("approach_envelope_warnings") or ():
                 envelope_warnings[str(warning)] = envelope_warnings.get(str(warning), 0) + 1
+            if row.get("go_around_reason"):
+                go_around_samples += 1
+                command = _optional(row.get("cmd_elevator_g"))
+                if command is not None:
+                    go_elevator_command_max = max(
+                        go_elevator_command_max or 0.0, abs(command))
+                elevator_values = [
+                    value for value in (
+                        _optional(row.get("ics_ElevatorLeftAngle")),
+                        _optional(row.get("ics_ElevatorRightAngle")),
+                    ) if value is not None
+                ]
+                elevator = sum(elevator_values) / len(elevator_values) if elevator_values else None
+                pitch = _optional(row.get("pitch_deg"))
+                vertical_speed = _optional(row.get("approach_input_VerticalSpeed"))
+                if elevator is not None:
+                    go_elevator_min = elevator if go_elevator_min is None else min(
+                        go_elevator_min, elevator)
+                    go_elevator_max = elevator if go_elevator_max is None else max(
+                        go_elevator_max, elevator)
+                if pitch is not None:
+                    go_pitch_min = pitch if go_pitch_min is None else min(go_pitch_min, pitch)
+                    go_pitch_max = pitch if go_pitch_max is None else max(go_pitch_max, pitch)
+                if vertical_speed is not None:
+                    go_vs_min = vertical_speed if go_vs_min is None else min(
+                        go_vs_min, vertical_speed)
+                    go_vs_max = vertical_speed if go_vs_max is None else max(
+                        go_vs_max, vertical_speed)
         else:
             ground_samples += 1
             xte = row.get("guidance_xte_m")
@@ -341,6 +374,19 @@ def _metrics(reader: RunReader) -> dict:
             "ias_max_kt": approach_ias_max,
             "tolerance_violation_ticks": tolerance_violation_ticks,
             "warnings": envelope_warnings,
+        },
+        "go_around_authority": {
+            "samples": go_around_samples,
+            "elevator_command_max_abs_g": go_elevator_command_max,
+            "elevator_feedback_span_deg": (
+                go_elevator_max - go_elevator_min
+                if go_elevator_min is not None and go_elevator_max is not None else None),
+            "pitch_span_deg": (
+                go_pitch_max - go_pitch_min
+                if go_pitch_min is not None and go_pitch_max is not None else None),
+            "vertical_speed_span_fpm": (
+                go_vs_max - go_vs_min
+                if go_vs_min is not None and go_vs_max is not None else None),
         },
         "speed_profile": {
             "max_abs_error_ms": speed_error_max if speed_error_count else None,

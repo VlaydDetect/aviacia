@@ -119,6 +119,24 @@ def test_reads_plain_json():
     assert conn.send_addr == BENCH_ADDR          # адрес стенда определён автоматически
 
 
+def test_receive_latest_discards_backlog_but_audits_every_datagram():
+    packets = [
+        (json.dumps(_full_payload(GroundSpeed=speed)).encode(), BENCH_ADDR)
+        for speed in (10.0, 20.0, 30.0)
+    ]
+    conn, _ = _connector(packets)
+    observed = []
+    conn.set_packet_observer(
+        lambda direction, packet, _peer: observed.append((direction, packet)))
+
+    inputs = conn.receive_latest_inputs()
+
+    assert inputs is not None and inputs.GroundSpeed == 30.0
+    assert conn.last_drain_count == 2
+    assert conn.discarded_stale_packets == 2
+    assert [direction for direction, _packet in observed] == ["rx", "rx", "rx"]
+
+
 def test_sends_bare_json_without_any_framing():
     """Стенд делает UTF8.GetString() → JsonConvert. Любые байты перед JSON сломали бы разбор."""
     conn, sock = _connector([(json.dumps(_full_payload()).encode(), BENCH_ADDR)])

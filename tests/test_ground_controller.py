@@ -18,7 +18,7 @@ from ismpu.control.system import ControllingSystem
 from ismpu.control.trajectory import CompletionRule
 from ismpu.envs.ics_sim import Telemetry
 from ismpu.envs.sim_interface import RunStopReason
-from ismpu.runtime.loop import run
+from ismpu.runtime.loop import _timing_summary, run
 from ismpu.working_ics.pid_controller import PID, PIDConfig
 from ismpu.utils.converts import Converts
 
@@ -273,6 +273,7 @@ def test_runtime_requests_taxi_only_for_handover_completion(
     controller = MagicMock()
     controller.segment = FlightSegment.ROLLOUT
     controller.go_around_reason = None
+    controller.abort_reason = None
     controller.begin_flight.return_value = FlightSegment.ROLLOUT
     controller.control_step.return_value = True
     controller.longitudinal_channel.trajectory.completion_rule = rule
@@ -304,6 +305,83 @@ def test_operator_ends_matrix_taxi_as_completed(monkeypatch):
     result = run(controller, sim, scenario_for_matrix_run("Б.1.2/1"), start="taxi")
 
     assert result.reason is RunStopReason.OPERATOR_COMPLETED
+
+
+def test_ics_runtime_computes_every_rx_frame_and_gates_only_transmission(monkeypatch):
+    controller = MagicMock()
+    controller.segment = FlightSegment.ROLLOUT
+    controller.abort_reason = controller.go_around_reason = None
+    controller.begin_flight.return_value = FlightSegment.ROLLOUT
+    controller.control_step.side_effect = (False, False, False, True)
+    controller.longitudinal_channel.trajectory.completion_rule = CompletionRule.FULL_STOP
+    sim = MagicMock()
+    sim.backend_name = "ics"
+    sim.engaged = True
+    sim.last_receive_dropped = 0
+    frame = _direct_ground_frame(speed_kts=20.0)
+    sim.reset.return_value = frame
+    sim.read_telemetry.return_value = frame
+    ticks = iter((0.0, 0.01, 0.04, 0.061, 0.112))
+    monkeypatch.setattr("ismpu.runtime.loop.time.monotonic", lambda: next(ticks))
+
+    result = run(controller, sim, SCENARIOS["default"])
+
+    assert result.reason is RunStopReason.COMPLETED
+    assert sim.read_telemetry.call_count == 4
+    calls = controller.control_step.call_args_list
+    assert [call.kwargs["send"] for call in calls] == [True, False, True, True]
+    assert [call.args[0] for call in calls] == pytest.approx((0.01, 0.03, 0.021, 0.051))
+
+
+def test_ics_runtime_restarts_derivative_after_discarding_backlog(monkeypatch):
+    controller = MagicMock()
+    controller.segment = FlightSegment.ROLLOUT
+    controller.abort_reason = controller.go_around_reason = None
+    controller.begin_flight.return_value = FlightSegment.ROLLOUT
+    controller.control_step.return_value = True
+    controller.longitudinal_channel.trajectory.completion_rule = CompletionRule.FULL_STOP
+    sim = MagicMock()
+    sim.backend_name = "ics"
+    sim.engaged = True
+    sim.last_receive_dropped = 7
+    sim.reset.return_value = sim.read_telemetry.return_value = _direct_ground_frame(speed_kts=20.0)
+    ticks = iter((0.0, 3.0))
+    monkeypatch.setattr("ismpu.runtime.loop.time.monotonic", lambda: next(ticks))
+
+    result = run(controller, sim, SCENARIOS["default"])
+
+    assert result.reason is RunStopReason.COMPLETED
+    controller.reset_pid_derivatives.assert_called_once_with()
+    assert controller.control_step.call_args.args[0] == DT
+
+
+def test_runtime_classifies_failed_go_around_as_error(monkeypatch):
+    controller = MagicMock()
+    controller.segment = FlightSegment.APPROACH
+    controller.abort_reason = "go_around_timeout_no_climb"
+    controller.go_around_reason = "допуски захода не выполнены"
+    controller.begin_flight.return_value = FlightSegment.APPROACH
+    controller.control_step.return_value = True
+    sim = MagicMock()
+    sim.backend_name = "ics"
+    sim.engaged = True
+    sim.last_receive_dropped = 0
+    sim.reset.return_value = sim.read_telemetry.return_value = _direct_ground_frame(speed_kts=20.0)
+    ticks = iter((0.0, DT))
+    monkeypatch.setattr("ismpu.runtime.loop.time.monotonic", lambda: next(ticks))
+
+    result = run(controller, sim, SCENARIOS["default"])
+
+    assert result.reason is RunStopReason.ERROR
+    assert result.details == "go_around_timeout_no_climb"
+
+
+def test_runtime_timing_reports_requested_percentiles_in_milliseconds():
+    summary = _timing_summary([0.01, 0.02, 0.03, 0.04, 0.05])
+    assert summary["count"] == 5
+    assert summary["p50_ms"] == pytest.approx(30.0)
+    assert summary["p95_ms"] == pytest.approx(50.0)
+    assert summary["p99_ms"] == pytest.approx(50.0)
 
 
 def test_all_old_ground_gains_are_marked_draft_after_allocator_change():

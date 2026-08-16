@@ -6,6 +6,8 @@
 (`test_approach_channel.py`), сам пробег — тоже (`test_control_parity.py`, `test_ics_sim.py`).
 """
 
+from dataclasses import replace
+
 import pytest
 
 from ismpu.config.constants import DT
@@ -41,7 +43,7 @@ class _Clock:
 
 def _air(**overrides):
     base = dict(all_gear_on_ground=False, groundspeed_kts=140.0, radio_altitude_ft=1200.0,
-                agent_is_active=0, telemetry_valid=True)
+                agent_is_active=1, telemetry_valid=True)
     base.update(overrides)
     return EngagementInputs(**base)
 
@@ -71,7 +73,21 @@ def test_airborne_stimulus_reaches_approach_after_the_full_dwell():
     _pump(eng, clock, _air(), ticks=ticks)
     assert eng.state is EngagementState.COMMAND_APPROACH
     assert eng.control_mode is ControlModeState.Approach
-    assert eng.engaged is False                          # стенд ещё не активен
+    assert eng.engaged is True
+
+
+def test_airborne_dwell_starts_only_after_agent_active():
+    """working_ics сначала ждёт разрешение IOS, затем передаёт полные 2.2 с готовности."""
+    clock = _Clock()
+    eng = IcsEngagement(clock=clock)
+
+    _pump(eng, clock, _air(agent_is_active=0), ticks=100)
+    assert eng.state is EngagementState.IDLE
+    assert eng.ready_frames_sent == 0
+
+    eng.step(_air(agent_is_active=1))
+    assert eng.state is EngagementState.READY_DWELL
+    assert eng.ready_frames_sent == 0
 
 
 def test_airborne_dwell_is_longer_than_the_ground_one():
@@ -539,7 +555,7 @@ def test_a_whole_flight_runs_from_approach_to_taxi(monkeypatch):
 
 def test_the_airborne_handshake_is_actually_transmitted_before_approach():
     """Стенд включается по полученной готовности, а не по нашему представлению о ней."""
-    bench = HandshakeBench(airborne_inputs(radio_altitude_ft=900.0, AgentIsActive=0),
+    bench = HandshakeBench(airborne_inputs(radio_altitude_ft=900.0, AgentIsActive=1),
                            target_mode=ControlModeState.Approach)
     sim = ICSSim(connector=bench, aircraft_profile="mc21")
     sim.read_telemetry()
@@ -550,11 +566,69 @@ def test_the_airborne_handshake_is_actually_transmitted_before_approach():
     try:
         ics_sim_module.time.sleep = lambda _s: None
         assert sim.warm_up(timeout_s=30.0) is True
+        assert bench.accepted
     finally:
         ics_sim_module.time.sleep = real_sleep
 
     armed = [o for o in bench.sent_outputs
              if o.ControlMode is ControlModeState.Off and o.ModeAIReady == 1]
     assert len(armed) >= ENGAGE_MIN_READY_FRAMES     # выдержка действительно передана
-    assert all(o.ControlValidMask == 0 for o in armed)   # до включения каналы не заявляются
+    assert all(o.ControlValidMask == int(AIRBORNE_CONTROL_MASK) for o in armed)
     assert bench.sent_outputs[-1].ControlMode is ControlModeState.Approach
+    effective = [
+        o for o in bench.sent_outputs
+        if (o.ControlMode is ControlModeState.Approach
+            and o.ControlValidMask == int(AIRBORNE_CONTROL_MASK))
+    ]
+    assert not any(
+        o.ControlMode is ControlModeState.Approach and o.ControlValidMask == 0
+        for o in bench.sent_outputs
+    )
+    assert len(effective) == 4        # фронт входит в 0.2 с: ровно четыре такта при 20 Гц
+    assert all(
+        o.ElevatorCmd == 0.0 and o.AileronCmd == 0.0
+        and o.ThrottleLeftRate == 0.0 and o.ThrottleRightRate == 0.0
+        and o.ModeSpeed == 0 and o.ModeThrust == 0
+        for o in effective
+    )
+
+
+def test_airborne_neutral_settle_restarts_after_activity_drop(monkeypatch):
+    class FlakyBench(HandshakeBench):
+        dropped = False
+        suppress_next_rx = False
+
+        def send_outputs(self, outputs):
+            sent = super().send_outputs(outputs)
+            if (outputs.ControlMode is ControlModeState.Approach
+                    and outputs.ControlValidMask == int(AIRBORNE_CONTROL_MASK)
+                    and not self.dropped):
+                self.dropped = True
+                self.suppress_next_rx = True
+            return sent
+
+        def receive_inputs(self, timeout=1.0):
+            current = super().receive_inputs(timeout)
+            if self.suppress_next_rx:
+                self.suppress_next_rx = False
+                return replace(current, AgentIsActive=0)
+            return current
+
+    bench = FlakyBench(
+        airborne_inputs(radio_altitude_ft=900.0, AgentIsActive=1),
+        target_mode=ControlModeState.Approach,
+    )
+    sim = ICSSim(connector=bench, aircraft_profile="mc21")
+    sim.read_telemetry()
+    monkeypatch.setattr("ismpu.envs.ics_sim.time.sleep", lambda _s: None)
+
+    assert sim.warm_up(timeout_s=30.0)
+
+    effective_indices = [
+        index for index, output in enumerate(bench.sent_outputs)
+        if (output.ControlMode is ControlModeState.Approach
+            and output.ControlValidMask == int(AIRBORNE_CONTROL_MASK))
+    ]
+    assert len(effective_indices) >= 5
+    assert effective_indices[-4:] == list(range(
+        effective_indices[-1] - 3, effective_indices[-1] + 1))

@@ -13,7 +13,8 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from threading import RLock
+from queue import Full, Queue
+from threading import Event, RLock, Thread
 
 from ismpu.config.constants import DT
 from ismpu.config.run_matrix import CATALOG_SHA256, SOURCE_SHA256
@@ -23,7 +24,7 @@ from ismpu.envs.sim_interface import ApproachData
 from ismpu.io.ics_connector import ICSInputs, ICSOutputs
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PID_NAMES = (
     "roll", "pitch", "air_speed", "steer",
     "brake_l", "brake_r", "reverse_l", "reverse_r",
@@ -107,11 +108,16 @@ SFT_FIELDS = (
     "sft_prediction_count", "sft_fallback", "sft_rate_limited", "sft_reason",
     "sft_prediction", "sft_guarded", "sft_applied",
 )
+RUNTIME_DIAGNOSTIC_FIELDS = (
+    "runtime_rx_s", "runtime_control_start_s", "runtime_control_end_s",
+    "runtime_tx_s", "runtime_telemetry_age_s", "runtime_stale_rx_dropped",
+)
 TELEMETRY_FIELDS = (
     SAMPLE_ID_FIELDS + NORMALIZED_TELEMETRY_FIELDS + COMMAND_FIELDS
     + GROUND_DIAGNOSTIC_FIELDS + ALLOCATOR_TELEMETRY_FIELDS
     + ACTUATOR_FEEDBACK_FIELDS + APPROACH_TELEMETRY_FIELDS
     + ("ics_raw_json",) + ICS_TELEMETRY_FIELDS + ICS_COMMAND_FIELDS + PID_FIELDS + SFT_FIELDS
+    + RUNTIME_DIAGNOSTIC_FIELDS
 )
 
 
@@ -363,6 +369,7 @@ class RunRecorder:
         self, *, root: str | Path | None = None, backend: str, aircraft_profile: str,
         scenario, start: str | None = None, extra_metadata: dict | None = None,
         flush_interval_s: float = 1.0, ring_size: int = 2400, clock=time.monotonic,
+        writer_queue_size: int = 8192,
     ) -> None:
         now = datetime.now(timezone.utc)
         self.execution_id = now.strftime("%Y%m%dT%H%M%S.%fZ")
@@ -377,6 +384,9 @@ class RunRecorder:
         self._lock = RLock()
         self._streams: dict[str, object] = {}
         self._writers: dict[str, csv.DictWriter] = {}
+        self._write_queue: Queue = Queue(maxsize=max(1, int(writer_queue_size)))
+        self._writer_thread: Thread | None = None
+        self._accepting_writes = False
         self._attached_connector = None
         self._last_detected: dict[str, object] = {}
         self.recent_samples: deque[RunSample] = deque(maxlen=max(1, int(ring_size)))
@@ -405,7 +415,7 @@ class RunRecorder:
                 segment: json_sha256(value["control"])
                 for segment, value in effective_configs.items()},
             "start": start, "frequency_hz": 1.0 / DT, "units": _units_manifest(),
-            "schema": {"sample": "RunSample/v2", "event": "RunEvent/v1",
+            "schema": {"sample": "RunSample/v3", "event": "RunEvent/v1",
                        "telemetry_columns": len(TELEMETRY_FIELDS)},
             "git": _git_state(), "recording_failed": False, "recording_error": None,
             "samples": 0, "raw_packets": {"rx": 0, "tx": 0}, **(extra_metadata or {}),
@@ -450,14 +460,29 @@ class RunRecorder:
             self._streams["raw-rx"] = (self.directory / "raw-rx.jsonl").open("wb")
             self._streams["raw-tx"] = (self.directory / "raw-tx.jsonl").open("wb")
             self._started = True
+            self._accepting_writes = True
+            self._writer_thread = Thread(
+                target=self._writer_loop,
+                name=f"run-recorder-{self.execution_id}",
+                daemon=True,
+            )
+            self._writer_thread.start()
             self._append_event_unlocked("run_started", data={"backend": self.manifest["backend"]})
-            self._flush(force=True)
             return True
         except Exception as exc:
             self._fail(exc)
+            self._close_streams()
             return False
 
-    def record(self, telemetry, controller, *, elapsed_s: float, dt: float | None = None) -> RunSample:
+    def record(
+        self,
+        telemetry,
+        controller,
+        *,
+        elapsed_s: float,
+        dt: float | None = None,
+        runtime_timing: Mapping[str, object] | None = None,
+    ) -> RunSample:
         with self._lock:
             if self._finished:
                 raise RuntimeError("прогон уже завершён")
@@ -469,6 +494,7 @@ class RunRecorder:
                        if controller.last_step_send_attempted else None)
             try:
                 values = sample_values(telemetry, controller)
+                values.update(runtime_timing or {})
             except Exception as exc:
                 self._fail(exc)
                 values = {"valid": int(bool(getattr(telemetry, "valid", False)))}
@@ -485,15 +511,9 @@ class RunRecorder:
             self.recent_samples.append(sample)
             self._publish(sample)
             if self._ensure_started():
-                try:
-                    row = {name: _csv_value(sample.as_row().get(name)) for name in TELEMETRY_FIELDS}
-                    self._writers["telemetry"].writerow(row)
-                    target = "approach" if segment == FlightSegment.APPROACH.value else "ground"
-                    self._writers[target].writerow(row)
-                    self._detect_events(sample, telemetry, controller)
-                    self._flush()
-                except Exception as exc:
-                    self._fail(exc)
+                target = "approach" if segment == FlightSegment.APPROACH.value else "ground"
+                self._enqueue(("row", (target, sample)))
+                self._detect_events(sample, telemetry, controller)
             return sample
 
     def record_event(self, event: str, *, data: Mapping[str, object] | None = None,
@@ -515,11 +535,7 @@ class RunRecorder:
         self._publish(item)
         stream = self._streams.get("events")
         if stream is not None and not self.recording_failed:
-            try:
-                stream.write(json.dumps(
-                    _jsonable(item.as_dict()), ensure_ascii=False, allow_nan=False) + "\n")
-            except Exception as exc:
-                self._fail(exc)
+            self._enqueue(("event", item.as_dict()))
         elif self._finished and self.directory.is_dir() and not self.recording_failed:
             # Dashboard остаётся доступным после completion; candidate_saved всё равно должен
             # попасть в единственный журнал событий, а не жить только в HTTP-ответе.
@@ -564,11 +580,8 @@ class RunRecorder:
             if not self._ensure_started():
                 return
             try:
-                stream = self._streams[f"raw-{direction}"]
-                stream.write(packet)
-                if not packet.endswith(b"\n"):
-                    stream.write(b"\n")
                 self._raw_counts[direction] += 1
+                self._enqueue(("raw", (direction, packet)))
                 if direction == "tx":
                     payload = json.loads(packet.decode("utf-8"))
                     state = (payload.get("ControlMode"), payload.get("ModeAIReady"),
@@ -578,7 +591,6 @@ class RunRecorder:
                         self._append_event_unlocked("handshake", data={
                             "control_mode": state[0], "mode_ai_ready": state[1],
                             "control_valid_mask": state[2], "peer": list(address)})
-                self._flush()
             except Exception as exc:
                 self._fail(exc)
 
@@ -617,18 +629,83 @@ class RunRecorder:
         return self._sequence
 
     def flush(self) -> None:
+        """Дождаться записи всех ранее поставленных элементов и flush файлов."""
         with self._lock:
-            self._flush(force=True)
+            if (not self._started or self._finished or self._writer_thread is None
+                    or not self._writer_thread.is_alive()):
+                return
+            done = Event()
+            self._write_queue.put(("flush", done))
+        done.wait()
 
-    def _flush(self, *, force=False) -> None:
-        if not self._started or self.recording_failed:
-            return
-        now = self._clock()
-        if not force and now - self._last_flush < self._flush_interval_s:
-            return
+    def _flush_streams(self) -> None:
         for stream in self._streams.values():
             stream.flush()
-        self._last_flush = now
+        self._last_flush = self._clock()
+
+    def _enqueue(self, item: tuple[str, object]) -> bool:
+        """Поставить запись без блокировки control thread; переполнение инвалидирует run."""
+        if not self._accepting_writes or self.recording_failed:
+            return False
+        try:
+            self._write_queue.put_nowait(item)
+            return True
+        except Full:
+            self._fail(RuntimeError("очередь RunRecorder переполнена"))
+            return False
+
+    def _writer_loop(self) -> None:
+        while True:
+            kind, payload = self._write_queue.get()
+            try:
+                if kind == "stop":
+                    try:
+                        self._flush_streams()
+                    finally:
+                        payload.set()
+                    return
+                if kind == "flush":
+                    try:
+                        self._flush_streams()
+                    finally:
+                        payload.set()
+                    continue
+                if self.recording_failed:
+                    continue
+                self._write_item(kind, payload)
+                if self._clock() - self._last_flush >= self._flush_interval_s:
+                    self._flush_streams()
+            except Exception as exc:
+                self._fail(exc)
+                if kind == "flush":
+                    payload.set()
+                elif kind == "stop":
+                    payload.set()
+                    return
+            finally:
+                self._write_queue.task_done()
+
+    def _write_item(self, kind: str, payload: object) -> None:
+        """Единственная точка файлового I/O writer-потока."""
+        if kind == "row":
+            target, sample = payload
+            row = {
+                name: _csv_value(sample.as_row().get(name))
+                for name in TELEMETRY_FIELDS
+            }
+            self._writers["telemetry"].writerow(row)
+            self._writers[target].writerow(row)
+        elif kind == "event":
+            self._streams["events"].write(json.dumps(
+                _jsonable(payload), ensure_ascii=False, allow_nan=False) + "\n")
+        elif kind == "raw":
+            direction, packet = payload
+            stream = self._streams[f"raw-{direction}"]
+            stream.write(packet)
+            if not packet.endswith(b"\n"):
+                stream.write(b"\n")
+        else:
+            raise ValueError(f"неизвестная запись RunRecorder: {kind}")
 
     def export_gains(self, controller, *, label="manual") -> Path:
         with self._lock:
@@ -714,10 +791,22 @@ class RunRecorder:
             stop_reason = runtime_report.get("stop_reason") if isinstance(runtime_report, dict) else None
             self._append_event_unlocked(
                 "completion", data={"stop_reason": stop_reason, "report": runtime_report})
-            try:
-                self._flush(force=True)
-            except Exception as exc:
-                self._fail(exc)
+            if self._attached_connector is not None:
+                try:
+                    self._attached_connector.set_packet_observer(None)
+                except Exception:
+                    pass
+            self._accepting_writes = False
+            writer = self._writer_thread
+            stopped = Event() if writer is not None else None
+
+        # Завершение может ждать диск; управляющий цикл к этому моменту уже остановлен.
+        if writer is not None:
+            self._write_queue.put(("stop", stopped))
+            stopped.wait()
+            writer.join()
+
+        with self._lock:
             self._close_streams()
             self.manifest.update({
                 "finished_at": datetime.now(timezone.utc).isoformat(), "stop_reason": stop_reason,
@@ -738,11 +827,6 @@ class RunRecorder:
                 except Exception:
                     pass
             finally:
-                if self._attached_connector is not None:
-                    try:
-                        self._attached_connector.set_packet_observer(None)
-                    except Exception:
-                        pass
                 self._finished = True
 
     close = finish
@@ -765,18 +849,18 @@ class RunRecorder:
         self._writers.clear()
 
     def _fail(self, exc: Exception) -> None:
-        if not self.recording_failed:
-            self.recording_failed = True
-            self.recording_error = f"{type(exc).__name__}: {exc}"
-            self.manifest.update(recording_failed=True, recording_error=self.recording_error)
-            item = RunEvent(
-                self._event_sequence, datetime.now(timezone.utc).isoformat(),
-                self._clock() - self._started_monotonic, None, None,
-                "recording_error", None, {"error": self.recording_error})
-            self._event_sequence += 1
-            self.recent_events.append(item)
-            self._publish(item)
-        self._close_streams()
+        with self._lock:
+            if not self.recording_failed:
+                self.recording_failed = True
+                self.recording_error = f"{type(exc).__name__}: {exc}"
+                self.manifest.update(recording_failed=True, recording_error=self.recording_error)
+                item = RunEvent(
+                    self._event_sequence, datetime.now(timezone.utc).isoformat(),
+                    self._clock() - self._started_monotonic, None, None,
+                    "recording_error", None, {"error": self.recording_error})
+                self._event_sequence += 1
+                self.recent_events.append(item)
+                self._publish(item)
 
     def _write_json(self, name: str, payload) -> None:
         path = self.directory / name

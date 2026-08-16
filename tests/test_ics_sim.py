@@ -400,8 +400,8 @@ def test_controller_runs_the_plain_loop_against_the_bench():
 def test_plain_loop_reads_telemetry_once_per_tick():
     """На стенде каждый лишний `read_telemetry` — лишний приём UDP.
 
-    Кадр, вернувшийся из `sim.step`, уже свежий, поэтому отдельное чтение делается только на
-    первом такте.
+    Каждый такт явно читает один кадр перед расчётом, а `send_controls` не выполняет скрытый
+    приём следующего кадра.
     """
     from ismpu.config.constants import DT
 
@@ -422,10 +422,7 @@ def test_plain_loop_reads_telemetry_once_per_tick():
         controller.control_step(DT)
 
     assert len(conn.sent_outputs) == ticks
-    # По одному чтению на такт (внутри `sim.step`) плюс одно холодное на первом такте.
-    # Наивная реализация читала бы дважды за такт — вдвое больше приёмов UDP.
-    assert reads["n"] == ticks + 1
-    assert reads["n"] < 2 * ticks
+    assert reads["n"] == ticks
 
 
 def test_control_exception_sends_a_neutral_command_then_releases_the_channels(monkeypatch):

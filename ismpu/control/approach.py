@@ -280,6 +280,15 @@ class ApproachController:
         self.result = res
         return res
 
+    def prepare_go_around(self) -> None:
+        """Убрать windup localizer/glideslope, сохранив непрерывную уставку тангажа."""
+        self.roll_pid.reset()
+        self.pitch_pid.reset()
+        self._flare_active = False
+        self._flare_entry_radio_altitude_ft = None
+        self._flare_entry_vertical_speed_fpm = None
+        self._flare_entry_pitch_target_deg = None
+
     # ------------------------------------------------------------------ #
     # Составляющие такта
     # ------------------------------------------------------------------ #

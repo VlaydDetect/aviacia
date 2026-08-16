@@ -16,6 +16,7 @@ from ismpu.config.constants import DT
 from ismpu.config.ics import (
     BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_ANGLE_MAX_DEG,
     THROTTLE_RATE_MAX_DEG_S, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM, TILLER_MAX_MM, FlightPhase,
+    AIRBORNE_CONTROL_MASK,
 )
 from ismpu.io.ics_connector import ControlModeState as _Mode
 from ismpu.config.runway import RWY_START_LAT, RWY_START_LON, RWY_HEADING_TRUE
@@ -203,30 +204,46 @@ class HandshakeBench(FakeConnector):
     """Стенд, включающий управление только после корректного рукопожатия.
 
     Ждёт непрерывной готовности при `ControlMode = Off`, затем перехода в целевой режим (`0 → 4`
-    для руления, `0 → 1` для захода). До этого `AgentIsActive = 0`, сколько бы кадров ни ушло, —
-    так проверяется, что включает нас именно стенд по нашему стимулу, а не наша внутренняя
-    выдержка.
+    для руления, `0 → 1` для захода). На заходе `AgentIsActive` — предварительное разрешение
+    оператора, как на реальном стенде; принятие правильной wire-последовательности хранится в
+    `accepted`. На земле стенд выставляет `AgentIsActive` после перехода в Taxi.
     """
 
     def __init__(self, base_inputs=None, *, target_mode=ControlModeState.Taxi):
         super().__init__(base_inputs if base_inputs is not None else on_ground())
         self.target_mode = target_mode
+        self.target_mask = (
+            int(AIRBORNE_CONTROL_MASK)
+            if target_mode is ControlModeState.Approach else 0
+        )
         self._active = False
         self._saw_off_ready = False
 
+    @property
+    def accepted(self):
+        return self._active
+
     def send_outputs(self, outputs):
         self.sent_outputs.append(outputs)
-        if outputs.ModeAIReady == 1 and outputs.ControlMode == ControlModeState.Off:
+        if (outputs.ModeAIReady == 1
+                and outputs.ControlMode == ControlModeState.Off
+                and outputs.ControlValidMask == self.target_mask):
             self._saw_off_ready = True          # видели заявку готовности при ControlMode = 0
         if (self._saw_off_ready and outputs.ModeAIReady == 1
-                and outputs.ControlMode == self.target_mode):
+                and outputs.ControlMode == self.target_mode
+                and outputs.ControlValidMask == self.target_mask):
             self._active = True                 # фронт Off → режим после готовности → включаем
         return True                             # успешная отправка продвигает выдержку
 
     def receive_inputs(self, timeout=1.0):
         if self.inputs is None:
             return None
-        return replace(self.inputs, AgentIsActive=1 if self._active else 0)
+        active = (
+            self.inputs.AgentIsActive
+            if self.target_mode is ControlModeState.Approach
+            else int(self._active)
+        )
+        return replace(self.inputs, AgentIsActive=active)
 
 
 class ScriptedFlightBench(FakeConnector):

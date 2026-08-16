@@ -33,6 +33,7 @@ from ismpu.config.ics import (
     REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
     AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK, FlightPhase,
     FLARE_MODE_RADIO_ALTITUDE_FT, FLARE_MODE_END_RADIO_ALTITUDE_FT,
+    ENGAGE_AIR_NEUTRAL_SETTLE_S,
 )
 from ismpu.utils.converts import Converts
 from ismpu.config.constants import DT
@@ -470,8 +471,9 @@ class ICSSim(SimInterface):
     Управление включается **только** после рукопожатия (`io/ics_engagement.py`). Факт включения
     определяет **стенд**, а не мы: он подтверждает приём управления полем `AgentIsActive = 1` во
     входной телеметрии. Наша задача в прогреве — гнать корректный стимул (`ModeAIReady = 1`
-    непрерывно и переход `ControlMode`), а `engaged` лишь читает подтверждение стенда. Пока его
-    нет, `ControlValidMask = 0` и органы не выдаются.
+    непрерывно и переход `ControlMode`), а `engaged` лишь читает подтверждение стенда. Воздушный
+    startup повторяет working_ics и заявляет mask=31 уже на нейтральном `Off`; наземный до
+    подтверждения сохраняет mask=0. Ненулевые команды органов до завершения startup не выдаются.
     """
 
     backend_name = "ics"
@@ -496,6 +498,7 @@ class ICSSim(SimInterface):
         self._last_telemetry: Optional[Telemetry] = None
         self.last_outputs: ICSOutputs | None = None
         self.last_output_sent: bool = False
+        self.last_send_perf_counter: float | None = None
         self._shutdown_report: Optional[ShutdownReport] = None
         self._scenario: Scenario | None = None
         self._entered_segment: FlightSegment | None = None
@@ -575,17 +578,25 @@ class ICSSim(SimInterface):
         return report
 
     def step(self, command: ControlsState) -> Telemetry:
-        outputs = self._to_outputs(command)
+        self.send_controls(command)
+        return self.read_telemetry()
+
+    def send_controls(self, command: ControlsState, *, neutral: bool = False) -> bool:
+        """Отправить команду без скрытого чтения следующего RX-кадра."""
+        outputs = self._to_outputs(command, neutral=neutral)
         self.last_outputs = outputs
         self.last_output_sent = self.connector.send_outputs(outputs)
         if self.last_output_sent:
+            self.last_send_perf_counter = time.perf_counter()
             # Автомат узнаёт о ФАКТЕ передачи: выдержка по ICD — это время, в течение которого
             # стенд получает готовность, а не время, которое мы считаем у себя.
-            self.engagement.on_frame_sent(outputs.ModeAIReady)
-        return self.read_telemetry()
+            self.engagement.on_frame_sent(
+                outputs.ModeAIReady, outputs.ControlMode, outputs.ControlValidMask)
+        return self.last_output_sent
 
     def read_telemetry(self) -> Telemetry:
-        inputs = self.connector.receive_inputs(timeout=self.timeout)
+        receive = getattr(self.connector, "receive_latest_inputs", self.connector.receive_inputs)
+        inputs = receive(timeout=self.timeout)
         telemetry = Telemetry.invalid() if inputs is None else Telemetry.from_ics(
             inputs,
             runway_profile=self.runway_profile,
@@ -596,6 +607,23 @@ class ICSSim(SimInterface):
         self.engagement.step(self._engagement_inputs(telemetry))
         return telemetry
 
+    @property
+    def last_receive_dropped(self) -> int:
+        """Сколько устаревших UDP-кадров сброшено при последнем чтении."""
+        return int(getattr(self.connector, "last_drain_count", 0))
+
+    @property
+    def discarded_stale_packets(self) -> int:
+        return int(getattr(self.connector, "discarded_stale_packets", 0))
+
+    @property
+    def last_receive_monotonic(self) -> float | None:
+        return getattr(self.connector, "last_receive_monotonic", None)
+
+    @property
+    def last_receive_perf_counter(self) -> float | None:
+        return getattr(self.connector, "last_receive_perf_counter", None)
+
     def warm_up(self, timeout_s: float = 10.0, dt: float = DT) -> bool:
         """Гонит стимул рукопожатия, пока стенд не подтвердит включение (`AgentIsActive = 1`).
 
@@ -603,17 +631,17 @@ class ICSSim(SimInterface):
         Стимул несёт `_to_outputs` из состояния автомата (`io/ics_engagement.py`):
         `ModeAIReady = 1` непрерывно и переход `ControlMode` (`Off` во время двухсекундной
         выдержки → `Taxi`, то есть `0 → 4`). Именно этот стимул стенд ждёт, чтобы выставить
-        `AgentIsActive = 1`; до тех пор `ControlValidMask = 0`.
+        `AgentIsActive = 1`. Для наземного startup маска до подтверждения нулевая; воздушный
+        startup повторяет проверенный wire-порядок `Off/31 → Approach/31 neutral`.
 
         Возврат — по факту подтверждения стендом (`self.engaged`), а не по нашей внутренней
         выдержке: иначе мы объявляли бы включение сами и могли «управлять» в пустоту. Исчерпание
         таймаута — исключение с диагностикой, а не молчаливый выход: приёмка иначе засчитала бы
         прогон, которого стенд не принял.
         """
-        if self.engaged:
-            return True
-
         neutral = ControlsState()
+        settle_frames = max(1, math.ceil(ENGAGE_AIR_NEUTRAL_SETTLE_S / dt))
+        neutral_frames_sent = 0
         start = time.monotonic()
         deadline = start + timeout_s
         next_send = start
@@ -627,8 +655,32 @@ class ICSSim(SimInterface):
                 continue
             next_send = now + dt
 
-            self.step(neutral)
+            # Проверенный working_ics шлёт mask=31 на всей воздушной последовательности:
+            # Off/31 (2.2 с) -> Approach/31 neutral (0.2 с) -> PID. Если фронт Approach уйдёт
+            # с mask=0, стенд не передаёт актуаторы, хотя AgentIsActive уже равен единице.
+            airborne_startup = self.engagement.airborne_stimulus
+            sent = self.send_controls(neutral, neutral=airborne_startup)
+            sent_output = self.last_outputs
+            self.read_telemetry()
+            sent_airborne_target = (
+                sent
+                and sent_output is not None
+                and sent_output.ControlMode in (
+                    ControlModeState.Approach, ControlModeState.Landing)
+                and sent_output.ControlValidMask == int(AIRBORNE_CONTROL_MASK)
+            )
+            if sent_airborne_target and self.engaged:
+                # Первый пакет фронта — уже первый из четырёх эталонных нейтральных тактов.
+                neutral_frames_sent += 1
+            if not self.engaged:
+                # Эффективная серия должна быть непрерывной; потеря подтверждения начинает её
+                # заново, а не позволяет сложить разрозненные нейтральные пакеты.
+                neutral_frames_sent = 0
             if self.engaged:
+                if (self.engagement.control_mode in (
+                        ControlModeState.Approach, ControlModeState.Landing)
+                        and neutral_frames_sent < settle_frames):
+                    continue
                 logger.info("[ICS] управление включено: %s", self.engagement.as_dict())
                 return True
 
@@ -733,7 +785,7 @@ class ICSSim(SimInterface):
             if i + 1 < frames:
                 time.sleep(dt)
 
-    def _to_outputs(self, command: ControlsState) -> ICSOutputs:
+    def _to_outputs(self, command: ControlsState, *, neutral: bool = False) -> ICSOutputs:
         """`ControlsState` → `ICSOutputs` (единицы ICD), **по текущему участку полёта**.
 
         Три вещи, без которых стенд команду не исполнит:
@@ -752,10 +804,29 @@ class ICSSim(SimInterface):
         out.ControlMode = mode
         out.ModeAIReady = self.engagement.mode_ai_ready
 
+        if neutral and self.engagement.airborne_stimulus:
+            # Исключение только для эталонной воздушной startup-последовательности:
+            # маска заявлена, но все команды и mode flags ещё нулевые. Это точный порядок
+            # working_ics; первый ненулевой PID-пакет появится лишь после 0.2 с Approach/31.
+            out.ControlValidMask = int(AIRBORNE_CONTROL_MASK)
+            return out
+
         if not self.engagement.engaged:
             # Рукопожатие не завершено: заявлять каналы нельзя, иначе мы возьмём на себя
-            # ответственность за органы, которыми стенд нам управлять ещё не разрешил.
+            # ответственность за органы, которыми стенд нам управлять ещё не разрешил. Воздушное
+            # нейтральное исключение обработано выше; наземный startup всегда остаётся mask=0.
             out.ControlValidMask = 0
+            return out
+
+        if neutral:
+            # После фронта Off→Approach эталон четыре такта заявляет воздушные каналы нулями.
+            # Флаги speed/thrust здесь также нулевые: PID ещё не начал управлять.
+            if mode in (ControlModeState.Approach, ControlModeState.Landing):
+                out.ControlValidMask = int(AIRBORNE_CONTROL_MASK)
+            else:
+                out.ControlValidMask = int(
+                    TAXI_CONTROL_MASK if mode is ControlModeState.Taxi
+                    else ROLLOUT_CONTROL_MASK)
             return out
 
         if mode in (ControlModeState.Approach, ControlModeState.Landing):

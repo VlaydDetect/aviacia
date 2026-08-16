@@ -140,10 +140,13 @@ Newtonsoft JSON; добавление префикса ломает проток
 engaged = AgentIsActive подтверждён стендом AND handshake stimulus завершён
 ```
 
-Airborne handshake: `ControlMode=Off`, `ModeAIReady=1` не менее 2.2 s и минимального числа
-реально отправленных кадров, затем edge `0→1`. Ground handshake аналогичен, но длится 2.0 s.
-До engagement маска равна 0. Потеря уже подтверждённого `AgentIsActive` ниже 80 ft удерживается
-до завершения посадки; она никогда не создаёт подтверждение сама.
+Airborne handshake начинается только после полученного `AgentIsActive=1`: затем
+`ControlMode=Off`, `ModeAIReady=1` не менее 2.2 s и минимального числа реально отправленных
+кадров, затем edge `0→1`. Ground handshake аналогичен, но длится 2.0 s.
+Наземный startup до engagement использует mask 0. Воздушный startup в точности повторяет
+проверенный `working_ics`: `Off/mask31` 2.2 s, затем четыре нейтральных пакета
+`Approach/mask31`; только после них разрешён PID. Потеря уже подтверждённого `AgentIsActive`
+ниже 80 ft удерживается до завершения посадки; она никогда не создаёт подтверждение сама.
 
 Supervisor движется только вперёд:
 

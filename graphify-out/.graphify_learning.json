@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-16T15:14:34.294727+00:00",
+  "generated_at": "2026-08-16T21:44:20.387751+00:00",
   "nodes": {
     "approachchannel": {
       "code_fingerprint": "",
@@ -12,26 +12,31 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.983378519,
+      "score": 0.977247798,
       "source_file": "",
       "status": "tentative",
       "uses": 1
     },
-    "ismpu_agent_gain_scheduler": {
-      "code_fingerprint": "c6704b45d6ea2672e139dc0aa3087cc57b6a9ea78f141d78a02140a204ec8001",
-      "label": "gain_scheduler.py",
-      "last": "2026-08-16T15:11:14.901406+00:00",
+    "ismpu_agent_pid_gain_regressor_pidgainregressor": {
+      "code_fingerprint": "914a25754dec253ada2c61d4a5147f17b88625d6d99398645cdc508b95db4ab4",
+      "label": "PidGainRegressor",
+      "last": "2026-08-16T16:20:41.366554+00:00",
       "provenance": [
         {
-          "date": "2026-08-16T15:11:14.901406+00:00",
+          "date": "2026-08-16T16:20:41.366554+00:00",
           "outcome": "useful",
-          "q": "Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)."
+          "q": "Приступай к выполнению этапа 9 плана docs/plan.md; упрощай код, удаляй лишнее и добавляй комментарии."
+        },
+        {
+          "date": "2026-08-16T16:18:27.618585+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 0.99994668,
-      "source_file": "ismpu/agent/gain_scheduler.py",
-      "status": "tentative",
-      "uses": 1
+      "score": 1.989605352,
+      "source_file": "ismpu/agent/pid_gain_regressor.py",
+      "status": "preferred",
+      "uses": 2
     },
     "ismpu_config_json_config": {
       "code_fingerprint": "b325bd51935b69aee777466f7f65c3cd3f8aac565a4cf96a0ef378c6c99f0d44",
@@ -44,13 +49,13 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984198032,
+      "score": 0.978062201,
       "source_file": "ismpu/config/json_config.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_config_run_matrix_matrixcase": {
-      "code_fingerprint": "435b4a55d8459b8412e5ad1d5bad83cf00ee6c41cbf134c100d5b7e2ac523798",
+      "code_fingerprint": "bcf68a78e17db796972cee43e328184e2e32526d02a4b0132c335d7e5ac040c3",
       "label": "MatrixCase",
       "last": "2026-08-15T22:41:51.524233+00:00",
       "provenance": [
@@ -60,29 +65,39 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984198032,
+      "score": 0.978062201,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_config_run_matrix_matrixrun": {
-      "code_fingerprint": "435b4a55d8459b8412e5ad1d5bad83cf00ee6c41cbf134c100d5b7e2ac523798",
+      "code_fingerprint": "bcf68a78e17db796972cee43e328184e2e32526d02a4b0132c335d7e5ac040c3",
       "label": "MatrixRun",
-      "last": "2026-08-16T13:00:57.723413+00:00",
+      "last": "2026-08-16T16:20:41.366554+00:00",
       "provenance": [
+        {
+          "date": "2026-08-16T16:20:41.366554+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана docs/plan.md; упрощай код, удаляй лишнее и добавляй комментарии."
+        },
+        {
+          "date": "2026-08-16T16:18:27.618585+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
+        },
         {
           "date": "2026-08-16T13:00:57.723413+00:00",
           "outcome": "useful",
           "q": "Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.997858522,
+      "score": 2.98124288,
       "source_file": "ismpu/config/run_matrix.py",
-      "status": "tentative",
-      "uses": 1
+      "status": "preferred",
+      "uses": 3
     },
     "ismpu_config_scenarios_segmentconditions": {
-      "code_fingerprint": "2f346b947aee153bc254776be95d4128f9adcc68760a6f32049e5ccfbfaea890",
+      "code_fingerprint": "e53f906707a33266970346f5c0fd812d2fce080bea346c1da0a9dbe70de92425",
       "label": "SegmentConditions",
       "last": "2026-08-15T22:41:51.524233+00:00",
       "provenance": [
@@ -92,13 +107,13 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984198032,
+      "score": 0.978062201,
       "source_file": "ismpu/config/scenarios.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_control_channels_lateralchannel": {
-      "code_fingerprint": "56106675188679e184af40c80cdd5ee126ff435bc2a5ba9306fe9ad06233946a",
+      "code_fingerprint": "ab16c4a281fdb06dfaa315fd0d9025e1a5b3943f9563911eab2359e9ea9be67f",
       "label": "LateralChannel",
       "last": "2026-08-15T19:39:39.514520+00:00",
       "provenance": [
@@ -113,13 +128,13 @@
           "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.94341415,
+      "score": 1.931298235,
       "source_file": "ismpu/control/channels.py",
       "status": "preferred",
       "uses": 2
     },
     "ismpu_control_channels_longitudinalchannel": {
-      "code_fingerprint": "56106675188679e184af40c80cdd5ee126ff435bc2a5ba9306fe9ad06233946a",
+      "code_fingerprint": "ab16c4a281fdb06dfaa315fd0d9025e1a5b3943f9563911eab2359e9ea9be67f",
       "label": "LongitudinalChannel",
       "last": "2026-08-15T19:39:39.514520+00:00",
       "provenance": [
@@ -129,7 +144,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.981325014,
+      "score": 0.975207095,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
@@ -145,7 +160,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.961628691,
+      "score": 0.955633566,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
@@ -161,16 +176,32 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.981325014,
+      "score": 0.975207095,
       "source_file": "ismpu/control/ground_allocator.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_envs_ics_sim_icssim": {
-      "code_fingerprint": "e4b3c4094045fbfaa96c23e847e494e53d53bbea40f5d3a7668c8da690adc107",
+      "code_fingerprint": "1e03e875f1c6d8f3002f411b48e1f98a5376bfcfe72ddf864191d078873b80d4",
       "label": "ICSSim",
-      "last": "2026-08-15T21:49:56.486344+00:00",
+      "last": "2026-08-16T21:24:48.185629+00:00",
+      "neg": 1,
       "provenance": [
+        {
+          "date": "2026-08-16T21:24:48.185629+00:00",
+          "outcome": "corrected",
+          "q": "Каков финальный результат исправления runtime-паритета 2026-08-16?"
+        },
+        {
+          "date": "2026-08-16T21:22:40.425048+00:00",
+          "outcome": "useful",
+          "q": "Почему production-заход терял паритет с working_ics и как это исправлено?"
+        },
+        {
+          "date": "2026-08-16T18:11:15.803322+00:00",
+          "outcome": "useful",
+          "q": "Почему прогон runs/20260816T174009.095580Z раскачивает самолёт и не сохраняет паритет с working_ics по логу logs/ics_pid_20260816_104551.csv?"
+        },
         {
           "date": "2026-08-15T21:49:56.486344+00:00",
           "outcome": "useful",
@@ -182,50 +213,40 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 1.964703533,
+      "score": 2.94900775,
       "source_file": "ismpu/envs/ics_sim.py",
-      "status": "preferred",
-      "uses": 2
-    },
-    "ismpu_envs_observation_observationbuilder": {
-      "code_fingerprint": "b70f4b95adb2556d790f19cbfd0b0735a5f5514c4b7d25f74a7f51d87b61490f",
-      "label": "ObservationBuilder",
-      "last": "2026-08-14T23:05:50.773201+00:00",
-      "provenance": [
-        {
-          "date": "2026-08-14T23:05:50.773201+00:00",
-          "outcome": "useful",
-          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
-        },
-        {
-          "date": "2026-08-14T22:36:00.679819+00:00",
-          "outcome": "useful",
-          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
-        }
-      ],
-      "score": 1.923717827,
-      "source_file": "ismpu/envs/observation.py",
-      "status": "preferred",
-      "uses": 2
+      "status": "contested",
+      "uses": 4,
+      "verdict": "useful"
     },
     "ismpu_envs_xplane_sim_xplanesim": {
-      "code_fingerprint": "64b0ed0536a79ace04f8c08e011332a58420c1e3075cd89ed2b9417efc2f4def",
+      "code_fingerprint": "7db3780a4d70b2c1740dc992dadfa72cf6e5022b6bc97038c3c1ddc6717186c9",
       "label": "XPlaneSim",
-      "last": "2026-08-15T22:41:51.524233+00:00",
+      "last": "2026-08-16T16:20:41.366554+00:00",
       "provenance": [
+        {
+          "date": "2026-08-16T16:20:41.366554+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана docs/plan.md; упрощай код, удаляй лишнее и добавляй комментарии."
+        },
+        {
+          "date": "2026-08-16T16:18:27.618585+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
+        },
         {
           "date": "2026-08-15T22:41:51.524233+00:00",
           "outcome": "useful",
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984198032,
+      "score": 2.967667554,
       "source_file": "ismpu/envs/xplane_sim.py",
-      "status": "tentative",
-      "uses": 1
+      "status": "preferred",
+      "uses": 3
     },
     "ismpu_runtime_loop": {
-      "code_fingerprint": "a2ac82bc8359520e431fc46c0328940b3c595cc592b3c24be5b14eaf42c26e62",
+      "code_fingerprint": "e6f270a78def99b160236333c2f0d7919d0177f188e9e2091147efe37de14289",
       "label": "loop.py",
       "last": "2026-08-16T12:27:36.943921+00:00",
       "provenance": [
@@ -240,26 +261,31 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.980703285,
+      "score": 1.968354898,
       "source_file": "ismpu/runtime/loop.py",
       "status": "preferred",
       "uses": 2
     },
-    "ismpu_runtime_pretrain": {
-      "code_fingerprint": "b035a57b3a70bbdbfd59dad16963e08c75903f561d98756c2c80f6b63d412afa",
-      "label": "runtime/pretrain.py",
-      "last": "2026-08-16T15:11:14.901406+00:00",
+    "ismpu_working_ics_rollout_bridge": {
+      "code_fingerprint": "5d66f1c21fb049a2e662eb6a1b268a2916b459307c8a8d79ac19a826986b7ac8",
+      "label": "rollout_bridge.py",
+      "last": "2026-08-16T16:20:41.366554+00:00",
       "provenance": [
         {
-          "date": "2026-08-16T15:11:14.901406+00:00",
+          "date": "2026-08-16T16:20:41.366554+00:00",
           "outcome": "useful",
-          "q": "Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)."
+          "q": "Приступай к выполнению этапа 9 плана docs/plan.md; упрощай код, удаляй лишнее и добавляй комментарии."
+        },
+        {
+          "date": "2026-08-16T16:18:27.618585+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 0.99994668,
-      "source_file": "ismpu/runtime/pretrain.py",
-      "status": "tentative",
-      "uses": 1
+      "score": 1.989605352,
+      "source_file": "ismpu/working_ics/rollout_bridge.py",
+      "status": "preferred",
+      "uses": 2
     },
     "ismpu_working_ics_rollout_bridge_vlaydrolloutbridge": {
       "code_fingerprint": "5d66f1c21fb049a2e662eb6a1b268a2916b459307c8a8d79ac19a826986b7ac8",
@@ -272,7 +298,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.983378519,
+      "score": 0.977247798,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "tentative",
       "uses": 1

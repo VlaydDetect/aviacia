@@ -5,6 +5,7 @@
 
 ```
 ВОЗДУШНОЕ (заход):   радиовысота > 400 футов
+                     И  AgentIsActive = 1 уже подтверждён стендом
                      И  ModeAIReady = 1 непрерывно 2.2 секунды при ControlMode = Off
                      И  ControlMode переходит 0 → 1 (Approach)
 
@@ -58,7 +59,7 @@ from enum import Enum
 from ismpu.config.ics import (
     ENGAGE_MAX_GROUNDSPEED_KTS, ENGAGE_READY_DWELL_S, ENGAGE_MIN_READY_FRAMES,
     ENGAGE_AIR_READY_DWELL_S, ENGAGE_MIN_RADIO_ALTITUDE_FT, TERMINAL_RADIO_ALTITUDE_FT,
-    ROLLOUT_FLIGHT_PHASES,
+    ROLLOUT_FLIGHT_PHASES, AIRBORNE_CONTROL_MASK,
 )
 from ismpu.io.ics_connector import ControlModeState
 
@@ -123,13 +124,20 @@ class IcsEngagement:
         self._confirmed = False            # признак стенда (AgentIsActive)
         self._dwell_started: float | None = None
         self._ready_frames = 0
+        self._target_frame_sent = False
+        self._target_frame_mask: int | None = None
         self._adopted = False
         self._arm_target: ControlModeState | None = None   # режим, под который идёт выдержка
         self._forced_arm_target: ControlModeState | None = None
 
     # --- обратная связь от транспорта ----------------------------------- #
 
-    def on_frame_sent(self, mode_ai_ready: int) -> None:
+    def on_frame_sent(
+        self,
+        mode_ai_ready: int,
+        control_mode: ControlModeState | int | None = None,
+        control_valid_mask: int | None = None,
+    ) -> None:
         """Сообщить автомату, что кадр **фактически ушёл** на стенд.
 
         Вызывается транспортом после успешной отправки. Без этого выдержка была бы чистым
@@ -138,10 +146,27 @@ class IcsEngagement:
 
         Кадр без `ModeAIReady = 1` рвёт серию: требование ICD — непрерывность.
         """
-        if mode_ai_ready and self.state is EngagementState.READY_DWELL:
+        actual_mode = self.control_mode if control_mode is None else ControlModeState(control_mode)
+        if (mode_ai_ready and self.state is EngagementState.READY_DWELL
+                and actual_mode is ControlModeState.Off):
             self._ready_frames += 1
-        else:
+        elif self.state is EngagementState.READY_DWELL:
             self._ready_frames = 0
+        expected_mask = (
+            int(AIRBORNE_CONTROL_MASK)
+            if self.control_mode in (ControlModeState.Approach, ControlModeState.Landing)
+            else 0
+        )
+        if (mode_ai_ready and self._commanding_mode
+                and actual_mode is self.control_mode
+                and (control_valid_mask is None
+                     or int(control_valid_mask) == expected_mask)):
+            # Переход состояния после RX ещё не означает, что новый ControlMode ушёл по UDP.
+            # Для воздуха фронт действителен только с mask=31: именно так включает управление
+            # проверенный working_ics. Наземное включение с нуля сохраняет безопасную mask=0.
+            self._target_frame_sent = True
+            self._target_frame_mask = (
+                None if control_valid_mask is None else int(control_valid_mask))
 
     # --- запросы вызывающего ------------------------------------------- #
 
@@ -156,6 +181,7 @@ class IcsEngagement:
         self._forced_arm_target = None
         self._adopted = True
         self._dwell_started = None
+        self._target_frame_sent = True
 
     def request_rollout(self) -> None:
         """Войти в пробег самостоятельно: шлём `ControlMode = Rollout`.
@@ -167,6 +193,7 @@ class IcsEngagement:
         self._forced_arm_target = None
         self._adopted = False
         self._dwell_started = None
+        self._target_frame_sent = True
 
     def request_landing(self) -> bool:
         """Перейти `Approach → Landing` без нового рукопожатия. Закон остаётся воздушным."""
@@ -177,6 +204,7 @@ class IcsEngagement:
         self.state = EngagementState.COMMAND_LANDING
         self._adopted = False
         self._dwell_started = None
+        self._target_frame_sent = True
         return True
 
     def request_approach(self) -> None:
@@ -189,11 +217,13 @@ class IcsEngagement:
         self._forced_arm_target = None
         self._adopted = False
         self._dwell_started = None
+        self._target_frame_sent = True
 
     def arm_taxi_start(self) -> None:
         """Явный матричный старт TAXI: штатная выдержка Off → Taxi без порога скорости."""
         self.state = EngagementState.IDLE
         self._forced_arm_target = ControlModeState.Taxi
+        self._target_frame_sent = False
         self._reset_dwell()
 
     def request_taxi(self, inputs: EngagementInputs) -> bool:
@@ -264,6 +294,8 @@ class IcsEngagement:
                 self.state = (EngagementState.COMMAND_APPROACH
                               if target is ControlModeState.Approach
                               else EngagementState.COMMAND_TAXI)
+                self._target_frame_sent = False
+                self._target_frame_mask = None
         else:
             # Срыв предусловий — отсчёт начинается заново, а не продолжается.
             self._reset_dwell()
@@ -294,11 +326,13 @@ class IcsEngagement:
         """Под какой режим гнать стимул. `None` — предусловий нет ни для одного.
 
         Воздушный вариант проверяется первым: у ВС в воздухе обжатия стоек нет, и наземные
-        предусловия для него всё равно не выполнятся. Радиовысота обязана быть **объявлена** —
-        отсутствующая (`None`) высота не «ноль», а «стенд не сообщил», и включаться по ней
-        нельзя.
+        предусловия для него всё равно не выполнятся. До отсчёта требуется `AgentIsActive=1`:
+        эталон сначала ждёт разрешение оператора IOS и лишь затем шлёт 2.2 с готовности.
+        Радиовысота обязана быть **объявлена** — отсутствующая (`None`) высота не «ноль», а
+        «стенд не сообщил», и включаться по ней нельзя.
         """
-        if (not inputs.all_gear_on_ground
+        if (inputs.agent_is_active
+                and not inputs.all_gear_on_ground
                 and inputs.radio_altitude_ft is not None
                 and inputs.radio_altitude_ft > self.min_radio_altitude_ft):
             return ControlModeState.Approach
@@ -337,7 +371,7 @@ class IcsEngagement:
     @property
     def stimulus_complete(self) -> bool:
         """Довели ли мы рукопожатие до конца: выдержка выдержана, режим выставлен и держится."""
-        return self._commanding_mode
+        return self._commanding_mode and self._target_frame_sent
 
     @property
     def engaged(self) -> bool:
@@ -353,6 +387,17 @@ class IcsEngagement:
     def adopted(self) -> bool:
         """Был ли режим подхвачен извне, а не установлен нами."""
         return self._adopted
+
+    @property
+    def airborne_stimulus(self) -> bool:
+        """Идёт ли воздушный startup, для которого стенд требует mask=31 уже в режиме Off."""
+        return (
+            self._arm_target is ControlModeState.Approach
+            or self.state in (
+                EngagementState.COMMAND_APPROACH,
+                EngagementState.COMMAND_LANDING,
+            )
+        )
 
     @property
     def control_mode(self) -> ControlModeState:
@@ -399,6 +444,8 @@ class IcsEngagement:
             return "включено (стимул доведён, AgentIsActive=1)"
         if not inputs.telemetry_valid:
             return "нет валидной телеметрии со стенда"
+        if self._commanding_mode and not self._target_frame_sent:
+            return f"целевой ControlMode={self.control_mode.name} ещё не отправлен"
         if self._commanding_mode:
             # Всё, что зависело от нас, отправлено; ждём решения стенда.
             return (f"стимул доведён (ControlMode={self.control_mode.name}), но стенд ещё не "
@@ -414,6 +461,8 @@ class IcsEngagement:
             if ra is None:
                 return ("обжаты не все стойки, а радиовысота стендом не объявлена — "
                         "включаться не по чему: ни наземное условие, ни воздушное не проверить")
+            if ra > self.min_radio_altitude_ft and not inputs.agent_is_active:
+                return "воздушный startup ждёт AgentIsActive=1 до начала выдержки"
             return (f"обжаты не все стойки, радиовысота {ra:.0f} футов ≤ "
                     f"{self.min_radio_altitude_ft:.0f} — не выполнено ни наземное условие "
                     f"включения, ни воздушное")
@@ -427,6 +476,8 @@ class IcsEngagement:
             "engaged": self.engaged,
             "confirmed": self._confirmed,
             "stimulus_complete": self.stimulus_complete,
+            "target_frame_sent": self._target_frame_sent,
+            "target_frame_mask": self._target_frame_mask,
             "adopted": self.adopted,
             "control_mode": int(self.control_mode),
             "arm_target": None if self._arm_target is None else int(self._arm_target),

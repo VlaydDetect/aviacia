@@ -327,6 +327,11 @@ class ICSBenchConnector:
         self._packet_observer: Callable[[str, bytes, tuple[str, int]], None] | None = None
         self.last_received_packet: bytes | None = None
         self.last_sent_packet: bytes | None = None
+        self.last_receive_monotonic: float | None = None
+        self.last_receive_perf_counter: float | None = None
+        self.last_receive_perf_counter: float | None = None
+        self.last_drain_count = 0
+        self.discarded_stale_packets = 0
 
     def set_packet_observer(
         self,
@@ -356,7 +361,56 @@ class ICSBenchConnector:
             logger.warning("[ICS] Ошибка приёма: %s", e)
             return None
 
+        return self._decode_inputs(data, sender_addr)
+
+    def receive_latest_inputs(self, timeout: float = 1.0) -> Optional[ICSInputs]:
+        """Дождаться кадра и отбросить накопившийся UDP backlog, оставив самый свежий.
+
+        Обычно очередь пуста и метод эквивалентен `receive_inputs`. После breakpoint или
+        длинной паузы проигрывать старые состояния подряд опасно: PID получил бы запаздывающую
+        обратную связь. Все отброшенные payload всё равно проходят raw-observer для аудита.
+        """
+        self.sock.settimeout(timeout)
+        try:
+            latest = self.sock.recvfrom(65535)
+        except socket.timeout:
+            self.last_drain_count = 0
+            return None
+        except OSError as exc:
+            logger.warning("[ICS] Ошибка приёма: %s", exc)
+            self.last_drain_count = 0
+            return None
+
+        datagrams = [latest]
+        self.sock.settimeout(0.0)
+        while True:
+            try:
+                datagrams.append(self.sock.recvfrom(65535))
+            except (socket.timeout, BlockingIOError):
+                break
+            except OSError as exc:
+                logger.warning("[ICS] Ошибка сброса очереди приёма: %s", exc)
+                break
+
+        self.last_drain_count = len(datagrams) - 1
+        self.discarded_stale_packets += self.last_drain_count
+        decoded = None
+        for data, sender_addr in datagrams:
+            candidate = self._decode_inputs(data, sender_addr)
+            if candidate is not None:
+                decoded = candidate
+        return decoded
+
+    def _decode_inputs(
+        self,
+        data: bytes,
+        sender_addr: tuple[str, int],
+    ) -> Optional[ICSInputs]:
+        """Зафиксировать и разобрать один уже принятый UDP payload."""
         self.last_received_packet = data
+        self.last_receive_monotonic = time.monotonic()
+        self.last_receive_perf_counter = time.perf_counter()
+        self.last_receive_perf_counter = time.perf_counter()
         self._observe("rx", data, sender_addr)
 
         if self.send_addr != sender_addr:

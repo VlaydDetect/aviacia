@@ -30,11 +30,28 @@ from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE, SOURCE_SHA256
 from ismpu.config.scenarios import (
     SCENARIOS, ProfileStatus, Scenario, rebind_matrix_run, resolve_scenario,
-    scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario,
+    scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario, DEFAULT,
 )
 from ismpu.config.json_config import load_scenario
 
 logger = logging.getLogger(__name__)
+
+
+def _timing_summary(values: list[float]) -> dict[str, float | int]:
+    """Компактные перцентили миллисекунд без зависимости в критическом пути."""
+    ordered = sorted(values)
+    if not ordered:
+        return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0}
+
+    def at(fraction: float) -> float:
+        return ordered[round((len(ordered) - 1) * fraction)] * 1000.0
+
+    return {
+        "count": len(ordered),
+        "p50_ms": at(0.50),
+        "p95_ms": at(0.95),
+        "p99_ms": at(0.99),
+    }
 
 
 def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
@@ -44,7 +61,10 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
     reason = RunStopReason.ERROR
     details: str | None = None
     shutdown_report: ShutdownReport | None = None
-    run_started = time.monotonic()
+    periods: list[float] = []
+    control_times: list[float] = []
+    rx_to_tx_times: list[float] = []
+    run_started = 0.0
     try:
         if recorder is not None:
             recorder.attach_sim(sim)
@@ -60,78 +80,123 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
 
         print("Прогрев (ожидание, пока стенд примет управление)...")
         sim.warm_up()
-        controller.last_telemetry = sim.read_telemetry()
-        run_started = time.monotonic()
-
         print("Управление включено.")
         last_time = time.monotonic()
+        run_started = last_time
+        perf_run_started = time.perf_counter()
+        next_send = last_time
+        next_tick = last_time + DT
+        receive_driven = getattr(sim, "backend_name", None) == "ics"
         while True:
-            current_time = time.monotonic()
-            dt = current_time - last_time
+            if receive_driven:
+                telemetry = sim.read_telemetry()  # блокирует до следующего UDP-кадра
+                current_time = time.monotonic()
+            else:
+                current_time = time.monotonic()
+                if current_time < next_tick:
+                    time.sleep(next_tick - current_time)
+                    current_time = max(next_tick, time.monotonic())
+                telemetry = sim.read_telemetry()
+            rx_received_at = getattr(sim, "last_receive_perf_counter", None)
+            if not isinstance(rx_received_at, (int, float)):
+                rx_received_at = time.perf_counter()
 
-            if dt >= DT:
-                if dashboard_state is not None:
-                    dashboard_state.apply_pending_gain_updates()
-                if sft_runtime is not None:
-                    sft_runtime.before_step(controller, controller.last_telemetry, dt)
-                # Контур сам читает телеметрию и сам отправляет команды через sim.
-                finished = controller.control_step(dt)
-                if sft_runtime is not None and controller.last_step_telemetry is not None:
-                    sft_runtime.after_step(
-                        controller, controller.last_step_telemetry, dt)
-                if recorder is not None and controller.last_step_telemetry is not None:
-                    recorder.record(
-                        controller.last_step_telemetry,
-                        controller,
-                        elapsed_s=time.monotonic() - run_started,
-                        dt=dt,
+            actual_period = current_time - last_time
+            dt = actual_period
+            dropped = int(getattr(sim, "last_receive_dropped", 0)) if receive_driven else 0
+            if dropped:
+                # После breakpoint берём последний кадр, а разрыв не подаём в D/I-численность.
+                controller.reset_pid_derivatives()
+                dt = DT
+                if recorder is not None:
+                    recorder.record_event(
+                        "telemetry_backlog_dropped",
+                        data={"count": dropped},
+                        time_s=current_time - run_started,
+                        tick_id=controller.tick_id,
+                        segment=controller.segment.value,
                     )
-                if finished:
-                    if controller.segment is FlightSegment.ROLLOUT:
-                        rule = controller.longitudinal_channel.trajectory.completion_rule
-                        if rule is CompletionRule.HANDOVER_TAXI:
-                            # Эксплуатационный полёт: ControlMode 3 → 4 на 7,5 узла.
-                            if controller.hand_over_to_taxi() and recorder is not None:
-                                elapsed = time.monotonic() - run_started
-                                recorder.record_event(
-                                    "segment",
-                                    data={"previous": "rollout", "value": "taxi",
-                                          "handover_only": True},
-                                    time_s=elapsed,
-                                    tick_id=controller.tick_id,
-                                    segment="taxi",
-                                )
-                                recorder.record_event(
-                                    "control_mode",
-                                    data={"previous": 3, "value": 4,
-                                          "handover_only": True},
-                                    time_s=elapsed,
-                                    tick_id=controller.tick_id,
-                                    segment="taxi",
-                                )
-                        # Матричный FULL_STOP завершается на месте и ниже снимает каналы.
-                        reason = RunStopReason.COMPLETED
-                    elif controller.go_around_reason is not None:
-                        # Уход на второй круг: заявка каналов снимается ниже (control_exception),
-                        # руление не запрашиваем — ВС в воздухе, управление уходит пилоту.
-                        print(f"[loop] уход на второй круг: {controller.go_around_reason}")
-                        reason = RunStopReason.GO_AROUND
-                        details = controller.go_around_reason
-                    else:
-                        reason = RunStopReason.COMPLETED
-                    break
+            elif dt <= 0.0:
+                dt = DT
+            periods.append(actual_period)
+            send_now = not receive_driven or current_time >= next_send
 
-                if _lost_engagement(controller, sim):
-                    reason = RunStopReason.ENGAGEMENT_LOST
-                    details = f"{sim.backend_name}: {controller.segment.value}"
-                    break
+            if dashboard_state is not None:
+                dashboard_state.apply_pending_gain_updates()
+            if sft_runtime is not None:
+                sft_runtime.before_step(controller, telemetry, dt)
+            control_started = time.perf_counter()
+            finished = controller.control_step(dt, telemetry, send=send_now)
+            control_ended = time.perf_counter()
+            tx_sent_at = getattr(sim, "last_send_perf_counter", None)
+            if not controller.last_step_sent or not isinstance(tx_sent_at, (int, float)):
+                tx_sent_at = control_ended if controller.last_step_sent else None
+            control_times.append(control_ended - control_started)
+            if send_now:
+                next_send = current_time + DT
+            if tx_sent_at is not None:
+                rx_to_tx_times.append(tx_sent_at - rx_received_at)
+            if sft_runtime is not None and controller.last_step_telemetry is not None:
+                sft_runtime.after_step(controller, controller.last_step_telemetry, dt)
+            if recorder is not None and controller.last_step_telemetry is not None:
+                recorder.record(
+                    controller.last_step_telemetry,
+                    controller,
+                    elapsed_s=current_time - run_started,
+                    dt=dt,
+                    runtime_timing={
+                        "runtime_rx_s": rx_received_at - perf_run_started,
+                        "runtime_control_start_s": control_started - perf_run_started,
+                        "runtime_control_end_s": control_ended - perf_run_started,
+                        "runtime_tx_s": (
+                            tx_sent_at - perf_run_started if tx_sent_at is not None else None),
+                        "runtime_telemetry_age_s": control_started - rx_received_at,
+                        "runtime_stale_rx_dropped": dropped,
+                    },
+                )
+            if finished:
+                if controller.abort_reason is not None:
+                    reason = RunStopReason.ERROR
+                    details = controller.abort_reason
+                elif controller.segment is FlightSegment.ROLLOUT:
+                    rule = controller.longitudinal_channel.trajectory.completion_rule
+                    if rule is CompletionRule.HANDOVER_TAXI:
+                        # Эксплуатационный полёт: ControlMode 3 → 4 на 7,5 узла.
+                        if controller.hand_over_to_taxi() and recorder is not None:
+                            elapsed = current_time - run_started
+                            recorder.record_event(
+                                "segment",
+                                data={"previous": "rollout", "value": "taxi",
+                                      "handover_only": True},
+                                time_s=elapsed,
+                                tick_id=controller.tick_id,
+                                segment="taxi",
+                            )
+                            recorder.record_event(
+                                "control_mode",
+                                data={"previous": 3, "value": 4,
+                                      "handover_only": True},
+                                time_s=elapsed,
+                                tick_id=controller.tick_id,
+                                segment="taxi",
+                            )
+                    reason = RunStopReason.COMPLETED
+                elif controller.go_around_reason is not None:
+                    print(f"[loop] уход на второй круг: {controller.go_around_reason}")
+                    reason = RunStopReason.GO_AROUND
+                    details = controller.go_around_reason
+                else:
+                    reason = RunStopReason.COMPLETED
+                break
 
-                last_time = current_time
+            if _lost_engagement(controller, sim):
+                reason = RunStopReason.ENGAGEMENT_LOST
+                details = f"{sim.backend_name}: {controller.segment.value}"
+                break
 
-            time.sleep(0.01)  # Снижение нагрузки на CPU
-
-        if reason is RunStopReason.ERROR:
-            reason = RunStopReason.COMPLETED
+            last_time = current_time
+            if not receive_driven:
+                next_tick = current_time + DT
     except KeyboardInterrupt:
         trajectory = getattr(
             getattr(controller, "longitudinal_channel", None), "trajectory", None)
@@ -168,6 +233,13 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                     "conditions_valid": getattr(sim, "conditions_valid", True),
                     "condition_matches": getattr(sim, "condition_matches", ()),
                     "shutdown": shutdown_report,
+                    "runtime_timing": {
+                        "control_period": _timing_summary(periods),
+                        "control_step": _timing_summary(control_times),
+                        "rx_to_tx": _timing_summary(rx_to_tx_times),
+                        "discarded_stale_packets": int(
+                            getattr(sim, "discarded_stale_packets", 0)),
+                    },
                 })
             except Exception:
                 logger.exception("Ошибка завершения журнала прогона")
@@ -419,11 +491,10 @@ if __name__ == "__main__":
     # raise SystemExit(cli())
 
     main(
-        preset=compose_matrix_scenario("AB-default", approach_run="A.1.2/1", rollout_run="B.1.1/1"),
+        preset=DEFAULT,
         backend="ics",
         aircraft_profile="mc21",
         runway_profile="uuee-06r",
-        # dashboard=True,
-        # dashboard_tune=True,
+        dashboard=True,
+        dashboard_tune=True,
     )
-

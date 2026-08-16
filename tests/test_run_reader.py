@@ -89,6 +89,40 @@ def test_approach_stream_has_three_pid_states_and_replays_at_1e_12(tmp_path):
     assert RunReader(recorder.directory).replay(atol=1e-12, rtol=1e-12).success
 
 
+def test_report_exposes_go_around_command_to_feedback_metrics(tmp_path):
+    scenario = Scenario.from_preset("default")
+    controller = ControllingSystem()
+    controller.bind_scenario(scenario, "mc21")
+    controller.begin_flight(Telemetry.from_ics(airborne_inputs(550.0)))
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21",
+        scenario=scenario, start="approach")
+    for index, elevator in enumerate((0.1, 0.4, 0.7), 1):
+        frame = Telemetry.from_ics(airborne_inputs(
+            550.0 - index,
+            ElevatorLeftAngle=elevator,
+            ElevatorRightAngle=elevator,
+            PitchAngle=2.0 + index,
+            VerticalSpeed=-700.0 + 100.0 * index,
+        ))
+        controller.control_step(0.05, frame, send=False)
+        controller.go_around_reason = "test"
+        controller.state.cmd_elevator = 0.1 * index
+        recorder.record(frame, controller, elapsed_s=index * 0.05)
+    recorder.finish({"stop_reason": "error", "conditions_valid": True})
+
+    authority = json.loads(
+        (recorder.directory / "report.json").read_text(encoding="utf-8")
+    )["metrics"]["go_around_authority"]
+    assert authority == {
+        "samples": 3,
+        "elevator_command_max_abs_g": pytest.approx(0.3),
+        "elevator_feedback_span_deg": pytest.approx(0.6),
+        "pitch_span_deg": pytest.approx(2.0),
+        "vertical_speed_span_fpm": pytest.approx(200.0),
+    }
+
+
 def test_legacy_adapter_does_not_invent_missing_pid_terms(tmp_path):
     path = tmp_path / "working.csv"
     path.write_text(

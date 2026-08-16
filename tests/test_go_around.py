@@ -130,6 +130,41 @@ def test_go_around_completes_on_established_climb():
     assert c.state.cmd_throttle_norm == pytest.approx(0.0)
 
 
+def test_go_around_starts_with_clean_roll_and_pitch_pid_state():
+    c = _armed_controller()
+    frame = _frame(200.0, RollAngle=5.0, PitchAngle=2.5, VerticalSpeed=-700.0)
+    c.control_step(DT, telemetry=frame, send=False)
+    previous_target_pitch = c.approach_channel._target_pitch_deg
+    c.approach_channel.roll_pid.integral = 10.0
+    c.approach_channel.roll_pid.filtered_derivative = 20.0
+    c.approach_channel.pitch_pid.integral = -10.0
+
+    c._start_go_around("тест", frame)
+    assert c.approach_channel.roll_pid.integral == 0.0
+    assert c.approach_channel.pitch_pid.integral == 0.0
+    assert c.approach_channel._target_pitch_deg == previous_target_pitch
+    c._go_around_step(DT, frame)
+
+    # У стенда знак проводки инверсный: положительная команда убирает положительный крен.
+    # Главное здесь — чистый P-ответ, а не сохранённые ~3° localizer I-term.
+    assert c.state.cmd_aileron == c.approach_channel.roll_pid.max_out
+    assert c.approach_channel.roll_pid.filtered_derivative == 0.0
+    c._go_around_step(DT, frame)
+    assert c.state.cmd_elevator > 0.0
+
+
+def test_go_around_timeout_without_climb_is_an_error():
+    c = _armed_controller()
+    frame = _frame(200.0, VerticalSpeed=-200.0)
+    c._start_go_around("тест", frame)
+    c.go_around.elapsed_s = c.approach_channel.config.go_around_max_seconds - DT
+
+    assert c.control_step(DT, telemetry=frame, send=False) is True
+    assert c.abort_reason == "go_around_timeout_no_climb"
+    assert c.state.cmd_elevator == pytest.approx(0.0)
+    assert c.state.cmd_throttle_norm == pytest.approx(0.0)
+
+
 def test_go_around_hands_off_via_deactivate():
     """После установившегося набора цикл снимает заявку каналов (ControlMode=Off, маска=0)."""
     conn = FakeConnector(airborne_inputs(radio_altitude_ft=300.0))

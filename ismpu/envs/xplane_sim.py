@@ -74,6 +74,8 @@ class XPlaneSim(SimInterface):
         self._engaged = False
         self._mode = "rollout"
         self._last_telemetry = Telemetry.invalid()
+        self.last_receive_perf_counter: float | None = None
+        self.last_send_perf_counter: float | None = None
         self._weather = WeatherState()
         self._distance_m = 0.0
         self._last_friction = None
@@ -203,6 +205,7 @@ class XPlaneSim(SimInterface):
 
     def read_telemetry(self) -> Telemetry:
         values = self.connector.snapshot(max_age_s=self.stale_after_s)
+        self.last_receive_perf_counter = time.perf_counter()
         required = (dr.LATITUDE, dr.LONGITUDE, dr.GROUNDSPEED, dr.TRUE_PSI)
         if any(name not in values or not math.isfinite(values[name]) for name in required):
             self._last_telemetry = Telemetry.invalid()
@@ -349,8 +352,12 @@ class XPlaneSim(SimInterface):
         return self._last_telemetry
 
     def step(self, command: ControlsState) -> Telemetry:
+        self.send_controls(command)
+        return self.read_telemetry()
+
+    def send_controls(self, command: ControlsState) -> bool:
         if not self._engaged:
-            return self.read_telemetry()
+            return False
         commands = (
             self.profile.airborne_commands(command)
             if self._mode == "approach"
@@ -362,7 +369,8 @@ class XPlaneSim(SimInterface):
         if self._mode != "approach":
             self._distance_m += max(0.0, self._last_telemetry.groundspeed_ms) * DT
             self.update(self._distance_m)
-        return self.read_telemetry()
+        self.last_send_perf_counter = time.perf_counter()
+        return True
 
     def request_rollout(self) -> None:
         self._mode = "rollout"

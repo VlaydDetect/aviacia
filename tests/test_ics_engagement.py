@@ -289,6 +289,32 @@ def test_bench_activity_alone_does_not_engage_before_the_stimulus_is_complete():
     assert eng.engaged is True
 
 
+def test_automatic_handshake_waits_until_target_mode_was_actually_sent():
+    """Переход автомата после RX не подменяет ещё не случившуюся отправку `Off → Taxi`."""
+    clock = _Clock()
+    eng = _engine(clock)
+    active = _ready(agent_is_active=1)
+    eng.step(active)
+    for _ in range(TICKS_FOR_DWELL + 10):
+        sent_mode = eng.control_mode
+        eng.on_frame_sent(eng.mode_ai_ready, sent_mode)
+        clock.advance(TICK_S)
+        eng.step(active)
+        if eng.state is EngagementState.COMMAND_TAXI:
+            break
+
+    assert eng.state is EngagementState.COMMAND_TAXI
+    assert eng.confirmed is True
+    assert eng.stimulus_complete is False
+    assert eng.engaged is False
+
+    eng.on_frame_sent(1, ControlModeState.Taxi, 31)
+    assert eng.stimulus_complete is False
+    eng.on_frame_sent(1, ControlModeState.Taxi, 0)
+    assert eng.stimulus_complete is True
+    assert eng.engaged is True
+
+
 # --------------------------------------------------------------------------- #
 # Подхват уже включённого пробега
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,8 @@
 import csv
 import json
+import time
 from dataclasses import fields
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +33,19 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
 
     sample = telemetry(groundspeed_ms=80.0)
     controller.control_step(0.05, sample, send=False)
-    recorder.record(sample, controller, elapsed_s=0.05)
+    recorder.record(
+        sample,
+        controller,
+        elapsed_s=0.05,
+        runtime_timing={
+            "runtime_rx_s": 0.01,
+            "runtime_control_start_s": 0.011,
+            "runtime_control_end_s": 0.012,
+            "runtime_tx_s": 0.012,
+            "runtime_telemetry_age_s": 0.001,
+            "runtime_stale_rx_dropped": 0,
+        },
+    )
     assert recorder.sample_count == 1
     assert recorder.directory.exists()
 
@@ -60,7 +74,7 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert metadata["matrix_run_ids"] == {}
     assert set(metadata["scenario"]["conditions"]) == {"approach", "rollout", "taxi"}
     assert metadata["frequency_hz"] == 20.0
-    assert metadata["schema_version"] == 2
+    assert metadata["schema_version"] == 3
     assert metadata["samples"] == 1
     assert metadata["git"].keys() == {"revision", "dirty"}
 
@@ -79,6 +93,8 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert rows[0]["dt"] == "0.05"
     assert rows[0]["scenario_id"] == scenario.scenario_id
     assert rows[0]["config_revision"] == "0"
+    assert rows[0]["runtime_rx_s"] == "0.01"
+    assert rows[0]["runtime_tx_s"] == "0.012"
 
     with (recorder.directory / "ground.csv").open(encoding="utf-8", newline="") as stream:
         assert len(list(csv.DictReader(stream))) == 1
@@ -245,6 +261,69 @@ def test_streaming_flush_is_readable_before_finish_and_memory_is_bounded(tmp_pat
     recorder.finish({"stop_reason": "completed", "conditions_valid": True})
 
 
+def test_slow_writer_never_blocks_the_control_thread_and_preserves_order(tmp_path):
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller, "mc21")
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21", scenario=scenario)
+    recorder.start()
+    entered, release = Event(), Event()
+    original = recorder._write_item
+
+    def slow_write(kind, payload):
+        if kind == "row":
+            entered.set()
+            release.wait(1.0)
+        original(kind, payload)
+
+    recorder._write_item = slow_write
+    started = time.perf_counter()
+    for tick in range(2):
+        sample = telemetry(groundspeed_ms=80.0 - tick)
+        controller.control_step(0.05, sample, send=False)
+        recorder.record(sample, controller, elapsed_s=0.05 * (tick + 1))
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.1
+    assert entered.wait(1.0)
+    release.set()
+    recorder.finish()
+    with (recorder.directory / "telemetry.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        assert [row["tick_id"] for row in csv.DictReader(stream)] == ["1", "2"]
+
+
+def test_writer_queue_overflow_invalidates_run_without_waiting(tmp_path):
+    scenario = Scenario.from_preset("default")
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21", scenario=scenario,
+        writer_queue_size=1,
+    )
+    recorder.start()
+    recorder.flush()
+    entered, release = Event(), Event()
+    original = recorder._write_item
+
+    def blocked_write(kind, payload):
+        entered.set()
+        release.wait(1.0)
+        original(kind, payload)
+
+    recorder._write_item = blocked_write
+    assert recorder._enqueue(("event", {"event": "first"}))
+    assert entered.wait(1.0)
+    assert recorder._enqueue(("event", {"event": "queued"}))
+    started = time.perf_counter()
+    assert not recorder._enqueue(("event", {"event": "overflow"}))
+    assert time.perf_counter() - started < 0.1
+    assert recorder.recording_failed
+    assert "переполнена" in recorder.recording_error
+    release.set()
+    recorder.finish()
+
+
 def test_recording_failure_never_escapes_into_control_and_invalidates_result(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
@@ -257,6 +336,7 @@ def test_recording_failure_never_escapes_into_control_and_invalidates_result(tmp
     controller.control_step(0.05, sample, send=False)
 
     recorded = recorder.record(sample, controller, elapsed_s=0.05)
+    recorder.flush()  # writer-поток должен успеть увидеть имитацию ошибки диска
 
     assert recorded.tick_id == 1
     assert recorder.recording_failed

@@ -4,8 +4,8 @@
 в воздухе — `ApproachController` (заход по ILS и выравнивание), на земле — speed controller,
 guidance и allocator органов управления.
 
-**Транспорта здесь нет.** Контур получает объект стенда (`envs.ics_sim.ICSSim`) и общается с ним
-только через `read_telemetry`/`step`; ни JSON, ни UDP, ни единиц ICD он не знает — их переводит
+**Транспорта здесь нет.** Контур получает backend через `SimInterface` и общается с ним
+только через `read_telemetry`/`send_controls`; ни JSON, ни UDP, ни единиц ICD он не знает — их переводит
 `ICSSim`.
 
 **Воздушные регуляторы живут отдельно от `self.pids`.** Словарь `pids` — ровно пять
@@ -84,9 +84,7 @@ class ControllingSystem:
         self.pids: PidMap = {}
         self.state: ControlsState = ControlsState()
         self.last_telemetry: Telemetry | None = None
-        # Идентификаторы кадра относятся к входной телеметрии, на которой действительно
-        # посчитана команда.  После send backend уже возвращает следующий кадр, поэтому
-        # отдельная ссылка нужна recorder/replay, чтобы не получить сдвиг на один такт.
+        # Отдельная ссылка сохраняет точный вход расчёта для recorder/replay.
         self.last_step_telemetry: Telemetry | None = None
         self.last_step_dt: float = 0.0
         self.last_step_send_attempted: bool = False
@@ -318,15 +316,14 @@ class ControllingSystem:
     ) -> bool:
         """Такт управления. → True, если управление окончено (или телеметрия невалидна).
 
-        `telemetry=None` — кадр берётся сам: сначала результат прошлого `sim.step` (он уже свежий),
-        и только на первом такте делается отдельный `sim.read_telemetry()`. Так на стенде выходит
-        ровно один приём UDP на такт, а не два.
+        `telemetry=None` — ровно один новый кадр читается перед расчётом. Отправка не читает
+        следующий кадр скрыто: это сохраняет причинный порядок RX → PID → TX.
 
         `send=False` — команды считаются в `self.state`, но не отправляются. Это канонический
         путь replay: он сравнивает результат по каждому кадру, не открывая UDP-сокет.
         """
         if telemetry is None:
-            telemetry = self.last_telemetry if self.last_telemetry is not None else self._read()
+            telemetry = self._read()
         self.tick_id += 1
         self.last_step_telemetry = telemetry
         self.last_step_dt = dt
@@ -346,8 +343,7 @@ class ControllingSystem:
         if send:
             sim = self._require_sim()
             self.last_step_send_attempted = True
-            self.last_telemetry = sim.step(self.state)
-            self.last_step_sent = bool(getattr(sim, "last_output_sent", True))
+            self.last_step_sent = bool(sim.send_controls(self.state))
 
         return False
 
@@ -420,6 +416,11 @@ class ControllingSystem:
             self._go_around_step(dt, telemetry)   # первый такт набора — уже в этом кадре
         return False
 
+    def reset_pid_derivatives(self) -> None:
+        """Разорвать D-history после пропуска устаревшей UDP-очереди, не трогая интегралы."""
+        for pid in (*self.approach_channel.pids.values(), *self.pids.values()):
+            pid.reset_derivative()
+
     def _commit_landing_mode(self, telemetry: Telemetry) -> None:
         """Зафиксировать `Approach → Landing` на 25 ft без смены воздушного закона."""
         if self.landing_committed:
@@ -486,6 +487,7 @@ class ControllingSystem:
     def _start_go_around(self, reason: str, telemetry: Telemetry) -> None:
         """Начать уход: зафиксировать состояние манёвра и высоту входа."""
         ra = telemetry.radio_altitude_ft if telemetry is not None else None
+        self.approach_channel.prepare_go_around()
         self.go_around = GoAroundManeuver(reason=reason, entry_radio_altitude_ft=ra or 0.0)
         self.go_around_reason = reason
         self._violation_ticks = 0
@@ -496,8 +498,8 @@ class ControllingSystem:
 
         Взлётный режим + кабрирование + крылья в горизонт (`ApproachController.go_around_command`).
         `ControlMode` не меняется (остаётся `Approach`): смена режима в воздухе сбрасывает
-        автопилот стенда. Завершение = устойчивый набор или страховочный таймаут; дальше цикл
-        останавливается, и `control_exception` снимает заявку каналов — это и есть передача пилоту.
+        автопилот стенда. Устойчивый набор завершает манёвр штатно; таймаут без физического
+        набора — ошибка, после которой `control_exception` снимает заявку каналов.
         """
         maneuver = self.go_around
         if maneuver is None:
@@ -509,8 +511,13 @@ class ControllingSystem:
             self.state.neutralize_airborne()
             return True
         self.approach_channel.go_around_command(dt, self.state, telemetry)
-        if self._climb_established(telemetry) or maneuver.elapsed_s >= cfg.go_around_max_seconds:
+        if self._climb_established(telemetry):
             print("[ControllingSystem] Набор установлен — управление передаётся пилоту.")
+            self.state.neutralize_airborne()
+            return True
+        if maneuver.elapsed_s >= cfg.go_around_max_seconds:
+            self.abort_reason = "go_around_timeout_no_climb"
+            print("[ControllingSystem] Уход не выполнен: набор не установлен до таймаута.")
             self.state.neutralize_airborne()
             return True
         return False
@@ -673,6 +680,6 @@ class ControllingSystem:
         print("\n[ControllingSystem] Остановка. Сброс органов и снятие заявки каналов.")
         self.state.neutralize()
         if self.sim is not None:
-            self.sim.step(self.state)      # нейтраль в уже заявленных каналах
+            self.sim.send_controls(self.state)  # нейтраль в уже заявленных каналах
             self.sim.deactivate()          # затем снятие заявки
         self.state.break_control = True
