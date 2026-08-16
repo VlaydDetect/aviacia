@@ -130,6 +130,28 @@ def test_sends_bare_json_without_any_framing():
     assert json.loads(packet.decode("utf-8"))["ControlMode"] == int(ControlModeState.Rollout)
 
 
+def test_packet_observer_gets_exact_rx_before_parsing_and_only_successful_tx():
+    raw = json.dumps(
+        _full_payload(GroundSpeed=50.0, SomeFutureSignal={"x": 1}),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    conn, sock = _connector([(raw, BENCH_ADDR)])
+    observed = []
+    conn.set_packet_observer(lambda direction, packet, peer: observed.append(
+        (direction, packet, peer)))
+
+    inputs = conn.receive_inputs()
+    outputs = ICSOutputs(ControlMode=ControlModeState.Rollout)
+    assert conn.send_outputs(outputs)
+
+    assert inputs.raw_fields["SomeFutureSignal"] == {"x": 1}
+    assert observed[0] == ("rx", raw, BENCH_ADDR)
+    assert observed[1] == ("tx", outputs.to_json_bytes(), BENCH_ADDR)
+    assert conn.last_received_packet == raw
+    assert conn.last_sent_packet == sock.sent[-1][0]
+
+
 def test_send_without_a_known_address_is_refused():
     conn, sock = _connector()
     assert conn.send_outputs(ICSOutputs()) is False

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import threading
@@ -17,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from ismpu.runtime.roman_logs import RomanLogImporter
+from ismpu.runtime.run_reader import RunReader
 from ismpu.runtime.run_recorder import (
     controller_pids,
     gains_snapshot,
@@ -187,13 +186,24 @@ class DashboardState:
             raise ValueError("at least one of kp, ki, kd is required")
         with self._lock:
             pid = pids[pid_key]
+            previous = {name: getattr(pid, name) for name in ("kp", "ki", "kd")}
             for name, value in clean.items():
                 setattr(pid, name, value)
+            self.controller.config_revision += 1
             self.timeline.append({
                 "time_s": time.monotonic() - self.started_monotonic,
                 "event": "gains",
                 "value": {"pid": pid_key, **clean},
             })
+            if self.recorder is not None:
+                self.recorder.record_event(
+                    "gains",
+                    data={"pid": pid_key, "previous": previous,
+                          "value": {name: getattr(pid, name) for name in ("kp", "ki", "kd")},
+                          "config_revision": self.controller.config_revision},
+                    tick_id=self.controller.tick_id,
+                    segment=self.controller.segment.value,
+                )
             return {"pid": pid_key, "kp": pid.kp, "ki": pid.ki, "kd": pid.kd}
 
     def enqueue_gain_update(self, pid_key: str, gains: dict) -> dict:
@@ -389,16 +399,15 @@ class DashboardState:
             ),
             "tune_enabled": self.tune_enabled,
             "npgs_active": self.npgs_active,
+            "recording_failed": bool(getattr(self.recorder, "recording_failed", False)),
+            "recording_error": getattr(self.recorder, "recording_error", None),
         }
 
     @classmethod
     def from_csv(cls, path: str | Path, *, max_points: int = 2400):
-        path = Path(path)
-        with path.open("r", encoding="utf-8-sig", newline="") as stream:
-            fields = set(csv.DictReader(stream).fieldnames or ())
-
+        reader = RunReader(path)
         state = cls(max_points=max_points)
-        state.replay_source = str(path.resolve())
+        state.replay_source = str(reader.path.resolve())
         count = 0
         first_time = last_time = 0.0
         last_segment = None
@@ -443,11 +452,7 @@ class DashboardState:
                         point["value"] = row.get("ias_ms")
                     state.points[spec.key].append(point)
 
-        if "pid_roll_output" in fields:
-            with path.open("r", encoding="utf-8-sig", newline="") as stream:
-                consume(csv.DictReader(stream))
-        else:
-            consume(RomanLogImporter(path).rows())
+        consume(reader.rows())
 
         state.replay_summary = {
             "rows": count,

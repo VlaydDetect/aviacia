@@ -1,6 +1,7 @@
 import csv
 import json
 from dataclasses import fields
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,7 +9,7 @@ from ismpu.control.system import ControllingSystem
 from ismpu.envs.scenario import Scenario, scenario_for_matrix_run
 from ismpu.config.segments import FlightSegment
 from ismpu.runtime.run_recorder import TELEMETRY_FIELDS, RunRecorder
-from ismpu.io.ics_connector import ICSInputs
+from ismpu.io.ics_connector import ICSInputs, ICSOutputs
 
 from tests.fakes import engaged_inputs, telemetry
 
@@ -32,19 +33,24 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     controller.control_step(0.05, sample, send=False)
     recorder.record(sample, controller, elapsed_s=0.05)
     assert recorder.sample_count == 1
-    assert not recorder.directory.exists()
+    assert recorder.directory.exists()
 
     exported = recorder.export_gains(controller, label="dashboard")
     recorder.finish({"accepted": True})
 
-    assert (recorder.directory / "metadata.json").is_file()
+    expected = {
+        "manifest.json", "raw-rx.jsonl", "raw-tx.jsonl", "telemetry.csv",
+        "approach.csv", "ground.csv", "events.jsonl", "candidates", "report.json",
+    }
+    assert {path.name for path in recorder.directory.iterdir()} == expected
+    assert (recorder.directory / "manifest.json").is_file()
     assert (recorder.directory / "telemetry.csv").is_file()
     assert (recorder.directory / "report.json").is_file()
     assert exported.is_file()
     assert scenario.control_for("mc21", FlightSegment.ROLLOUT).brake_l["kp"] == original_kp
 
     metadata = json.loads(
-        (recorder.directory / "metadata.json").read_text(encoding="utf-8"))
+        (recorder.directory / "manifest.json").read_text(encoding="utf-8"))
     assert metadata["aircraft_profile"] == "a330-300"
     assert metadata["scenario"]["schema_version"] == 3
     assert set(metadata["scenario"]["aircraft_controls"]) == {"mc21", "a330-300"}
@@ -53,6 +59,10 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert len(metadata["matrix_source_sha256"]) == 64
     assert metadata["matrix_run_ids"] == {}
     assert set(metadata["scenario"]["conditions"]) == {"approach", "rollout", "taxi"}
+    assert metadata["frequency_hz"] == 20.0
+    assert metadata["schema_version"] == 2
+    assert metadata["samples"] == 1
+    assert metadata["git"].keys() == {"revision", "dirty"}
 
     with (recorder.directory / "telemetry.csv").open(
         encoding="utf-8", newline=""
@@ -65,6 +75,15 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert "pid_reverse_r_derivative" in rows[0]
     assert "pid_steer_unconstrained" in rows[0]
     assert "pid_reverse_r_saturated" in rows[0]
+    assert rows[0]["tick_id"] == "1"
+    assert rows[0]["dt"] == "0.05"
+    assert rows[0]["scenario_id"] == scenario.scenario_id
+    assert rows[0]["config_revision"] == "0"
+
+    with (recorder.directory / "ground.csv").open(encoding="utf-8", newline="") as stream:
+        assert len(list(csv.DictReader(stream))) == 1
+    with (recorder.directory / "approach.csv").open(encoding="utf-8", newline="") as stream:
+        assert list(csv.DictReader(stream)) == []
 
     snapshot = json.loads(exported.read_text(encoding="utf-8"))
     assert snapshot["backend"] == "xplane"
@@ -87,7 +106,7 @@ def test_recorder_pins_selected_matrix_rows_and_catalog_hash(tmp_path):
     )
     recorder.finish()
     metadata = json.loads(
-        (recorder.directory / "metadata.json").read_text(encoding="utf-8"))
+        (recorder.directory / "manifest.json").read_text(encoding="utf-8"))
     assert metadata["matrix_run_ids"] == {"rollout": "Б.1.1/3"}
     assert metadata["scenario"]["matrix_runs"] == {"rollout": "Б.1.1/3"}
     assert len(metadata["matrix_catalog_sha256"]) == 64
@@ -199,3 +218,85 @@ def test_recorder_keeps_all_known_ics_fields_and_unknown_raw_fields(tmp_path):
     assert row["feedback_thrust_left"] == "101.0"
     assert float(row["feedback_yaw_rate_rad_s"]) == pytest.approx(0.0261799388)
     assert json.loads(row["ics_raw_json"]) == {"SomeFutureSignal": {"value": 42}}
+    assert all(f"ics_out_{field.name}" in row for field in fields(ICSOutputs))
+
+
+def test_streaming_flush_is_readable_before_finish_and_memory_is_bounded(tmp_path):
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller, "mc21")
+    recorder = RunRecorder(
+        root=tmp_path, backend="xplane", aircraft_profile="mc21",
+        scenario=scenario, flush_interval_s=999.0, ring_size=2,
+    )
+
+    for index in range(3):
+        sample = telemetry(groundspeed_ms=80.0 - index)
+        controller.control_step(0.05, sample, send=False)
+        recorder.record(sample, controller, elapsed_s=0.05 * (index + 1))
+    recorder.flush()
+
+    with (recorder.directory / "telemetry.csv").open(
+        encoding="utf-8", newline=""
+    ) as stream:
+        assert len(list(csv.DictReader(stream))) == 3
+    assert len(recorder.recent_samples) == 2
+    assert not hasattr(recorder, "_rows")
+    recorder.finish({"stop_reason": "completed", "conditions_valid": True})
+
+
+def test_recording_failure_never_escapes_into_control_and_invalidates_result(tmp_path):
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller, "mc21")
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21", scenario=scenario)
+    recorder.start()
+    recorder._streams["telemetry"].close()  # имитация ошибки диска во время append
+    sample = telemetry(groundspeed_ms=80.0)
+    controller.control_step(0.05, sample, send=False)
+
+    recorded = recorder.record(sample, controller, elapsed_s=0.05)
+
+    assert recorded.tick_id == 1
+    assert recorder.recording_failed
+    assert recorder.recording_error
+    assert recorder.sample_count == 1
+    recorder.finish({"stop_reason": "completed", "conditions_valid": True})
+    manifest = json.loads(
+        (recorder.directory / "manifest.json").read_text(encoding="utf-8"))
+    report = json.loads(
+        (recorder.directory / "report.json").read_text(encoding="utf-8"))
+    assert manifest["recording_failed"] is True
+    assert report["acceptance_valid"] is False
+    assert report["sft_eligible"] is False
+
+
+def test_raw_packet_files_keep_exact_udp_json_and_only_observed_tx(tmp_path):
+    class Connector:
+        observer = None
+
+        def set_packet_observer(self, observer):
+            self.observer = observer
+
+    connector = Connector()
+    scenario = Scenario.from_preset("default")
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21", scenario=scenario)
+    assert recorder.attach_sim(SimpleNamespace(connector=connector))
+    recorder.start()
+    rx = b'{"GroundSpeed":1,"SomeFutureSignal":{"x":42}}'
+    tx = b'{"ControlMode":3,"ModeAIReady":1,"ControlValidMask":14108}'
+
+    connector.observer("rx", rx, ("10.0.0.1", 3030))
+    connector.observer("tx", tx, ("10.0.0.1", 3030))
+    recorder.finish({"stop_reason": "interrupted"})
+
+    assert (recorder.directory / "raw-rx.jsonl").read_bytes() == rx + b"\n"
+    assert (recorder.directory / "raw-tx.jsonl").read_bytes() == tx + b"\n"
+    manifest = json.loads(
+        (recorder.directory / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["raw_packets"] == {"rx": 1, "tx": 1}
+    events = [json.loads(line) for line in (
+        recorder.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(event["event"] == "handshake" for event in events)

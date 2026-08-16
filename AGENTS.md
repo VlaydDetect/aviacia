@@ -100,7 +100,11 @@ Read these before making architectural changes — they define the target design
   implicitly by the delivery loop.
 - **PID dashboard:** add `--dashboard` for monitor-only mode on `127.0.0.1:8765`, or
   `--dashboard-tune` to permit explicit gain changes. Replay a CSV with
-  `python -m ismpu.gui.dashboard --replay runs\<run>\telemetry.csv`.
+  `python -m ismpu.gui.dashboard --replay runs\<run>`.
+- **Run artifacts:** `RunRecorder` streams `manifest.json`, raw RX/TX JSONL, full/approach/ground
+  CSV and `events.jsonl`; it never retains the full run in RAM. Verify controller parity offline with
+  `python -m ismpu.runtime.run_reader runs\<run>` and aggregate matrix rows with
+  `python -m ismpu.runtime.run_report aggregate runs`.
 - **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (X-Plane/rollout by default). Captures
   classical rollouts of `accepted` profiles only and behavior-clones the NPGS toward their coefficients →
   `checkpoints/npgs_sft.pt`. Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)`
@@ -155,8 +159,10 @@ Read these before making architectural changes — they define the target design
   actuator limits, valid-mask bits, engagement timings, flight phases), `regulators.py`
   (`REGULATOR_ORDER`/`GAIN_KEYS`/`N_GAINS`/`ACTION_DIM` — neutral, breaks a shield↔gain_space cycle),
   `requirements.py` (the ТЗ acceptance thresholds + go-around decision height / debounce).
-- `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `run_recorder.py` (common run artifacts),
-  `roman_logs.py` (external CSV normalization/manifest verification), `train.py` (PPO loop + `smoke_train`,
+- `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `run_artifacts.py` / `run_recorder.py`
+  (streaming run artifacts + stable import path), `run_reader.py` (legacy adapter + deterministic replay),
+  `run_report.py` (run criteria + matrix aggregation), `roman_logs.py` (external CSV compatibility),
+  `train.py` (PPO loop + `smoke_train`,
   `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start), `evaluate.py` (ТЗ acceptance +
   baselines + admission gate). `deploy.py` comes in Phase 6.
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).

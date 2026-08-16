@@ -120,7 +120,14 @@ Replay общего лога или CSV Романа:
 
 ```powershell
 .venv\Scripts\python.exe -m ismpu.gui.dashboard `
-  --replay "runs\20260726T120000.000000Z\telemetry.csv"
+  --replay "runs\20260726T120000.000000Z"
+```
+
+Детерминированная проверка самого контроллера без UDP/X-Plane:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.run_reader `
+  "runs\20260726T120000.000000Z" --atol 1e-12 --rtol 1e-12
 ```
 
 ## Артефакты прогона
@@ -129,17 +136,35 @@ Replay общего лога или CSV Романа:
 
 ```text
 runs/<UTC timestamp>/
-├── metadata.json
+├── manifest.json
+├── raw-rx.jsonl
+├── raw-tx.jsonl
 ├── telemetry.csv
-├── gains-<UTC timestamp>.json   # только после явного экспорта
+├── approach.csv
+├── ground.csv
+├── events.jsonl
+├── candidates/                  # явные экспорты коэффициентов
 └── report.json
 ```
 
-`telemetry.csv` содержит общую телеметрию, команды, участок полёта и для каждого из восьми PID:
-value, setpoint, error, output, P/I/D, saturation и Kp/Ki/Kd. `runs/` исключён из Git.
-Во время прогона снимки накапливаются в памяти, а CSV записывается один раз при штатном завершении
-или обработанном прерывании (`Ctrl-C` / Interrupt). Пустой экземпляр `RunRecorder`, созданный в
-ноутбуке, каталог не создаёт.
+`telemetry.csv` содержит весь полёт: raw/SI-входы, фактически сформированные выходы, timestamps,
+`dt`, `tick_id`, участок, режим/маску и revision конфигурации. `approach.csv` и `ground.csv` —
+потоковые срезы той же фиксированной схемы по участкам; P/I/D, состояние и коэффициенты всех восьми
+PID сохраняются на каждом такте. Сырые ICS payload записываются до разбора и после успешной UDP-
+отправки без повторной сериализации. CSV/JSONL дописываются по ходу полёта и flush-ятся не реже раза
+в секунду; в памяти остаётся только ограниченное окно дашборда. Ошибка записи видна в manifest,
+дашборде и делает результат непригодным для приёмки/SFT, но не размыкает управление.
+
+Итоги выбранных строк матрицы собираются без Excel-зависимости:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.run_report aggregate runs `
+  --output runs\matrix-results.csv
+```
+
+`matrix-results.csv` использует исходные 16 колонок книги, включая `Статус`,
+`Факт. макс. отклонения` и `Комментарий`. `runs/` исключён из Git. Пустой экземпляр
+`RunRecorder`, созданный в ноутбуке, каталог не создаёт до `start`, первой записи или `finish`.
 
 Большие исходные логи Романа остаются в `roman_aviacia_ics`. Их целостность описана в
 `docs/roman_logs_manifest.json`; `ismpu.runtime.roman_logs.verify_manifest` сообщает отсутствующие

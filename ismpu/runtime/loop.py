@@ -45,6 +45,9 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
     shutdown_report: ShutdownReport | None = None
     run_started = time.monotonic()
     try:
+        if recorder is not None:
+            recorder.attach_sim(sim)
+            recorder.start()
         telemetry = sim.reset(scenario, start=start)
 
         # Участок определяется ДО рукопожатия: от него зависит стимул включения.
@@ -58,8 +61,6 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         sim.warm_up()
         controller.last_telemetry = sim.read_telemetry()
         run_started = time.monotonic()
-        if recorder is not None:
-            recorder.record(controller.last_telemetry, controller, elapsed_s=0.0)
         if dashboard_state is not None:
             dashboard_state.capture(elapsed_s=0.0)
 
@@ -74,11 +75,12 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                     dashboard_state.apply_pending_gain_updates()
                 # Контур сам читает телеметрию и сам отправляет команды через sim.
                 finished = controller.control_step(dt)
-                if recorder is not None and controller.last_telemetry is not None:
+                if recorder is not None and controller.last_step_telemetry is not None:
                     recorder.record(
-                        controller.last_telemetry,
+                        controller.last_step_telemetry,
                         controller,
                         elapsed_s=time.monotonic() - run_started,
+                        dt=dt,
                     )
                 if dashboard_state is not None:
                     dashboard_state.capture(
@@ -88,7 +90,24 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                         rule = controller.longitudinal_channel.trajectory.completion_rule
                         if rule is CompletionRule.HANDOVER_TAXI:
                             # Эксплуатационный полёт: ControlMode 3 → 4 на 7,5 узла.
-                            controller.hand_over_to_taxi()
+                            if controller.hand_over_to_taxi() and recorder is not None:
+                                elapsed = time.monotonic() - run_started
+                                recorder.record_event(
+                                    "segment",
+                                    data={"previous": "rollout", "value": "taxi",
+                                          "handover_only": True},
+                                    time_s=elapsed,
+                                    tick_id=controller.tick_id,
+                                    segment="taxi",
+                                )
+                                recorder.record_event(
+                                    "control_mode",
+                                    data={"previous": 3, "value": 4,
+                                          "handover_only": True},
+                                    time_s=elapsed,
+                                    tick_id=controller.tick_id,
+                                    segment="taxi",
+                                )
                         # Матричный FULL_STOP завершается на месте и ниже снимает каналы.
                         reason = RunStopReason.COMPLETED
                     elif controller.go_around_reason is not None:

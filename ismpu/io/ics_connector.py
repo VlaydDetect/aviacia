@@ -16,7 +16,7 @@ import logging
 import time
 from enum import IntEnum
 from dataclasses import dataclass, asdict, fields
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +313,26 @@ class ICSBenchConnector:
             self.sock.bind(self.listen_addr)
 
         self._sender = ResilientSender(self.sock)
+        self._packet_observer: Callable[[str, bytes, tuple[str, int]], None] | None = None
+        self.last_received_packet: bytes | None = None
+        self.last_sent_packet: bytes | None = None
+
+    def set_packet_observer(
+        self,
+        observer: Callable[[str, bytes, tuple[str, int]], None] | None,
+    ) -> None:
+        """Подключить best-effort аудит сырых успешно принятых/отправленных UDP payload."""
+        self._packet_observer = observer
+
+    def _observe(self, direction: str, packet: bytes, address: tuple[str, int]) -> None:
+        observer = self._packet_observer
+        if observer is None:
+            return
+        try:
+            observer(direction, packet, address)
+        except Exception:
+            # Аудит не имеет права разомкнуть контур управления.
+            logger.exception("[ICS] ошибка записи сырого %s-пакета", direction)
 
     def receive_inputs(self, timeout: float = 1.0) -> Optional[ICSInputs]:
         """Приём телеметрии стенда. Адрес отправителя определяется автоматически."""
@@ -324,6 +344,9 @@ class ICSBenchConnector:
         except OSError as e:
             logger.warning("[ICS] Ошибка приёма: %s", e)
             return None
+
+        self.last_received_packet = data
+        self._observe("rx", data, sender_addr)
 
         if self.send_addr != sender_addr:
             self.send_addr = sender_addr
@@ -342,7 +365,12 @@ class ICSBenchConnector:
             logger.warning("[ICS] Отправка невозможна: адрес стенда ещё не определён "
                            "(не получено ни одного входящего сообщения).")
             return False
-        return self._sender.send(outputs.to_json_bytes(), self.send_addr)
+        packet = outputs.to_json_bytes()
+        sent = self._sender.send(packet, self.send_addr)
+        if sent:
+            self.last_sent_packet = packet
+            self._observe("tx", packet, self.send_addr)
+        return sent
 
     @property
     def send_error_count(self) -> int:

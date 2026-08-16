@@ -87,6 +87,15 @@ class ControllingSystem:
         self.pids: PidMap = {}
         self.state: ControlsState = ControlsState()
         self.last_telemetry: Telemetry | None = None
+        # Идентификаторы кадра относятся к входной телеметрии, на которой действительно
+        # посчитана команда.  После send backend уже возвращает следующий кадр, поэтому
+        # отдельная ссылка нужна recorder/replay, чтобы не получить сдвиг на один такт.
+        self.last_step_telemetry: Telemetry | None = None
+        self.last_step_dt: float = 0.0
+        self.last_step_send_attempted: bool = False
+        self.last_step_sent: bool = False
+        self.tick_id: int = 0
+        self.config_revision: int = 0
         # Каналы создаются в setup(); аннотации фиксируют их публичный контракт.
         self.lateral_channel: LateralChannel
         self.longitudinal_channel: LongitudinalChannel
@@ -135,6 +144,7 @@ class ControllingSystem:
             return
         self.scenario.apply_control(self, self.aircraft_profile_name, segment)
         self._configured_segment = segment
+        self.config_revision += 1
         if self.sim is not None:
             enter_segment = getattr(self.sim, "enter_segment", None)
             if enter_segment is not None:
@@ -288,6 +298,12 @@ class ControllingSystem:
         откат на наземный закон: ВС в воздухе, и молча поехать по земле хуже, чем отказаться.
         """
         self.landing_committed = False
+        self.tick_id = 0
+        self.config_revision = 0
+        self.last_step_telemetry = None
+        self.last_step_dt = 0.0
+        self.last_step_send_attempted = False
+        self.last_step_sent = False
         if requested_segment not in (None, FlightSegment.TAXI):
             raise ValueError("явно начинать разрешено только с TAXI")
         self._segment_decided = (
@@ -343,6 +359,11 @@ class ControllingSystem:
         """
         if telemetry is None:
             telemetry = self.last_telemetry if self.last_telemetry is not None else self._read()
+        self.tick_id += 1
+        self.last_step_telemetry = telemetry
+        self.last_step_dt = dt
+        self.last_step_send_attempted = False
+        self.last_step_sent = False
         self.last_telemetry = telemetry
         self._settle_segment(telemetry)
         self.sync_failures(telemetry)
@@ -355,7 +376,10 @@ class ControllingSystem:
             return True
 
         if send:
-            self.last_telemetry = self._require_sim().step(self.state)
+            sim = self._require_sim()
+            self.last_step_send_attempted = True
+            self.last_telemetry = sim.step(self.state)
+            self.last_step_sent = bool(getattr(sim, "last_output_sent", True))
 
         return False
 

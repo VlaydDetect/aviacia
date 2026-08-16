@@ -52,6 +52,21 @@ def test_monitor_only_and_npgs_tuning_locks(tmp_path):
         tuning.update_gains("roll", {"kp": "nan"})
 
 
+def test_gain_change_increments_config_revision_and_is_recorded(tmp_path):
+    controller, scenario, _ = configured_controller()
+    recorder = RunRecorder(
+        root=tmp_path, backend="xplane", aircraft_profile="mc21", scenario=scenario)
+    state = DashboardState(
+        controller, scenario=scenario, recorder=recorder, tune_enabled=True)
+    revision = controller.config_revision
+
+    state.update_gains("roll", {"kp": -6.0})
+
+    assert controller.config_revision == revision + 1
+    assert recorder.recent_events[-1].event == "gains"
+    recorder.finish({"stop_reason": "interrupted"})
+
+
 def test_capture_export_and_replay_common_run(tmp_path):
     controller, scenario, sample = configured_controller()
     recorder = RunRecorder(
@@ -84,9 +99,10 @@ def test_capture_export_and_replay_common_run(tmp_path):
     assert set(payload["header"]["segment_conditions"]) == {
         "approach", "rollout", "taxi",
     }
+    assert payload["header"]["recording_failed"] is False
     assert state.export_gains().is_file()
 
-    replay = DashboardState.from_csv(recorder.directory / "telemetry.csv")
+    replay = DashboardState.from_csv(recorder.directory)
     replay_payload = replay.payload()
     assert replay_payload["replay"]["summary"]["rows"] == 1
     assert replay_payload["views"][0]["locked"] is True

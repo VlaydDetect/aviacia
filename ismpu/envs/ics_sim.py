@@ -494,6 +494,8 @@ class ICSSim(SimInterface):
         self.timeout = timeout
         self.engagement = engagement if engagement is not None else IcsEngagement()
         self._last_telemetry: Optional[Telemetry] = None
+        self.last_outputs: ICSOutputs | None = None
+        self.last_output_sent: bool = False
         self._shutdown_report: Optional[ShutdownReport] = None
         self._scenario: Scenario | None = None
         self._entered_segment: FlightSegment | None = None
@@ -574,7 +576,9 @@ class ICSSim(SimInterface):
 
     def step(self, command: ControlsState) -> Telemetry:
         outputs = self._to_outputs(command)
-        if self.connector.send_outputs(outputs):
+        self.last_outputs = outputs
+        self.last_output_sent = self.connector.send_outputs(outputs)
+        if self.last_output_sent:
             # Автомат узнаёт о ФАКТЕ передачи: выдержка по ICD — это время, в течение которого
             # стенд получает готовность, а не время, которое мы считаем у себя.
             self.engagement.on_frame_sent(outputs.ModeAIReady)
@@ -724,7 +728,8 @@ class ICSSim(SimInterface):
         self.engagement.reset()
         packet = ICSOutputs(ControlValidMask=0, ControlMode=ControlModeState.Off, ModeAIReady=0)
         for i in range(max(1, frames)):
-            self.connector.send_outputs(packet)
+            self.last_outputs = packet
+            self.last_output_sent = self.connector.send_outputs(packet)
             if i + 1 < frames:
                 time.sleep(dt)
 
