@@ -102,11 +102,16 @@ PID_FIELDS = tuple(
     for name in PID_NAMES
     for field_name in PID_TELEMETRY_FIELDS
 )
+SFT_FIELDS = (
+    "sft_mode", "sft_model_segment", "sft_window_ready", "sft_window_frames",
+    "sft_prediction_count", "sft_fallback", "sft_rate_limited", "sft_reason",
+    "sft_prediction", "sft_guarded", "sft_applied",
+)
 TELEMETRY_FIELDS = (
     SAMPLE_ID_FIELDS + NORMALIZED_TELEMETRY_FIELDS + COMMAND_FIELDS
     + GROUND_DIAGNOSTIC_FIELDS + ALLOCATOR_TELEMETRY_FIELDS
     + ACTUATOR_FEEDBACK_FIELDS + APPROACH_TELEMETRY_FIELDS
-    + ("ics_raw_json",) + ICS_TELEMETRY_FIELDS + ICS_COMMAND_FIELDS + PID_FIELDS
+    + ("ics_raw_json",) + ICS_TELEMETRY_FIELDS + ICS_COMMAND_FIELDS + PID_FIELDS + SFT_FIELDS
 )
 
 
@@ -220,6 +225,7 @@ def sample_values(telemetry, controller) -> dict[str, object]:
         if getattr(controller, "last_step_send_attempted", False) else None
     )
     faults = sorted(getattr(item, "name", str(item)) for item in telemetry.faults)
+    sft = getattr(controller, "sft_diagnostics", {})
     row: dict[str, object] = {
         "valid": int(bool(telemetry.valid)), "lat": telemetry.lat, "lon": telemetry.lon,
         "groundspeed_ms": telemetry.groundspeed_ms, "ias_ms": telemetry.ias_ms,
@@ -290,6 +296,17 @@ def sample_values(telemetry, controller) -> dict[str, object]:
         "approach_criteria_a11": controller.approach_criteria.verdict(),
         "go_around_reason": controller.go_around_reason, "abort_reason": controller.abort_reason,
         "ics_raw_json": ics_inputs.raw_fields if ics_inputs is not None else None,
+        "sft_mode": sft.get("mode", "classical"),
+        "sft_model_segment": sft.get("segment"),
+        "sft_window_ready": sft.get("window_ready"),
+        "sft_window_frames": sft.get("window_frames"),
+        "sft_prediction_count": sft.get("prediction_count"),
+        "sft_fallback": sft.get("fallback"),
+        "sft_rate_limited": sft.get("rate_limited"),
+        "sft_reason": sft.get("reason"),
+        "sft_prediction": sft.get("prediction"),
+        "sft_guarded": sft.get("guarded"),
+        "sft_applied": sft.get("applied"),
     }
     if allocation is not None:
         for stage in ("base", "lateral", "requested", "limited"):

@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         start: str | None = None, recorder: RunRecorder | None = None,
-        dashboard_state=None) -> RunResult:
+        dashboard_state=None, sft_runtime=None) -> RunResult:
     """Прогоняет один полёт на уже настроенном контуре."""
     reason = RunStopReason.ERROR
     details: str | None = None
@@ -72,8 +72,13 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
             if dt >= DT:
                 if dashboard_state is not None:
                     dashboard_state.apply_pending_gain_updates()
+                if sft_runtime is not None:
+                    sft_runtime.before_step(controller, controller.last_telemetry, dt)
                 # Контур сам читает телеметрию и сам отправляет команды через sim.
                 finished = controller.control_step(dt)
+                if sft_runtime is not None and controller.last_step_telemetry is not None:
+                    sft_runtime.after_step(
+                        controller, controller.last_step_telemetry, dt)
                 if recorder is not None and controller.last_step_telemetry is not None:
                     recorder.record(
                         controller.last_step_telemetry,
@@ -206,6 +211,9 @@ def main(
     dashboard: bool = False,
     dashboard_tune: bool = False,
     dashboard_hold_seconds: float = 300.0,
+    control_mode: str = "classical",
+    sft_air_checkpoint: str | None = None,
+    sft_ground_checkpoint: str | None = None,
 ):
     """Точка входа: подключиться к стенду, выбрать пресет и провести полёт.
 
@@ -225,6 +233,14 @@ def main(
         raise ValueError("preset нельзя смешивать с run_id/scenario_json")
     if dashboard_hold_seconds < 0.0:
         raise ValueError("dashboard_hold_seconds must be non-negative")
+    if control_mode not in {"classical", "sft-shadow", "sft-active"}:
+        raise ValueError(f"unknown control mode: {control_mode}")
+    if control_mode == "classical":
+        if sft_air_checkpoint is not None or sft_ground_checkpoint is not None:
+            raise ValueError("SFT checkpoints require sft-shadow or sft-active")
+        sft_runtime = None
+    elif sft_air_checkpoint is None and sft_ground_checkpoint is None:
+        raise ValueError(f"{control_mode} requires at least one SFT checkpoint")
     loaded = load_scenario(
         scenario_json, legacy_aircraft_profile=aircraft_profile or "mc21") \
         if scenario_json is not None else None
@@ -250,6 +266,20 @@ def main(
     )
     controller = ControllingSystem(sim)
     profile_name = sim.aircraft_profile_name
+    if control_mode != "classical":
+        try:
+            # Локальный импорт сохраняет torch опциональным для production-default classical.
+            from ismpu.runtime.sft import SftRuntime
+            sft_runtime = SftRuntime.from_checkpoints(
+                mode=control_mode,
+                air_path=sft_air_checkpoint,
+                ground_path=sft_ground_checkpoint,
+                backend=backend,
+                aircraft_profile=profile_name,
+            )
+        except Exception:
+            sim.close()
+            raise
 
     if selected is not None:
         scenario = selected
@@ -302,6 +332,10 @@ def main(
         aircraft_profile=sim.aircraft_profile_name,
         scenario=scenario,
         start=start,
+        extra_metadata={
+            "control_policy": control_mode,
+            "sft_checkpoints": getattr(sft_runtime, "metadata", {}),
+        },
     )
     print(f"Журнал прогона будет сохранён в: {recorder.directory}")
     dashboard_server = None
@@ -314,6 +348,7 @@ def main(
             scenario=scenario,
             recorder=recorder,
             tune_enabled=dashboard_tune,
+            control_mode=control_mode,
         )
         dashboard_server = DashboardServer(dashboard_state).start()
         mode = "tuning" if dashboard_tune else "monitor-only"
@@ -329,6 +364,7 @@ def main(
             start=start,
             recorder=recorder,
             dashboard_state=dashboard_state,
+            sft_runtime=sft_runtime,
         )
         if (
             dashboard_server is not None
@@ -367,6 +403,11 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--dashboard-tune", action="store_true")
     parser.add_argument("--dashboard-hold-seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--control-mode", choices=("classical", "sft-shadow", "sft-active"),
+        default="classical")
+    parser.add_argument("--sft-air-checkpoint", default=None)
+    parser.add_argument("--sft-ground-checkpoint", default=None)
     args = parser.parse_args(argv)
     if args.backend == "ics" and args.aircraft_profile is None:
         parser.error("для ICS требуется --aircraft-profile (например, mc21)")

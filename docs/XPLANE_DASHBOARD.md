@@ -49,20 +49,22 @@ X‑Plane не вводит его повторно; неизменная пог
 Schema v1/v2 читаются миграторами; для старого A330-файла нужен
 `legacy_aircraft_profile="a330-300"`.
 
-NPGS-артефакты разделены по профилям:
+SFT использует два независимых артефакта; профиль ВС, schema/hash признаков, gain layout,
+нормализация, hash матрицы, source run IDs и метрики gates находятся внутри каждого файла:
 
 ```text
 checkpoints/
-├── mc21/
-│   ├── npgs_sft.pt
-│   └── npgs_final.pt
-└── a330-300/
-    ├── npgs_sft.pt
-    └── npgs_final.pt
+├── sft_air.pt
+└── sft_ground.pt
 ```
 
-Чекпоинт другого профиля или с несовпадающим снимком `GainSpace` не загружается. Старый чекпоинт без
-профиля мигрируется только при явном `legacy_aircraft_profile` и совпадении сохранённых диапазонов.
+Чекпоинт другого профиля, участка, матрицы или с несовпадающей схемой не загружается. Обучение
+читает только `approach.csv`/`ground.csv` завершённых classical-прогонов с
+`report.sft_eligible=true`; UDP/X‑Plane в процессе обучения не запускаются:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.pretrain runs --segment both
+```
 
 ## Запуск
 
@@ -71,6 +73,19 @@ checkpoints/
 ```powershell
 .venv\Scripts\python.exe -m ismpu.runtime.loop --aircraft-profile mc21
 ```
+
+Shadow включается независимо для воздуха и земли явными путями:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.loop --backend xplane --start approach `
+  --xplane-root "C:\X-Plane 12" --control-mode sft-shadow `
+  --sft-air-checkpoint checkpoints\sft_air.pt `
+  --sft-ground-checkpoint checkpoints\sft_ground.pt
+```
+
+`sft-active` имеет тот же интерфейс. На ICS загрузка дополнительно отклоняется, пока checkpoint
+не содержит положительное evidence для replay, X‑Plane, shadow и отсутствия ухудшения против
+классического preset. Без флага режим всегда `classical`.
 
 Матричный прогон ICS запускается только по полной строке, например
 `--run-id Б.2.2/4`; шифр по телеметрии не угадывается.

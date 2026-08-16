@@ -15,8 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Нейросетевой контур (Этап 4+): актор NPGS + критик, PPO, среда RL.
-# gymnasium опционален (RolloutEnv работает и без него); torch — обязателен для NPGS/PPO.
+# torch нужен активным air/ground SFT-регрессорам; gymnasium — только изолированному legacy PPO.
 rl = [
     "torch>=2.2",
     "gymnasium>=0.29",

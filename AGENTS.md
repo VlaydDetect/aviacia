@@ -11,22 +11,18 @@ reference velocity curve, while modeling and compensating for equipment failures
 fail, nose-wheel-steering fail, etc.). Code comments and console output are in Russian.
 
 The airborne segment (`ismpu/control/approach.py`) is a port of the second НИР participant's
-bench-validated ILS controller — see "Flight segments" below. It runs on **static** PID presets; the
-neural layer (NPGS/PPO/Shield) applies to the **rollout only**.
+bench-validated ILS controller — see "Flight segments" below. Both air and ground start from
+**accepted static PID presets**; optional SFT models may change only their `kp/ki/kd`.
 
 This is the R&D project **ИСМПУ** (shifr `Интеграл-КБО-МС-ГосНИИАС-ИСМПУ-2026`, due 2026-07-28). The
 work is moving from the current classical-PID prototype toward a **hybrid neural controller**: the
-classical PID loop stays as the plant, and a **Neural PID Gain Scheduler (NPGS)** actor (SFT-warm-started,
-then trained with PPO) predicts the **absolute PID coefficients** (kp/ki/kd × 5 regulators) plus
-channel-influence weights, guarded by a deterministic **Shield** and, later, an optional physics-informed
-**PINN observer**.
+classical PID loop stays as the plant, while two independent supervised regressors predict **absolute
+PID coefficients** (air: 3×3, ground: 5×3). `GainGuard` bounds/rate-limits them against the accepted
+preset. RL/PPO and channel weights are postponed and are not part of the active runtime.
 
-The NPGS is **not** a classic "PIDNN": the ТЗ forbids embedding the PID transfer function into the network,
-so the net only *predicts the coefficients* the classical `PIDController` then uses — it never becomes the
-controller. **The net emits absolute gains** (not multiplicative α) so a supervised warm-start (SFT/behavioral
-cloning) can regress toward the hand-tuned expert presets; safety is preserved because the Shield keeps the
-per-scenario preset as its bound/fallback anchor. Full architecture in `implementation_plan.md` §10; targets
-**A330-300** and **МС-21**.
+The regressors are **not** a classic "PIDNN": the ТЗ forbids embedding the PID transfer function into the
+network. `PidGainRegressor` is only `LayerNorm → GRU(1) → Linear`; the classical `PIDController` still
+computes every actuator command. The models emit absolute gains, never actuator outputs.
 
 > **There are two backends again.** ICS remains the production and runtime default; X-Plane 12 is the
 > resettable training/evaluation backend. Both implement `envs/sim_interface.py::SimInterface` and emit the
@@ -37,6 +33,9 @@ per-scenario preset as its bound/fallback anchor. Full architecture in `implemen
 ## Planning & reference documents
 
 Read these before making architectural changes — they define the target design and the acceptance criteria:
+
+- **[`docs/plan.md`](docs/plan.md)** — current phased refactoring plan and source of truth. Stage 8 replaces
+  the active NPGS warm-start with two offline SFT regressors; Stage 9 removes remaining migration debris.
 
 - **[`implementation_plan.md`](implementation_plan.md)** — the phased plan for the neural-control rework:
   target package layout (`ismpu/`), the full Observation/Action spaces, Shield, PPO + multi-component loss,
@@ -77,7 +76,7 @@ Read these before making architectural changes — they define the target design
 - Dependencies are in `pyproject.toml` / `requirements.txt` (also live in the committed-out `.venv/`,
   Python 3.14): `numpy`, `pandas`, `termcolor`, `pytest`, plus Jupyter (`ipykernel`). `torch` (2.12,
   **cu132** — installed in `.venv`) and `gymnasium` are the optional `rl` extra: `torch` is used by the
-  NPGS/PPO layer (Phase 4); `gymnasium` stays optional (`rollout_env` works without it).
+  two SFT regressors; `gymnasium` remains only for isolated legacy PPO tests.
 - Activate the venv before running: `.venv\Scripts\Activate.ps1` (PowerShell). **The `.venv` is the real
   environment** — bare `python` on PATH is a separate 3.14 without torch/pytest. Run tests and training via
   `.venv\Scripts\python.exe` (or the activated venv).
@@ -105,16 +104,14 @@ Read these before making architectural changes — they define the target design
   CSV and `events.jsonl`; it never retains the full run in RAM. Verify controller parity offline with
   `python -m ismpu.runtime.run_reader runs\<run>` and aggregate matrix rows with
   `python -m ismpu.runtime.run_report aggregate runs`.
-- **SFT warm-start (do this first):** `python -m ismpu.runtime.pretrain` (X-Plane/rollout by default). Captures
-  classical rollouts of `accepted` profiles only and behavior-clones the NPGS toward their coefficients →
-  `checkpoints/npgs_sft.pt`. Offline validation: `ismpu.runtime.pretrain.smoke_pretrain(env, scenarios)`
-  (see `tests/test_pretrain.py`).
-- **Train the NPGS:** `python -m ismpu.runtime.train` (X-Plane/rollout by default). Builds env + controller,
-  PPO + curriculum, checkpoints to `checkpoints/`. ICS remains available explicitly with
-  `TrainConfig(backend="ics")`. Set `TrainConfig.init_from="checkpoints/npgs_sft.pt"`
-  to start from the SFT warm-start (strongly recommended — a cold net emits DEFAULT gains, unsafe on failures).
-  Offline (no bench) validation of the PPO loop: `ismpu.runtime.train.smoke_train(env, provider, updates=...)`
-  with a scripted bench (see `tests/fakes.py`, `tests/test_ppo.py`).
+- **Train SFT offline:** `python -m ismpu.runtime.pretrain runs --segment both`. It reads only completed
+  `approach.csv`/`ground.csv` with `report.sft_eligible=true`; it never opens ICS or X-Plane. Outputs are
+  `checkpoints/sft_air.pt` and `checkpoints/sft_ground.pt`.
+- **Run SFT:** add `--control-mode sft-shadow|sft-active` and either/both
+  `--sft-air-checkpoint` / `--sft-ground-checkpoint`. `classical` is the default. ICS active mode also
+  requires replay, X-Plane, shadow and no-degradation evidence embedded in each checkpoint.
+- **Legacy PPO:** `ismpu/agent/{gain_scheduler,ppo,pretrain}.py`, `runtime/{capture,train}.py` and
+  `RolloutEnv` remain isolated for compatibility until Stage 9; do not import them into production runtime.
 - **Tests:** `python -m pytest` (from repo root; a root `conftest.py` puts `ismpu` on the path). Run under the
   venv (has pytest + torch). Bench-free — PID numerics, tracker geodesy, reference-speed curves, one full
   `control_step` through a fake bench, the airborne channel (incl. the 1e-12 parity run against the
@@ -162,17 +159,16 @@ Read these before making architectural changes — they define the target design
 - `ismpu/runtime/` — `loop.py` (the 20 Hz loop + `main()`), `run_artifacts.py` / `run_recorder.py`
   (streaming run artifacts + stable import path), `run_reader.py` (legacy adapter + deterministic replay),
   `run_report.py` (run criteria + matrix aggregation), `roman_logs.py` (external CSV compatibility),
-  `train.py` (PPO loop + `smoke_train`,
-  `TrainConfig.init_from`), `pretrain.py` + `capture.py` (SFT warm-start), `evaluate.py` (ТЗ acceptance +
-  baselines + admission gate). `deploy.py` comes in Phase 6.
+  `pretrain.py` (offline air/ground SFT), `sft.py` (shadow/active inference), `evaluate.py` (ТЗ acceptance +
+  baselines + admission gate). `capture.py` / `train.py` are legacy PPO compatibility only.
 - `ismpu/utils/converts.py` — `Converts` (unit conversions).
 - `ismpu/envs/` — environment + RL layer: `sim_interface.py`, `ics_sim.py` (`Telemetry` + `ICSSim`),
   `xplane_sim.py`, `backend_factory.py`, `weather.py`, `scenario.py`,
   `scenario_generator.py`, `observation.py` / `action.py` / `reward.py` / `rollout_env.py`, `splits.py`,
   `reproducibility.py`.
-- `ismpu/agent/` — neural/safety layer: `shield.py` + `normalization.py` + `gain_space.py` (absolute-gain map)
-  + `gain_scheduler.py` (NPGS actor+critic) + `ppo.py` + `pretrain.py` (SFT/BC) (all done). `observer.py` comes
-  in Phase 7. `ismpu/gui/` — the local nine-view PID dashboard and CSV replay server.
+- `ismpu/agent/` — active `pid_gain_regressor.py` (`PidGainRegressor`, checkpoint contract,
+  normalization, `GainGuard`). `gain_scheduler.py` / `ppo.py` / `pretrain.py` / `shield.py` are isolated
+  legacy PPO modules. `ismpu/gui/` — the local nine-view PID dashboard and CSV replay server.
 
 ## Bench interface (`ismpu/io/ics_connector.py`, `ismpu/config/ics.py`)
 
@@ -538,7 +534,7 @@ The Gymnasium-compatible training env wrapping `ICSSim` + the classical controll
   channel `w_lon`/`w_lat` (× PID outputs before `clamp_all`), `ControllingSystem.control_step(send=False)` and
   `set_channel_weights`.
 
-## Shield — safety contour (`ismpu/agent/shield.py`)
+## Legacy PPO Shield (`ismpu/agent/shield.py`) — inactive runtime
 
 Deterministic guard between the neural actor and the classical PID loop (plan §9). It is **not** trained,
 is always active, and the network can't issue a command that bypasses it.
@@ -560,7 +556,7 @@ is always active, and the network can't issue a command that bypasses it.
   `guard_command(command, runtime_state)` runs *after*. Bridge helpers `base_gains_from_pids` /
   `apply_gains_to_pids` connect it to `ControllingSystem.pids`.
 
-## Gain space (`ismpu/agent/gain_space.py`) — single source of truth
+## Legacy PPO gain space (`ismpu/agent/gain_space.py`) — inactive runtime
 
 The NPGS outputs **absolute** coefficients, so there's a fixed physical map from the net's raw output `z` to a
 gain, per (regulator, kp|ki|kd) slot — 15 slots in `REGULATOR_ORDER × (kp,ki,kd)` order (=`config/regulators.py`).
@@ -572,7 +568,23 @@ gain space. Because presets span up to ~70× on some gains, this log-space map (
 ±50% band) is what makes SFT-to-preset expressible. `config/regulators.py` holds `REGULATOR_ORDER`/`GAIN_KEYS`/
 `N_GAINS`/`ACTION_DIM` (neutral module so `shield` and `gain_space` avoid an import cycle; `shield` re-exports).
 
-## Neural PID Gain Scheduler (NPGS) — actor/critic (`ismpu/agent/gain_scheduler.py`, plan §10)
+## Active SFT regressors (`ismpu/agent/pid_gain_regressor.py`, `ismpu/runtime/{pretrain,sft}.py`)
+
+- One architecture is instantiated independently for air (9 gains) and ground (15): input `LayerNorm` →
+  one-layer GRU → one `Linear`; no critic, `log_std`, PPO loss, channel weights or actuator outputs.
+- Training is offline from accepted classical `approach.csv` / `ground.csv`. Features exclude current
+  `kp/ki/kd`; targets are the actually recorded gains at the last frame of each continuous 40-frame window.
+- Train/validation/test assignment is by whole run, stratified by condition. Feature/target normalization is
+  fitted on train only. Validation and test must satisfy per-gain MAE ≤5%, p95 ≤10% of the stored physical
+  range and beat the constant train-mean baseline.
+- `sft_air.pt` / `sft_ground.pt` pin aircraft profile, feature schema/hash, gain layout, normalization, matrix
+  hash, source/split run IDs, metrics and activation evidence.
+- `GainGuard` rejects dropout, incomplete windows, non-finite/OOD/error outputs and bounds violations;
+  accepted predictions are limited to physical and `0.3…2.5 × preset` bands and `25% preset/s` slew.
+  Fallback writes the accepted static preset. Runtime modes are `classical` (default), `sft-shadow`,
+  `sft-active`; air and ground checkpoint paths are independent.
+
+## Legacy Neural PID Gain Scheduler (NPGS) — inactive actor/critic
 
 The neural actor+critic (~1.4 M params). **Renamed from "PIDNN"** because the ТЗ forbids embedding the PID
 transfer function in the net — NPGS keeps the classical PID as plant and only predicts its coefficients. It emits
@@ -601,7 +613,7 @@ transfer function in the net — NPGS keeps the classical PID as plant and only 
 - **Serialization:** `NPGS.save/load` bundle weights + `NPGSConfig` + normalization `snapshot()` (incl. gain space).
 - **Downstream:** every output passes through the Shield (preset-anchored) before reaching the PID loop.
 
-## SFT warm-start (`ismpu/agent/pretrain.py`, `ismpu/runtime/{capture,pretrain}.py`, plan Stage B)
+## Legacy NPGS warm-start (`ismpu/agent/pretrain.py`, `ismpu/runtime/capture.py`) — inactive
 
 Supervised pretraining (behavioral cloning) so PPO starts near the expert presets instead of DEFAULT — PPO alone
 converges slowly. `runtime/capture.py` runs the **classical** controller in-process inside `RolloutEnv` (action =
@@ -621,7 +633,7 @@ weather mismatch stays diagnostic).
 offline (no-bench) path used in `tests/test_pretrain.py`. `train.py` loads it via `TrainConfig.init_from`;
 `ppo.lambda_anchor>0` additionally keeps a frozen SFT copy as `trainer.sft_reference` (anti-forgetting).
 
-## PPO training (`ismpu/agent/ppo.py`, `ismpu/runtime/train.py`, plan §11)
+## Legacy PPO training (`ismpu/agent/ppo.py`, `ismpu/runtime/train.py`) — inactive
 
 Compact CleanRL-style PPO over a **single** env (the bench is one instance). `PPOTrainer.collect` fills a
 `RolloutBuffer`, `compute_gae` does GAE(λ) with a done-mask bootstrap, `update` runs minibatch epochs with a

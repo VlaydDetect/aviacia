@@ -115,9 +115,10 @@ class ApproachResult:
 class ApproachController:
     """Заход по ILS с выравниванием. Телеметрию получает параметром, не читает сам.
 
-    Коэффициенты статические (`config/approach.py`) — на воздушном участке нейросети пока нет.
-    Регуляторы создаются здесь и **не попадают** в `ControllingSystem.pids`: тот словарь задаёт
-    пространство коэффициентов NPGS, и лишние ключи в нём переопределили бы `ACTION_DIM`.
+    Регуляторы создаются из accepted static preset и **не попадают** в
+    `ControllingSystem.pids`: это отдельный воздушный layout. В `sft-active` внешний
+    `runtime.sft.SftRuntime` меняет только их `kp/ki/kd` перед тактом; сам закон и команды
+    по-прежнему вычисляет этот классический канал.
     """
 
     def __init__(self, config: ApproachConfig | None = None) -> None:

@@ -88,13 +88,15 @@ def build_run_report(
         scenario, status, metrics, recording_error, matrix_evaluations)
     profile = str(reader.manifest.get("aircraft_profile") or "mc21")
     accepted_segments = _accepted_segments(scenario, profile, metrics)
+    expert_classical = reader.manifest.get("control_policy", "classical") == "classical"
     return {
         "schema_version": 2,
         "execution_id": reader.manifest.get("execution_id"),
         "stop_reason": stop_reason,
         "status": status,
         "acceptance_valid": acceptance_valid,
-        "sft_eligible": acceptance_valid and status == PASS and accepted_segments,
+        "sft_eligible": (
+            acceptance_valid and status == PASS and accepted_segments and expert_classical),
         "recording_failed": recording_failed,
         "recording_error": recording_error,
         "metrics": metrics,
