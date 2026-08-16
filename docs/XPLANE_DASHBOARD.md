@@ -145,6 +145,36 @@ Replay общего лога или CSV Романа:
 Флаг `--accepted` разрешён только при наличии успешных артефактов всех обязательных строк этого
 кода; корень доказательств задаётся через `--evidence-root`.
 
+## Кампания настройки матрицы
+
+Канонический порядок этапа 7 и следующая незачтённая строка вычисляются из каталога и уже
+записанных артефактов — отдельного редактируемого журнала нет:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.campaign plan
+.venv\Scripts\python.exe -m ismpu.runtime.campaign status runs
+.venv\Scripts\python.exe -m ismpu.runtime.campaign next runs
+```
+
+Порядок: `Б.1.1/1`, остальные Б.1.1, Б.1.2, Б.2.*, Б.3.*, А.1.*, А.2–А.4 и Б.4.*.
+После promotion накопленные sparse overrides применяются к следующему условию того же шифра:
+
+```powershell
+.venv\Scripts\python.exe -m ismpu.runtime.loop `
+  --aircraft-profile mc21 `
+  --scenario-json "runs\...\candidates\rollout-1.tuned.scenario.json" `
+  --run-id "Б.1.1/2" `
+  --dashboard-tune
+```
+
+Перенос JSON на другой шифр запрещён. Для Б.1.2 контур не угадывает конец прямого участка:
+оператор завершает зачётный taxi-прогон `Ctrl+C`, который записывается как
+`operator_completed`; до первого управляющего такта это остаётся обычным `interrupted`.
+`accepted` допускает разные effective config отдельных условий, но проверяет PASS каждой строки
+шифра, её config/matrix hashes, отсутствие live-изменений и replay. PASS под `draft/tuned` служит
+приёмочным доказательством, но получает `sft_eligible=true` только при повторной записи уже под
+`accepted`-конфигурацией.
+
 ## Артефакты прогона
 
 Каждый запуск `runtime.loop` создаёт:
@@ -175,11 +205,20 @@ PID сохраняются на каждом такте. Сырые ICS payload 
 ```powershell
 .venv\Scripts\python.exe -m ismpu.runtime.run_report aggregate runs `
   --output runs\matrix-results.csv
+
+# эквивалентная команда кампании
+.venv\Scripts\python.exe -m ismpu.runtime.campaign report runs `
+  --output runs\matrix-results.csv
 ```
 
 `matrix-results.csv` использует исходные 16 колонок книги, включая `Статус`,
 `Факт. макс. отклонения` и `Комментарий`. `runs/` исключён из Git. Пустой экземпляр
 `RunRecorder`, созданный в ноутбуке, каталог не создаёт до `start`, первой записи или `finish`.
+Для матричного запуска `report.json` дополнительно содержит критерии конкретной строки,
+touchdown distance/speed/sink/load, saturation по каналам, applied gains, наличие actuator
+feedback, плавность стыка и ожидаемую/фактическую диагностику сцепления, ветра и риска
+аквапланирования. Несовпадение погоды остаётся видимым `report_only`; несовпадение отказа делает
+прогон `INVALID`.
 
 Большие исходные логи Романа остаются в `roman_aviacia_ics`. Их целостность описана в
 `docs/roman_logs_manifest.json`; `ismpu.runtime.roman_logs.verify_manifest` сообщает отсутствующие

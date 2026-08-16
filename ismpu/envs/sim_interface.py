@@ -37,6 +37,7 @@ class ShutdownReport:
 
 class RunStopReason(str, Enum):
     COMPLETED = "completed"
+    OPERATOR_COMPLETED = "operator_completed"
     GO_AROUND = "go_around"
     ENGAGEMENT_LOST = "engagement_lost"
     INTERRUPTED = "interrupted"

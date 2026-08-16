@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-16T11:38:43.534071+00:00",
+  "generated_at": "2026-08-16T12:31:06.262676+00:00",
   "nodes": {
     "approachchannel": {
       "code_fingerprint": "",
@@ -12,7 +12,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.986790124,
+      "score": 0.985961153,
       "source_file": "",
       "status": "tentative",
       "uses": 1
@@ -28,7 +28,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.987612479,
+      "score": 0.986782817,
       "source_file": "ismpu/config/json_config.py",
       "status": "tentative",
       "uses": 1
@@ -44,7 +44,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.987612479,
+      "score": 0.986782817,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
@@ -60,7 +60,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.987612479,
+      "score": 0.986782817,
       "source_file": "ismpu/config/scenarios.py",
       "status": "tentative",
       "uses": 1
@@ -81,7 +81,7 @@
           "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.950156376,
+      "score": 1.948518111,
       "source_file": "ismpu/control/channels.py",
       "status": "preferred",
       "uses": 2
@@ -97,7 +97,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.984729494,
+      "score": 0.983902254,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
@@ -113,7 +113,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.96496484,
+      "score": 0.964154203,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
@@ -129,36 +129,10 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.984729494,
+      "score": 0.983902254,
       "source_file": "ismpu/control/ground_allocator.py",
       "status": "tentative",
       "uses": 1
-    },
-    "ismpu_control_system_controllingsystem": {
-      "code_fingerprint": "58caddd22a45b483e773b648c2f952d89674ee34a2dae0ca5e9aa915b67137a4",
-      "label": "ControllingSystem",
-      "last": "2026-08-15T21:49:56.486344+00:00",
-      "provenance": [
-        {
-          "date": "2026-08-15T21:49:56.486344+00:00",
-          "outcome": "useful",
-          "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
-        },
-        {
-          "date": "2026-08-15T19:39:39.514520+00:00",
-          "outcome": "useful",
-          "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
-        },
-        {
-          "date": "2026-08-14T22:36:00.679819+00:00",
-          "outcome": "useful",
-          "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
-        }
-      ],
-      "score": 2.936484458,
-      "source_file": "ismpu/control/system.py",
-      "status": "preferred",
-      "uses": 3
     },
     "ismpu_envs_ics_sim_icssim": {
       "code_fingerprint": "e4b3c4094045fbfaa96c23e847e494e53d53bbea40f5d3a7668c8da690adc107",
@@ -176,26 +150,10 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 1.971519619,
+      "score": 1.969863406,
       "source_file": "ismpu/envs/ics_sim.py",
       "status": "preferred",
       "uses": 2
-    },
-    "ismpu_envs_ics_sim_telemetry": {
-      "code_fingerprint": "e4b3c4094045fbfaa96c23e847e494e53d53bbea40f5d3a7668c8da690adc107",
-      "label": "Telemetry",
-      "last": "2026-08-14T23:05:50.773201+00:00",
-      "provenance": [
-        {
-          "date": "2026-08-14T23:05:50.773201+00:00",
-          "outcome": "useful",
-          "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
-        }
-      ],
-      "score": 0.965426882,
-      "source_file": "ismpu/envs/ics_sim.py",
-      "status": "tentative",
-      "uses": 1
     },
     "ismpu_envs_observation_observationbuilder": {
       "code_fingerprint": "b70f4b95adb2556d790f19cbfd0b0735a5f5514c4b7d25f74a7f51d87b61490f",
@@ -213,7 +171,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 1.930391722,
+      "score": 1.92877006,
       "source_file": "ismpu/envs/observation.py",
       "status": "preferred",
       "uses": 2
@@ -229,24 +187,45 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.987612479,
+      "score": 0.986782817,
       "source_file": "ismpu/envs/xplane_sim.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_runtime_loop": {
-      "code_fingerprint": "91520a52fbe4e70b9ad1c1e6b4a7c0e3919f7688effa4d852cc30523a43d6b3a",
+      "code_fingerprint": "694ffc142da9def611dcee5f86e45090edb17bcc5cafc1c1364d765cba2d1b93",
       "label": "loop.py",
-      "last": "2026-08-15T21:49:56.486344+00:00",
+      "last": "2026-08-16T12:27:36.943921+00:00",
       "provenance": [
+        {
+          "date": "2026-08-16T12:27:36.943921+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 6 плана [plan.md](docs/plan.md)."
+        },
         {
           "date": "2026-08-15T21:49:56.486344+00:00",
           "outcome": "useful",
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.986790124,
+      "score": 1.985905178,
       "source_file": "ismpu/runtime/loop.py",
+      "status": "preferred",
+      "uses": 2
+    },
+    "ismpu_runtime_run_reader_runreader": {
+      "code_fingerprint": "89b86d7c5391209ec92320f414dc2c1a37bf5f33abd91baefb3185caeb53a9ee",
+      "label": "RunReader",
+      "last": "2026-08-16T12:27:36.943921+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-16T12:27:36.943921+00:00",
+          "outcome": "useful",
+          "q": "Приступай к выполнению этапа 6 плана [plan.md](docs/plan.md)."
+        }
+      ],
+      "score": 0.999944026,
+      "source_file": "ismpu/runtime/run_reader.py",
       "status": "tentative",
       "uses": 1
     },
@@ -261,7 +240,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.986790124,
+      "score": 0.985961153,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "tentative",
       "uses": 1

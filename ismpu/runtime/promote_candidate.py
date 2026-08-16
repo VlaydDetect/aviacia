@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 
 from ismpu.config.json_config import scenario_from_document
+from ismpu.config.scenarios import Scenario
+from ismpu.config.segments import FlightSegment
 from ismpu.config.run_matrix import (
     CATALOG_SHA256, SOURCE_SHA256, resolve_matrix_run, runs_for_code,
 )
@@ -140,9 +142,12 @@ def _validate_candidate(candidate: dict, manifest: dict, run_directory: Path) ->
     samples = list(RunReader(run_directory).samples())
     if not samples:
         raise PromotionError("прогон не содержит control samples")
-    last = samples[-1]
-    if last.segment != segment or last.config_revision != int(candidate["config_revision"]):
-        raise PromotionError("candidate revision/segment не совпадает с последним sample")
+    if not any(
+        sample.segment == segment
+        and sample.config_revision == int(candidate["config_revision"])
+        for sample in samples
+    ):
+        raise PromotionError("candidate revision/segment отсутствует в samples")
 
 
 def _gain_patch(base: dict, effective: dict, segment: str) -> dict:
@@ -179,29 +184,45 @@ def _validate_full_evidence(
     matrix_run = resolve_matrix_run(str(candidate["matrix_run_id"]))
     required = {item.matrix_run_id for item in runs_for_code(matrix_run.code)}
     passed = set()
-    expected_hash = candidate["hashes"]["effective_config_sha256"]
+    origin_manifest = _read_json(origin / "manifest.json")
+    scenario_document = origin_manifest.get("scenario")
+    if not isinstance(scenario_document, dict):
+        raise PromotionError("accepted evidence не содержит scenario document")
+    scenario = Scenario.from_dict(scenario_document)
+    profile = str(candidate["aircraft_profile"])
+    segment = FlightSegment(str(candidate["segment"]))
+    controls = scenario.aircraft_controls.get(profile)
+    if controls is None:
+        raise PromotionError(f"scenario evidence не содержит профиль {profile}")
+    expected_hashes = {
+        run_id: json_sha256(controls.for_segment(segment, run_id))
+        for run_id in required
+    }
     manifests = [origin / "manifest.json"]
     if evidence_root is not None:
         manifests.extend(Path(evidence_root).resolve().rglob("manifest.json"))
     for manifest_path in dict.fromkeys(manifests):
         manifest = _read_json(manifest_path)
-        segment = str(candidate["segment"])
-        run_id = manifest.get("matrix_run_ids", {}).get(segment)
-        if run_id not in required or manifest.get("config_hashes", {}).get(segment) != expected_hash:
+        segment_name = segment.value
+        run_id = manifest.get("matrix_run_ids", {}).get(segment_name)
+        if (run_id not in required
+                or manifest.get("config_hashes", {}).get(segment_name) != expected_hashes[run_id]):
             continue
-        _validate_manifest_hashes(manifest, segment, str(run_id))
+        _validate_manifest_hashes(manifest, segment_name, str(run_id))
         directory = manifest_path.parent
         _validate_run(directory, verify_replay=verify_replay)
         if any(event.get("event") in {"gain_change_applied", "gain_reverted"}
                for event in RunReader(directory).events()):
-            raise PromotionError(
-                f"accepted evidence {run_id} содержит live-изменение gains")
+            continue
         passed.add(str(run_id))
     missing = sorted(required - passed)
     if missing:
         raise PromotionError(
-            "accepted требует PASS полного набора строк с тем же config hash; "
+            "accepted требует PASS полного набора строк с зафиксированными effective config; "
             f"не хватает: {missing}")
+    if candidate["hashes"]["effective_config_sha256"] != expected_hashes[matrix_run.matrix_run_id]:
+        raise PromotionError(
+            "accepted candidate должен быть сохранён в фиксированном прогоне promoted config")
 
 
 def _validate_manifest_hashes(manifest: dict, segment: str, run_id: str) -> tuple[str, str]:

@@ -131,6 +131,7 @@ behaviour
 bell
 below
 bench
+beside
 best
 between
 bfs
@@ -161,6 +162,7 @@ buffer
 build
 builder
 built
+bumpless
 but
 bytes
 cache
@@ -267,7 +269,6 @@ config
 configs
 configuration
 configure
-configured
 confirmation
 confirmed
 confirms
@@ -302,6 +303,7 @@ converted
 converts
 coordinates
 copy
+core
 correct
 corrections
 costs
@@ -425,10 +427,10 @@ during
 dwell
 each
 earth
+editable
 effective
 effort
 ego
-eight
 either
 elapsed
 elevator
@@ -474,6 +476,7 @@ event
 events
 every
 everything
+evidence
 exact
 exactly
 excel
@@ -528,6 +531,7 @@ filtering
 find
 finds
 finish
+finished
 finite
 fires
 first
@@ -603,6 +607,7 @@ graphify
 greedy
 ground
 groundspeed
+group
 groups
 guard
 guesses
@@ -622,6 +627,7 @@ hard
 harness
 has
 hash
+hashes
 have
 haversine
 head
@@ -664,7 +670,6 @@ inapplicable
 increase
 increment
 incremental
-increments
 independent
 independently
 index
@@ -733,6 +738,7 @@ latched
 latches
 later
 lateral
+latest
 law
 layer
 layout
@@ -755,11 +761,11 @@ linear
 list
 lists
 live
+lives
 load
 loc
 local
 localizer
-locks
 log
 logarithmic
 logger
@@ -880,6 +886,7 @@ numerics
 numpy
 nws
 objective
+objects
 obs
 observation
 observe
@@ -921,6 +928,7 @@ packaged
 packet
 packets
 pandas
+panels
 param
 parametrize
 params
@@ -993,6 +1001,7 @@ profile
 profiled
 profiles
 project
+promote
 promotion
 prompt
 property
@@ -1003,6 +1012,7 @@ provenance
 provided
 provider
 public
+publish
 pulse
 pump
 pure
@@ -1011,12 +1021,14 @@ quality
 queries
 query
 queue
+queued
 radio
 raise
 raised
 raises
 randomization
 range
+ranges
 rate
 rather
 rationale
@@ -1114,8 +1126,8 @@ retained
 retries
 returns
 reverse
+revert
 revised
-revision
 reward
 right
 rms
@@ -1200,10 +1212,12 @@ settle
 setup
 sft
 sha
+shadow
 shallower
 shape
 shapes
 share
+shares
 shield
 should
 shows
@@ -1304,6 +1318,7 @@ success
 successful
 summary
 supervisor
+supplies
 supported
 supports
 survive
@@ -1413,7 +1428,6 @@ unchanged
 under
 unified
 uniform
-unique
 unit
 units
 unknown
@@ -1553,6 +1567,7 @@ zoh
 асимметричных
 асимметрия
 атаки
+атомарный
 атрибутом
 аудит
 аудиту
@@ -1600,7 +1615,6 @@ zoh
 бьёт
 важное
 валиден
-валидировать
 валидности
 валидный
 валидными
@@ -1816,6 +1830,7 @@ zoh
 два
 двигался
 двигателя
+двум
 двух
 дебаунс
 действие
@@ -1825,6 +1840,7 @@ zoh
 делая
 дельту
 держал
+держать
 держится
 детерминирован
 детерминированная
@@ -1862,6 +1878,7 @@ zoh
 доведённый
 довели
 доверия
+доверять
 доворот
 доворота
 документами
@@ -1883,6 +1900,7 @@ zoh
 достигнута
 доступность
 доступны
+доступным
 досчитать
 дошёл
 другие
@@ -1961,9 +1979,9 @@ zoh
 запасом
 записанный
 записанных
+записать
 записи
 записывает
-запись
 запретов
 запрос
 запроса
@@ -1972,6 +1990,7 @@ zoh
 заранее
 зарезервированное
 затрагивает
+затрагиваются
 зафиксированные
 зафиксировать
 захват
@@ -2009,6 +2028,7 @@ zoh
 идёт
 извне
 изменяются
+изменённым
 измерения
 измеренное
 измеренному
@@ -2038,6 +2058,7 @@ zoh
 интегрально
 интегратор
 интегратора
+интегратором
 интегрировать
 интеллектуальная
 интервал
@@ -2063,6 +2084,7 @@ zoh
 источник
 источники
 источников
+исходников
 исходного
 исходной
 исходные
@@ -2098,6 +2120,7 @@ zoh
 каноническая
 канонические
 канонический
+канонического
 касание
 касанием
 касании
@@ -2147,6 +2170,7 @@ zoh
 команды
 комбинация
 комментария
+компенсацией
 комплексный
 компонент
 компонента
@@ -2239,6 +2263,7 @@ zoh
 логом
 ложный
 локализаторе
+локальный
 любая
 любой
 любые
@@ -2860,8 +2885,6 @@ zoh
 потокового
 потоковое
 потоковые
-потоком
-потоку
 потому
 потребителей
 почему
@@ -2981,6 +3004,7 @@ zoh
 проверка
 проверки
 проверок
+проверяемое
 проверяет
 проверяется
 проверять
@@ -2996,6 +3020,7 @@ zoh
 прогрев
 прогрева
 продвигает
+продвижение
 продвинуть
 продолжать
 продолжающийся
@@ -3253,6 +3278,7 @@ zoh
 случайный
 случая
 смена
+сменить
 смены
 смешиваются
 смещение
@@ -3280,6 +3306,7 @@ zoh
 совмещения
 совпадать
 совпадают
+согласованно
 создать
 сокет
 солью
@@ -3296,6 +3323,7 @@ zoh
 состояния
 сохранении
 сохранено
+сохранить
 сохраняет
 сохраняется
 сохраняются
@@ -3568,6 +3596,7 @@ zoh
 файлов
 файлового
 файлом
+файлы
 факта
 фактически
 фактические
@@ -3650,6 +3679,7 @@ zoh
 читает
 читались
 чтение
+чтения
 что
 чтобы
 шаг

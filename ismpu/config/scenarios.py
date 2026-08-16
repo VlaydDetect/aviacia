@@ -1009,6 +1009,26 @@ def scenario_for_matrix_run(
     )
 
 
+def rebind_matrix_run(scenario: Scenario, matrix_run: "str | MatrixRun") -> Scenario:
+    """Перенести накопленные overrides одного шифра на следующее условие этого же шифра."""
+    from ismpu.config.run_matrix import resolve_matrix_run
+
+    run = resolve_matrix_run(matrix_run)
+    source_codes = set(scenario.matrix_codes.values())
+    if source_codes != {run.code}:
+        raise ValueError(
+            f"scenario JSON относится к {sorted(source_codes) or ['без матрицы']}, "
+            f"а выбран {run.code}")
+    target = scenario_for_matrix_run(run, seed=scenario.seed)
+    if set(target.aircraft_controls) != set(scenario.aircraft_controls):
+        raise ValueError("набор AircraftProfile в scenario JSON не совпадает с матрицей")
+    return replace(
+        target,
+        aircraft_controls=scenario.aircraft_controls,
+        sensor_noise=scenario.sensor_noise,
+    )
+
+
 def _install_through_scenarios() -> None:
     """Собрать Б.4 из первой строки и заранее определённой пары законов."""
     from ismpu.config.run_matrix import CASE_BY_CODE

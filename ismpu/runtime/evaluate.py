@@ -35,7 +35,11 @@ import numpy as np
 from ismpu.config.requirements import (
     XTE_ROLLOUT_MAX_M, XTE_TAXI_MAX_M, XTE_NWS_FAIL_MAX_M,
     HEADING_FAULT_MAX_DEG, HEADING_HOLD_UNTIL_KTS,
+    CENTERLINE_ALIGN_AT_30M_M, GLIDESLOPE_DEVIATION_MAX_DEG,
+    GLIDESLOPE_GEAR_FAULT_MAX_DEG, GLIDESLOPE_STAB_FAULT_MAX_DEG,
+    COURSE_DEVIATION_MAX_DEG, TOUCHDOWN_FIRST_THIRD_M,
 )
+from ismpu.config.criticality import NY_ALLOWED, NZ_ALLOWED, SINK_ALLOWED_FPM
 from ismpu.io.ics_connector import LISTEN_IP_ANY
 from ismpu.control.failures import FailureMode
 from ismpu.envs.action import preset_action
@@ -141,6 +145,7 @@ class Criterion:
     verdict: str
     reason: str = ""
     evaluation_basis: str = ""
+    lower_limit: float | None = None
     """Относительно чего измерена величина. Для курса это принципиально: отклонение от направления
     ВПП и ошибка команды руления — разные числа, и при смещении от оси они расходятся на градусы."""
 
@@ -159,6 +164,23 @@ def _check(name: str, tz_ref: str, limit: float, measured, *,
     ok = abs(float(measured)) <= limit
     return Criterion(name, tz_ref, limit, float(measured), PASS if ok else FAIL,
                      "" if ok else f"превышение допуска на {abs(float(measured)) - limit:.2f}")
+
+
+def _range_check(
+    name: str, tz_ref: str, lower: float, upper: float, measured,
+    *, evaluation_basis: str = "",
+) -> Criterion:
+    """Проверить несимметричный интервал; отсутствие измерения остаётся отказом."""
+    if measured is None or not math.isfinite(float(measured)):
+        return Criterion(
+            name, tz_ref, upper, None, FAIL, "нет измерения", evaluation_basis, lower)
+    value = float(measured)
+    ok = lower <= value <= upper
+    reason = "" if ok else f"вне диапазона [{lower:.2f}, {upper:.2f}]"
+    return Criterion(
+        name, tz_ref, upper, value, PASS if ok else FAIL, reason,
+        evaluation_basis, lower,
+    )
 
 
 HEADING_CRITERION_FAILURES = frozenset({
@@ -217,6 +239,127 @@ def evaluate_tz(diagnostics: dict, scenario) -> list[Criterion]:
                applicable=taxi_applicable, na_reason=taxi_na_reason),
         heading,
     ]
+
+
+def evaluate_matrix_run(matrix_run, metrics: dict) -> list[Criterion]:
+    """Оценить именно выбранную строку матрицы, не смешивая фазы соседних шифров."""
+    code = matrix_run.code
+    deviations = metrics.get("max_deviations", {})
+
+    def approach(course: float | None = None, glideslope: float | None = None):
+        criteria = []
+        if course is not None:
+            item = _check(
+                "approach_course_max", "ТЗ 5.1.2", course,
+                deviations.get("approach_course_deg"), applicable=True)
+            item.evaluation_basis = "ILS_localizer_angular_deviation"
+            criteria.append(item)
+        if glideslope is not None:
+            item = _check(
+                "approach_glideslope_max", "ТЗ 5.1.2", glideslope,
+                deviations.get("approach_glideslope_deg"), applicable=True)
+            item.evaluation_basis = "ILS_glideslope_angular_deviation"
+            criteria.append(item)
+        return criteria
+
+    def landing(*, align_at_30m: bool = True):
+        touchdown = metrics.get("touchdown") or {}
+        criteria = []
+        if align_at_30m:
+            item = _check(
+                "axis_at_30m", "ТЗ 5.1.1.2", CENTERLINE_ALIGN_AT_30M_M,
+                deviations.get("approach_axis_at_30m_m"), applicable=True)
+            item.evaluation_basis = "nearest_radio_altitude_sample_to_30m"
+            criteria.append(item)
+        criteria.extend([
+            _range_check(
+                "touchdown_distance", "ТЗ 5.1.1.2", 0.0,
+                TOUCHDOWN_FIRST_THIRD_M, touchdown.get("along_track_m"),
+                evaluation_basis="distance_from_runway_threshold_along_centerline"),
+            _check(
+                "touchdown_sink", "Приложение 1", SINK_ALLOWED_FPM,
+                touchdown.get("vertical_speed_fpm"), applicable=True),
+        ])
+        vapp = touchdown.get("vapp_kt")
+        if vapp is None or not math.isfinite(float(vapp)):
+            criteria.append(Criterion(
+                "touchdown_speed", "Приложение 1", 0.0, None, FAIL,
+                "нет VAPP для вычисления диапазона"))
+        else:
+            criteria.append(_range_check(
+                "touchdown_speed", "Приложение 1", 0.96 * float(vapp),
+                float(vapp) + 10.0, touchdown.get("indicated_airspeed_kts"),
+                evaluation_basis="0.96*VAPP..VAPP+10kt"))
+        criteria.extend([
+            _check(
+                "touchdown_normal_load", "Приложение 1", NY_ALLOWED,
+                touchdown.get("normal_load_g"), applicable=True),
+            _check(
+                "touchdown_lateral_load", "Приложение 1", NZ_ALLOWED,
+                touchdown.get("lateral_load_g"), applicable=True),
+        ])
+        return criteria
+
+    def rollout(limit: float):
+        return [_check(
+            "xte_rollout_max", "ТЗ 5.1.3.2" if limit == XTE_NWS_FAIL_MAX_M
+            else "ТЗ 5.1.3.1", limit, deviations.get("rollout_xte_m"),
+            applicable=True)]
+
+    def thrust_fault():
+        item = _check(
+            "heading_max", "ТЗ 5.1.3.3", HEADING_FAULT_MAX_DEG,
+            deviations.get("runway_heading_deg"), applicable=True)
+        item.evaluation_basis = "runway_relative_true_heading_above_30kt"
+        return rollout(XTE_ROLLOUT_MAX_M) + [item]
+
+    if code == "А.1.1":
+        return approach(COURSE_DEVIATION_MAX_DEG, GLIDESLOPE_DEVIATION_MAX_DEG) + [
+            _check(
+                "axis_at_30m", "ТЗ 5.1.1.2", CENTERLINE_ALIGN_AT_30M_M,
+                deviations.get("approach_axis_at_30m_m"), applicable=True)
+        ]
+    if code == "А.1.2":
+        return landing(align_at_30m=False)
+    if code.startswith("А.2."):
+        return approach(glideslope=GLIDESLOPE_GEAR_FAULT_MAX_DEG) + landing()
+    if code.startswith("А.3."):
+        return approach(glideslope=GLIDESLOPE_STAB_FAULT_MAX_DEG) + landing()
+    if code.startswith("А.4."):
+        heading = _check(
+            "approach_runway_heading_max", "ТЗ 5.1.2.4",
+            HEADING_FAULT_MAX_DEG,
+            deviations.get("approach_runway_heading_deg"), applicable=True)
+        heading.evaluation_basis = "runway_relative_magnetic_track"
+        return [heading] + landing()
+    if code == "Б.1.1":
+        return rollout(XTE_ROLLOUT_MAX_M)
+    if code == "Б.1.2":
+        return [_check(
+            "xte_taxi_max", "ТЗ 5.1.3.1 (руление)", XTE_TAXI_MAX_M,
+            deviations.get("taxi_xte_m"), applicable=True)]
+    if code.startswith("Б.2."):
+        return rollout(XTE_NWS_FAIL_MAX_M)
+    if code.startswith("Б.3."):
+        return thrust_fault()
+    if code == "Б.4.1":
+        return (
+            approach(COURSE_DEVIATION_MAX_DEG, GLIDESLOPE_DEVIATION_MAX_DEG)
+            + landing()
+            + rollout(XTE_ROLLOUT_MAX_M)
+            + [_check(
+                "handover_slew_ratio", "Матрица Б.4.1", 1.0,
+                metrics.get("handover", {}).get("max_rate_ratio"),
+                applicable=True)]
+        )
+    if code == "Б.4.2":
+        heading = _check(
+            "approach_runway_heading_max", "ТЗ 5.1.2.4",
+            HEADING_FAULT_MAX_DEG,
+            deviations.get("approach_runway_heading_deg"), applicable=True)
+        heading.evaluation_basis = "runway_relative_magnetic_track"
+        return [heading] + landing() + thrust_fault()
+    raise ValueError(f"для шифра матрицы {code!r} не определены критерии")
 
 
 def verdict_of(criteria: list[Criterion]) -> str:

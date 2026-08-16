@@ -7,7 +7,7 @@ import pytest
 
 from ismpu.config.constants import DT
 from ismpu.config.ics import FlightPhase
-from ismpu.config.scenarios import SCENARIOS
+from ismpu.config.scenarios import SCENARIOS, scenario_for_matrix_run
 from ismpu.config.segments import FlightSegment
 from ismpu.control.channels import LateralDiagnostics, LongitudinalDiagnostics
 from ismpu.control.failures import FailureMode
@@ -306,6 +306,24 @@ def test_runtime_requests_taxi_only_for_handover_completion(
 
     assert result.reason is RunStopReason.COMPLETED
     assert controller.hand_over_to_taxi.call_count == taxi_requests
+
+
+def test_operator_ends_matrix_taxi_as_completed(monkeypatch):
+    controller = MagicMock()
+    controller.segment = FlightSegment.TAXI
+    controller.tick_id = 1
+    controller.begin_flight.return_value = FlightSegment.TAXI
+    controller.control_step.side_effect = KeyboardInterrupt
+    controller.longitudinal_channel.trajectory.completion_rule = CompletionRule.OPERATOR
+    sim = MagicMock()
+    sim.reset.return_value = _direct_ground_frame(speed_kts=15.0)
+    sim.read_telemetry.return_value = sim.reset.return_value
+    ticks = iter((0.0, 0.0, 0.0, DT))
+    monkeypatch.setattr("ismpu.runtime.loop.time.monotonic", lambda: next(ticks))
+
+    result = run(controller, sim, scenario_for_matrix_run("Б.1.2/1"), start="taxi")
+
+    assert result.reason is RunStopReason.OPERATOR_COMPLETED
 
 
 def test_all_old_ground_gains_are_marked_draft_after_allocator_change():

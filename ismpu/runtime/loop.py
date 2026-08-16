@@ -29,9 +29,10 @@ from ismpu.envs.sim_interface import (
 from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE, SOURCE_SHA256
 from ismpu.config.scenarios import (
-    SCENARIOS, ProfileStatus, Scenario, resolve_scenario, scenario_for_matrix_run,
-    select_for_telemetry,
+    SCENARIOS, ProfileStatus, Scenario, rebind_matrix_run, resolve_scenario,
+    scenario_for_matrix_run, select_for_telemetry,
 )
+from ismpu.config.json_config import load_scenario
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,16 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         if reason is RunStopReason.ERROR:
             reason = RunStopReason.COMPLETED
     except KeyboardInterrupt:
-        reason = RunStopReason.INTERRUPTED
+        trajectory = getattr(
+            getattr(controller, "longitudinal_channel", None), "trajectory", None)
+        if (
+            controller.tick_id > 0
+            and controller.segment is FlightSegment.TAXI
+            and getattr(trajectory, "completion_rule", None) is CompletionRule.OPERATOR
+        ):
+            reason = RunStopReason.OPERATOR_COMPLETED
+        else:
+            reason = RunStopReason.INTERRUPTED
     finally:
         try:
             controller.control_exception()
@@ -192,6 +202,7 @@ def main(
     aircraft_profile: str | None = None,
     runway_profile: str | None = None,
     run_id: str | None = None,
+    scenario_json: str | None = None,
     dashboard: bool = False,
     dashboard_tune: bool = False,
     dashboard_hold_seconds: float = 300.0,
@@ -210,16 +221,21 @@ def main(
     Фактические условия стенда сверяются с выбранной строкой, но не используются для угадывания
     неоднозначных Б.2.* и Б.3.*.
     """
-    if run_id is not None and preset is not None:
-        raise ValueError("задайте либо preset, либо run_id")
+    if preset is not None and (run_id is not None or scenario_json is not None):
+        raise ValueError("preset нельзя смешивать с run_id/scenario_json")
     if dashboard_hold_seconds < 0.0:
         raise ValueError("dashboard_hold_seconds must be non-negative")
-    selected = (
-        scenario_for_matrix_run(run_id) if run_id is not None
-        else preset if isinstance(preset, Scenario)
-        else resolve_scenario(preset) if preset is not None
-        else None
-    )
+    loaded = load_scenario(
+        scenario_json, legacy_aircraft_profile=aircraft_profile or "mc21") \
+        if scenario_json is not None else None
+    if loaded is not None:
+        selected = rebind_matrix_run(loaded, run_id) if run_id is not None else loaded
+    elif run_id is not None:
+        selected = scenario_for_matrix_run(run_id)
+    elif isinstance(preset, Scenario):
+        selected = preset
+    else:
+        selected = resolve_scenario(preset) if preset is not None else None
     if selected is not None and selected.matrix_codes and not selected.matrix_runs:
         raise ValueError(
             "матричный сценарий нельзя запускать по одному шифру; "
@@ -345,6 +361,9 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--aircraft-profile", default=None)
     parser.add_argument("--runway-profile", default=None)
     parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--scenario-json", default=None,
+        help="promoted scenario JSON; вместе с --run-id переносит overrides на строку того же шифра")
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--dashboard-tune", action="store_true")
     parser.add_argument("--dashboard-hold-seconds", type=float, default=300.0)
