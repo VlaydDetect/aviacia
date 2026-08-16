@@ -12,7 +12,7 @@ from ismpu.control.channels import ControlsState
 from ismpu.control.failures import FailureMode
 from ismpu.control.flight import FlightSegment
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.scenario import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
+from ismpu.config.scenarios import ApproachSetup, Scenario, SensorNoise, TouchdownSetup
 from ismpu.envs.weather import FrictionProfile, WeatherState
 from ismpu.envs.xplane_sim import XPlaneSim
 from ismpu.io import datarefs as dr
@@ -79,14 +79,11 @@ class MockXPlaneConnector:
     def send_position(self, **kwargs):
         self.positions.append(kwargs)
 
-    def sendCTRL(self, **kwargs):
+    def send_controls(self, **kwargs):
         self.commands.append(("CTRL", kwargs))
 
     def send_command(self, command):
         self.commands.append(command)
-
-    def sendCMND(self, command):
-        self.commands.append(("CMND", command))
 
     def reload_aircraft(self):
         self.commands.append("reload")

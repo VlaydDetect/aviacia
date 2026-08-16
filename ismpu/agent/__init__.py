@@ -1,1 +1,1 @@
-"""Активный ML-слой: два SFT ``PidGainRegressor`` + ``GainGuard``; PPO изолирован."""
+"""SFT-слой: два ``PidGainRegressor`` и детерминированный ``GainGuard``."""

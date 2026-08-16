@@ -7,7 +7,7 @@ import pytest
 
 from ismpu.config.segments import FlightSegment
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.scenario import Scenario, scenario_for_matrix_run
+from ismpu.config.scenarios import Scenario, scenario_for_matrix_run
 from ismpu.gui import dashboard_core
 from ismpu.gui.dashboard import DashboardServer, DashboardState, VIEW_SPECS
 from ismpu.runtime.promote_candidate import PromotionError, promote_candidate

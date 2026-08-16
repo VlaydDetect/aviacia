@@ -118,6 +118,7 @@ def gain_vector_from_row(row: Mapping[str, Any], segment: str) -> np.ndarray:
 
 
 def controller_gain_vector(controller, segment: str) -> np.ndarray:
+    """Снять gains всех PID участка в стабильном checkpoint layout."""
     pids = controller_pids(controller)
     return np.asarray([
         getattr(pids[name], gain)
@@ -142,6 +143,7 @@ def apply_gain_vector(controller, segment: str, gains: Sequence[float]) -> None:
 
 
 def checkpoint_metadata(path: str | Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Сформировать audit metadata загруженного файла, включая SHA-256 содержимого."""
     target = Path(path)
     with target.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -173,6 +175,7 @@ class _SegmentRuntime:
 
     @classmethod
     def build(cls, model: PidGainRegressor, checkpoint: dict[str, Any]) -> "_SegmentRuntime":
+        """Собрать stateful inference slot из уже проверенного checkpoint."""
         normalization = checkpoint["normalization"]
         bounds = checkpoint["physical_bounds"]
         return cls(
@@ -184,6 +187,7 @@ class _SegmentRuntime:
         )
 
     def reset(self, key: tuple[str, int], preset: np.ndarray) -> None:
+        """Сбросить окно и pending prediction при смене segment/config revision."""
         self.context = key
         self.preset = preset.copy()
         self.current = preset.copy()
@@ -222,6 +226,7 @@ class SftRuntime:
         backend: str = "xplane",
         aircraft_profile: str | None = None,
     ) -> "SftRuntime":
+        """Загрузить независимые air/ground slots и проверить activation evidence для ICS."""
         if mode == "classical":
             if air_path is not None or ground_path is not None:
                 raise ValueError("SFT checkpoints require sft-shadow or sft-active")

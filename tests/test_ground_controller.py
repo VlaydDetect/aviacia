@@ -153,26 +153,6 @@ def test_ground_step_returns_three_typed_diagnostics_and_rate_limits_handover():
     assert allocation.saturated
 
 
-def test_tracking_uses_pid_space_when_channel_weight_is_not_one():
-    controller = ControllingSystem()
-    SCENARIOS["default"].apply_control(controller, "mc21")
-    frame = _direct_ground_frame(speed_kts=100.0)
-    controller.longitudinal_channel.begin(frame.groundspeed_ms)
-    controller.longitudinal_channel.traveled_distance_m = 2500.0
-    controller.set_channel_weights(0.5, 1.0)
-    tracked = {}
-    pid = controller.pids["pid_brake_l"]
-    pid.track = lambda applied, dt, commanded_output=None: tracked.update(
-        applied=applied, requested=commanded_output)
-
-    controller.control_step(DT, frame, send=False)
-    allocation = controller.ground_allocator.last_diagnostics
-
-    assert tracked["requested"] == pytest.approx(
-        allocation.base.brake_left / controller.longitudinal_channel.w_lon)
-    assert tracked["requested"] == pytest.approx(pid.last_output)
-
-
 def test_nws_failure_keeps_rudder_and_redistributes_to_differential_brakes():
     controller = ControllingSystem()
     SCENARIOS["nws_fail"].apply_control(controller, "mc21")

@@ -59,25 +59,27 @@ class GroundControlConfig:
     failure_yaw_compensation_gain: float = 1.0
 
     def build_pids(self) -> dict[str, "PIDController"]:
+        """Создать новые stateful PID из immutable словарей конфигурации."""
         from ismpu.factories.control import build_pids
         return build_pids(self)
 
     def apply(self, controller: "ControllingSystem") -> "ControllingSystem":
+        """Полностью пересобрать наземные каналы controller этой конфигурацией."""
         from ismpu.factories.control import apply_ground_control
         return apply_ground_control(self, controller)
 
 
 @dataclass(frozen=True)
 class _GroundPresetSpec:
-    """Внутренняя форма переноса прежних литералов; наружу выдаётся только `Scenario`."""
+    """Компактный внутренний шаблон наземной ветки; наружу выдаётся только `Scenario`."""
 
     name: str
-    failure: FailureMode
     runway_center: PidConfig
     brake_l: PidConfig
     brake_r: PidConfig
     rev_l: PidConfig
     rev_r: PidConfig
+    failures: frozenset[FailureMode] = field(default_factory=frozenset)
     weather: WeatherState = field(default_factory=lambda: WEATHER_PRESETS["clear_dry"])
     lookahead_min: float = 10.0
     lookahead_gain: float = 1.8
@@ -96,6 +98,7 @@ class _GroundPresetSpec:
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
     def ground(self) -> GroundControlConfig:
+        """Материализовать публичную immutable конфигурацию из внутреннего preset spec."""
         return GroundControlConfig(
             runway_center=dict(self.runway_center), brake_l=dict(self.brake_l),
             brake_r=dict(self.brake_r), rev_l=dict(self.rev_l), rev_r=dict(self.rev_r),
@@ -114,7 +117,6 @@ class _GroundPresetSpec:
 
 _DEFAULT_SPEC = _GroundPresetSpec(
     name="default",
-    failure=FailureMode.NONE,
     runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
@@ -125,7 +127,7 @@ _DEFAULT_SPEC = _GroundPresetSpec(
 
 _NWS_FAIL_SPEC = _GroundPresetSpec(
     name="nws_fail",
-    failure=FailureMode.NWS_FAIL,
+    failures=frozenset({FailureMode.NWS_FAIL}),
     runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, der_filter_tf=0.1, anti_windup=5, name="Brake_L"),
     brake_r=dict(kp=0.12, ki=0.002, kd=0.11, min_out=0.0, max_out=1.0, der_filter_tf=0.1, anti_windup=5, name="Brake_R"),
@@ -136,7 +138,7 @@ _NWS_FAIL_SPEC = _GroundPresetSpec(
 
 _LEFT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     name="left_reverse_fail",
-    failure=FailureMode.REVERSE_LEFT_FAIL,
+    failures=frozenset({FailureMode.REVERSE_LEFT_FAIL}),
     runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_R"),
@@ -147,7 +149,7 @@ _LEFT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
 
 _RIGHT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     name="right_reverse_fail",
-    failure=FailureMode.REVERSE_RIGHT_FAIL,
+    failures=frozenset({FailureMode.REVERSE_RIGHT_FAIL}),
     runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
@@ -158,7 +160,6 @@ _RIGHT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
 
 _RIGHT_WIND_SPEC = _GroundPresetSpec(
     name="right_wind",
-    failure=FailureMode.NONE,
     weather=WeatherState.from_crosswind(10.0, 0.0),
     # runway_center=dict(kp=0.009, ki=0.0075, kd=0.09, min_out=-1, max_out=1, anti_windup=2, integral_decay=0.65, name="Runway_Center"),
     # brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
@@ -176,7 +177,6 @@ _RIGHT_WIND_SPEC = _GroundPresetSpec(
 
 _FWD_WIND_SPEC = _GroundPresetSpec(
     name="fwd_wind",
-    failure=FailureMode.NONE,
     weather=WeatherState.from_crosswind(0.0, 10.0),
     runway_center=dict(kp=0.0015, ki=0.0005, kd=0.065, min_out=-1, max_out=1, anti_windup=2.5, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
@@ -188,7 +188,6 @@ _FWD_WIND_SPEC = _GroundPresetSpec(
 
 _WET_RWY_SPEC = _GroundPresetSpec(
     name="wet_rwy",
-    failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["wet"],
     runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
@@ -200,7 +199,6 @@ _WET_RWY_SPEC = _GroundPresetSpec(
 
 _PUDDLY_RWY_SPEC = _GroundPresetSpec(
     name="puddly_rwy",
-    failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["puddly"],
     runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
@@ -212,7 +210,6 @@ _PUDDLY_RWY_SPEC = _GroundPresetSpec(
 
 _ICY_RWY_SPEC = _GroundPresetSpec(
     name="icy_rwy",
-    failure=FailureMode.NONE,
     weather=WEATHER_PRESETS["icy"],
     runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
@@ -222,29 +219,23 @@ _ICY_RWY_SPEC = _GroundPresetSpec(
     lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
 )
 
-# --------------------------------------------------------------------------- #
-# Черновые пресеты под матрицу прогонов (лист Б: ВПП и руление)
-# --------------------------------------------------------------------------- #
-#
-# Один шифр матрицы = один набор коэффициентов: внутри шифра прогоны идут от простого к сложному,
-# и настройка переносится с предыдущего на следующий (см. `config/run_matrix.py`). Поэтому пресет
-# заводится на шифр, а не на строку таблицы.
-#
-# Каждый черновик наследуется от **ближайшего откалиброванного** пресета, а не от нулей: начинать
-# настройку от работающего набора — ровно то, что предписывает методика матрицы. Статус
-# калибровки хранится только в `ControlProfile.statuses`.
+def _matrix_draft(
+    base: _GroundPresetSpec,
+    name: str,
+    code: str,
+    *,
+    failures: frozenset[FailureMode],
+    **overrides,
+) -> _GroundPresetSpec:
+    """Скопировать ближайший рабочий набор PID для одного шифра листа Б.
 
-def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
-                  failure: FailureMode | None = None,
-                  **overrides) -> _GroundPresetSpec:
-    """Черновик под шифр матрицы на базе откалиброванного пресета.
-
-    Словари коэффициентов копируются: spec заморожен, но сами словари — нет, и
-    общий словарь на два пресета означал бы, что настройка одного молча меняет другой.
+    Матрица определяет имена, отказы и число строк. Здесь остаются только инженерно
+    значимые стартовые исключения для руления и постоянного увода NWS. Словари PID
+    обязательно копируются, чтобы настройка одного шифра не меняла соседний.
     """
     spec = dict(
         name=name, matrix_code=code,
-        failure=base.failure if failure is None else failure,
+        failures=failures,
         runway_center=dict(base.runway_center), brake_l=dict(base.brake_l),
         brake_r=dict(base.brake_r), rev_l=dict(base.rev_l), rev_r=dict(base.rev_r),
     )
@@ -256,58 +247,35 @@ def _matrix_draft(base: _GroundPresetSpec, name: str, code: str, *,
     return replace(base, **spec)
 
 
-B_1_1_ROLLOUT = _matrix_draft(_DEFAULT_SPEC, "b_1_1_rollout", "Б.1.1")
-"""Штатный пробег от касания до полной остановки. Критерий — ось ВПП ± 3 м (ТЗ 5.1.3.1)."""
+def _ground_matrix_drafts() -> tuple[_GroundPresetSpec, ...]:
+    """Построить десять черновиков непосредственно из versioned JSON-каталога."""
+    from ismpu.config.run_matrix import GROUND_CASES
 
-B_1_2_TAXI = _matrix_draft(
-    _DEFAULT_SPEC, "b_1_2_taxi", "Б.1.2",
-    lookahead_min=5.0, lookahead_gain=1.2, xte_gain=3.0)
-"""Руление по прямому участку. Допуск втрое жёстче пробега (± 1 м), а скорости втрое ниже,
-поэтому упреждение укорочено, а реакция на боковое смещение усилена — это отправная точка
-настройки, а не результат."""
-
-B_2_1_NWS_STUCK_NEUTRAL = _matrix_draft(_NWS_FAIL_SPEC, "b_2_1_nws_stuck_neutral", "Б.2.1")
-"""Заедание носовой стойки в нейтрали. Ближайший откалиброванный родитель — `nws_fail`:
-у него удержание оси уже перенесено на дифференциальное торможение и асимметричную тягу."""
-
-B_2_2_NWS_STUCK_OFFSET = _matrix_draft(
-    _NWS_FAIL_SPEC, "b_2_2_nws_stuck_offset", "Б.2.2",
-    steering_brake_gain=0.9, steering_rev_gain=0.6)
-"""Заедание с уводом (+5°). Хуже нейтрали: стойка не просто бездействует, а постоянно тянет с
-полосы, и парировать это приходится тормозами и тягой непрерывно, а не эпизодически."""
-
-B_2_3_NWS_LIMITED = _matrix_draft(_NWS_FAIL_SPEC, "b_2_3_nws_limited", "Б.2.3")
-"""Ограничение диапазона до ± 3°. Смешанное управление: стойка ещё живая, но её авторитета не
-хватает. Заводится от `nws_fail`, хотя по смыслу лежит между ним и штатным пробегом."""
-
-B_3_1_REVERSE_LEFT_FAIL = _matrix_draft(_LEFT_REVERSE_FAIL_SPEC, "b_3_1_reverse_left_fail", "Б.3.1")
-"""Отказ реверса левого двигателя."""
-
-B_3_2_REVERSE_ASYMMETRIC = _matrix_draft(_LEFT_REVERSE_FAIL_SPEC, "b_3_2_reverse_asymmetric", "Б.3.2")
-"""Несимметричное включение реверса (левый с задержкой 3 с). По телеметрии неотличим от Б.3.1 —
-выбирается только по имени."""
-
-B_3_3_RESIDUAL_THRUST = _matrix_draft(
-    _LEFT_REVERSE_FAIL_SPEC, "b_3_3_residual_thrust", "Б.3.3",
-    failure=FailureMode.THRUST_LEFT_DEGRADED)
-"""Остаточная прямая тяга ~30 % на левом. Отличается от отказа реверса знаком возмущения: не
-«нечем тормозить слева», а «слева подталкивает вперёд»."""
-
-B_4_1_THROUGH = _matrix_draft(_DEFAULT_SPEC, "b_4_1_through", "Б.4.1")
-"""Сквозной прогон без отказов: глиссада → касание → пробег. Критерий добавляет то, чего нет ни
-у одного участка по отдельности — отсутствие скачка управляющих воздействий на стыке."""
-
-B_4_2_THROUGH_ENGINE_OUT = _matrix_draft(
-    _LEFT_REVERSE_FAIL_SPEC, "b_4_2_through_engine_out", "Б.4.2")
-"""Сквозной, худший случай: отказ левого двигателя на глиссаде + отказ его реверса на пробеге."""
+    exceptions = {
+        "Б.1.2": {"lookahead_min": 5.0, "lookahead_gain": 1.2, "xte_gain": 3.0},
+        "Б.2.2": {"steering_brake_gain": 0.9, "steering_rev_gain": 0.6},
+    }
+    drafts = []
+    for case in GROUND_CASES:
+        failures = frozenset(case.bench_faults)
+        if FailureMode.NWS_FAIL in failures:
+            base = _NWS_FAIL_SPEC
+        elif failures:
+            # Все текущие не-NWS строки Б возмущают левый канал тяги/реверса.
+            base = _LEFT_REVERSE_FAIL_SPEC
+        else:
+            base = _DEFAULT_SPEC
+        drafts.append(_matrix_draft(
+            base,
+            case.preset,
+            case.code,
+            failures=failures,
+            **exceptions.get(case.code, {}),
+        ))
+    return tuple(drafts)
 
 
-GROUND_MATRIX_DRAFTS = (
-    B_1_1_ROLLOUT, B_1_2_TAXI,
-    B_2_1_NWS_STUCK_NEUTRAL, B_2_2_NWS_STUCK_OFFSET, B_2_3_NWS_LIMITED,
-    B_3_1_REVERSE_LEFT_FAIL, B_3_2_REVERSE_ASYMMETRIC, B_3_3_RESIDUAL_THRUST,
-    B_4_1_THROUGH, B_4_2_THROUGH_ENGINE_OUT,
-)
+GROUND_MATRIX_DRAFTS = _ground_matrix_drafts()
 
 
 @dataclass(frozen=True)
@@ -339,6 +307,8 @@ class TouchdownSetup:
 
 @dataclass(frozen=True)
 class SensorNoise:
+    """Детерминированно seeded шум/пропуски, применяемые только resettable backend."""
+
     pos_sigma_m: float = 0.0
     heading_sigma_deg: float = 0.0
     speed_sigma_ms: float = 0.0
@@ -366,10 +336,12 @@ class ConditionMatch:
 
     @property
     def failures_match(self) -> bool:
+        """Истина, если набор фактических отказов совпал ровно."""
         return not self.missing_failures and not self.unexpected_failures
 
     @property
     def weather_matches(self) -> bool:
+        """Истина при практически нулевой нормированной дистанции погоды."""
         return self.weather_distance <= 1e-3
 
     @property
@@ -377,13 +349,9 @@ class ConditionMatch:
         """Погода остаётся отчётной; неверный отказ делает прогон недопустимым."""
         return self.failures_match
 
-    @property
-    def exact(self) -> bool:
-        """Совместимое имя для прежних потребителей допуска к приёмке."""
-        return self.acceptance_valid
-
-
 class ProfileStatus(str, Enum):
+    """Admission status одной aircraft/segment конфигурации."""
+
     DRAFT = "draft"
     TUNED = "tuned"
     ACCEPTED = "accepted"
@@ -448,6 +416,7 @@ class ControlProfile:
     def for_segment(
         self, segment: FlightSegment, matrix_run_id: str | None = None,
     ) -> ApproachConfig | GroundControlConfig:
+        """Материализовать базовую ветку и sparse override выбранной строки."""
         if segment is FlightSegment.APPROACH:
             base = self.approach
         elif segment is FlightSegment.ROLLOUT:
@@ -460,19 +429,8 @@ class ControlProfile:
         return _materialize_override(base, patch)
 
     def status_for(self, segment: FlightSegment) -> ProfileStatus:
+        """Вернуть admission status участка; отсутствующий status безопасно означает draft."""
         return ProfileStatus(self.statuses.get(segment, ProfileStatus.DRAFT))
-
-    @property
-    def draft_segments(self) -> frozenset[FlightSegment]:
-        """Совместимое чтение старого контракта; канонический источник — ``statuses``."""
-        return frozenset(
-            segment for segment in FlightSegment
-            if self.status_for(segment) is ProfileStatus.DRAFT)
-
-
-# Старое имя остаётся только как импортная совместимость schema v1/v2.
-AircraftControlSet = ControlProfile
-
 
 def _profile_name(profile: AircraftProfile | str) -> str:
     return profile.name if isinstance(profile, AircraftProfile) else str(profile).lower()
@@ -506,13 +464,10 @@ class Scenario:
                 raise ValueError(
                     f"{run_id}: строка {run.segment} не относится к {segment.value}")
 
-    @property
-    def name(self) -> str:
-        return self.scenario_id
-
     def control_for(
         self, profile: AircraftProfile | str, segment: FlightSegment,
     ) -> ApproachConfig | GroundControlConfig:
+        """Вернуть effective control с override конкретного ``matrix_run_id``."""
         name = _profile_name(profile)
         try:
             controls = self.aircraft_controls[name]
@@ -524,6 +479,7 @@ class Scenario:
         return controls.for_segment(segment, self.matrix_runs.get(segment))
 
     def conditions_for(self, segment: FlightSegment) -> SegmentConditions:
+        """Вернуть ожидаемую погоду и отказы одного участка без наследования на лету."""
         try:
             return self.conditions[segment]
         except KeyError as exc:
@@ -532,11 +488,13 @@ class Scenario:
             ) from exc
 
     def is_draft(self, profile: AircraftProfile | str, segment: FlightSegment) -> bool:
+        """Проверить, запрещена ли автоматическая эксплуатация ветки."""
         return self.control_status(profile, segment) is ProfileStatus.DRAFT
 
     def control_status(
         self, profile: AircraftProfile | str, segment: FlightSegment,
     ) -> ProfileStatus:
+        """Получить status конфигурации для точной пары aircraft/segment."""
         name = _profile_name(profile)
         try:
             return self.aircraft_controls[name].status_for(segment)
@@ -544,9 +502,11 @@ class Scenario:
             raise KeyError(f"в сценарии нет профиля {name!r}") from exc
 
     def is_accepted(self, profile: AircraftProfile | str, segment: FlightSegment) -> bool:
+        """Проверить, допускается ли ветка в SFT expert dataset и auto-selection."""
         return self.control_status(profile, segment) is ProfileStatus.ACCEPTED
 
     def matrix_run_for(self, segment: FlightSegment) -> "MatrixRun | None":
+        """Разрешить закреплённый run_id участка в неизменяемую строку каталога."""
         run_id = self.matrix_runs.get(segment)
         if run_id is None:
             return None
@@ -559,6 +519,7 @@ class Scenario:
         profile: AircraftProfile | str,
         segment: FlightSegment = FlightSegment.ROLLOUT,
     ) -> "ControllingSystem":
+        """Пересобрать stateful PID выбранного участка и синхронизировать ожидаемые отказы."""
         control = self.control_for(profile, segment)
         if segment is FlightSegment.APPROACH:
             controller.setup_approach(control)
@@ -574,17 +535,9 @@ class Scenario:
 
     @property
     def failures(self) -> tuple[FailureMode, ...]:
+        """Совместимый наземный срез отказов для подбора сценария и отчёта."""
         return tuple(sorted(
             self.conditions_for(FlightSegment.ROLLOUT).failures, key=lambda f: f.value))
-
-    @property
-    def primary_failure(self) -> FailureMode:
-        return self.failures[0] if self.failures else FailureMode.NONE
-
-    @property
-    def matrix_code(self) -> str:
-        codes = tuple(dict.fromkeys(c for c in self.matrix_codes.values() if c))
-        return codes[0] if len(codes) == 1 else "+".join(codes)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize only the canonical profile- and matrix-aware schema v3."""
@@ -599,6 +552,7 @@ class Scenario:
         *,
         legacy_aircraft_profile: str = "mc21",
     ) -> "Scenario":
+        """Прочитать schema v3 либо явно мигрируемую v1/v2 конфигурацию."""
         from ismpu.config.json_config import scenario_from_document
 
         return scenario_from_document(
@@ -617,6 +571,7 @@ class Scenario:
         scenario_id: str | None = None,
         seed: int = 0,
     ) -> "Scenario":
+        """Скопировать канонический preset и заменить только запрошенные условия запуска."""
         base = SCENARIOS[name]
         conditions = dict(base.conditions)
         if weather is not None or failures is not None:
@@ -705,13 +660,9 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
 
     standard = SegmentConditions(weather=spec.weather)
     conditions = {segment: standard for segment in FlightSegment}
-    failure_set = frozenset(() if spec.failure is FailureMode.NONE else (spec.failure,))
     for segment in affected:
-        conditions[segment] = SegmentConditions(weather=spec.weather, failures=failure_set)
-    if spec.name == "b_4_2_through_engine_out":
-        conditions[FlightSegment.ROLLOUT] = SegmentConditions(
-            weather=spec.weather,
-            failures=frozenset({FailureMode.ENGINE_OUT_LEFT, FailureMode.REVERSE_LEFT_FAIL}),
+        conditions[segment] = SegmentConditions(
+            weather=spec.weather, failures=spec.failures
         )
     matrix_codes = {segment: spec.matrix_code for segment in affected if spec.matrix_code}
     return Scenario(
@@ -817,7 +768,7 @@ def compose_scenario(
     profiles = set.intersection(*(set(source.aircraft_controls) for source in sources.values()))
     if not profiles:
         raise ValueError("у частей составного сценария нет общего AircraftProfile")
-    controls: dict[str, AircraftControlSet] = {}
+    controls: dict[str, ControlProfile] = {}
     for profile in sorted(profiles):
         by_segment = {
             segment: source.aircraft_controls[profile] for segment, source in sources.items()
@@ -885,7 +836,7 @@ def compose_matrix_scenario(
     ):
         raise ValueError("нельзя смешивать конкретные run_id и legacy шифры")
 
-    def first_run(value: "str | MatrixCase", expected: str) -> MatrixRun:
+    def _first_run(value: "str | MatrixCase", expected: str) -> MatrixRun:
         if not isinstance(value, str):
             case = value
         else:
@@ -898,8 +849,8 @@ def compose_matrix_scenario(
     if approach_case is not None or ground_case is not None:
         if approach_case is None or ground_case is None:
             raise ValueError("legacy-композиции нужны оба шифра")
-        approach_run = first_run(approach_case, "approach")
-        legacy_ground = first_run(ground_case, "ground")
+        approach_run = _first_run(approach_case, "approach")
+        legacy_ground = _first_run(ground_case, "ground")
         if legacy_ground.segment == "taxi":
             taxi_run = legacy_ground
         elif legacy_ground.segment == "through":
@@ -1041,14 +992,6 @@ def _install_through_scenarios() -> None:
 
 _install_through_scenarios()
 
-# Ровно одна базовая настройка на шифр; 280 строк ссылаются на неё по ``MatrixRun.code``.
-from ismpu.config.run_matrix import MATRIX_CASES as _MATRIX_CASES
-
-CONTROL_PROFILES: dict[str, Mapping[str, ControlProfile]] = {
-    case.code: SCENARIOS[case.preset].aircraft_controls for case in _MATRIX_CASES
-}
-
-
 FAILURE_MISMATCH_PENALTY = 100.0
 _FRICTION_SCALE = 15.0
 _WIND_SCALE = 20.0
@@ -1058,6 +1001,7 @@ _VISIBILITY_SCALE = 30100.0
 def weather_distance(
     a: WeatherState, b: WeatherState, runway_heading_degt: float = RWY_HEADING_TRUE,
 ) -> float:
+    """Нормированная дистанция сцепления, ветра, осадков и видимости двух условий."""
     cross_a, head_a = decompose_wind(
         a.wind_speed_kts, a.wind_dir_from_degt, runway_heading_degt)
     cross_b, head_b = decompose_wind(
@@ -1067,14 +1011,14 @@ def weather_distance(
     cross_wind_dist = abs(cross_a - cross_b) / _WIND_SCALE
     head_wind_dist = 0.5 * abs(head_a - head_b) / _WIND_SCALE
     rain_pct_dist = abs(a.rain_pct - b.rain_pct)
-    visibility_dist = 0.5 * abs(a.visibility_m - b.visibility_m) / _VISIBILITY_SCALE
+    # visibility_dist = 0.5 * abs(a.visibility_m - b.visibility_m) / _VISIBILITY_SCALE
 
     return (
         runway_friction_dist
         + cross_wind_dist
         + head_wind_dist
         + rain_pct_dist
-        + visibility_dist
+        # + visibility_dist
     )
 
 
@@ -1084,6 +1028,7 @@ def match_conditions(
     weather: WeatherState,
     segment: FlightSegment,
 ) -> ConditionMatch:
+    """Сравнить ожидаемые условия участка с одним фактическим кадром backend."""
     actual = frozenset(failures)
     return ConditionMatch(
         segment=segment,
@@ -1100,6 +1045,7 @@ def scenario_distance(
     *,
     segment: FlightSegment = FlightSegment.ROLLOUT,
 ) -> float:
+    """Оценить близость telemetry к preset; несовпадение отказа доминирует над погодой."""
     expected = scenario.conditions_for(segment)
     mismatch = frozenset(failures).symmetric_difference(expected.failures)
     score = FAILURE_MISMATCH_PENALTY * len(mismatch)
@@ -1117,6 +1063,7 @@ def select_scenario(
     scenarios: Sequence[Scenario] | None = None,
     include_draft: bool = False,
 ) -> Scenario:
+    """Выбрать ближайший нематричный preset, не допуская draft без явного флага."""
     pool = list(scenarios if scenarios is not None else SCENARIOS.values())
     profile = _profile_name(aircraft_profile)
     # Строка матрицы требует явного run_id; телеметрия не выбирает даже принятый шифр.
@@ -1145,6 +1092,7 @@ def select_for_telemetry(
     scenarios: Sequence[Scenario] | None = None,
     include_draft: bool = False,
 ) -> Scenario:
+    """Подобрать нематричный preset по валидной telemetry или безопасным defaults."""
     if telemetry is None or not telemetry.valid:
         return select_scenario(
             aircraft_profile=aircraft_profile,
@@ -1156,12 +1104,4 @@ def select_for_telemetry(
         telemetry.faults, telemetry.weather,
         aircraft_profile=aircraft_profile, segment=segment,
         scenarios=scenarios, include_draft=include_draft,
-    )
-
-
-def matrix_battery(segment: str | None = None) -> tuple[Scenario, ...]:
-    from ismpu.config.run_matrix import MATRIX_RUNS
-    return tuple(
-        scenario_for_matrix_run(run) for run in MATRIX_RUNS
-        if segment is None or run.segment == segment
     )

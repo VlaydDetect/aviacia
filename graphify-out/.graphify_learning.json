@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-16T15:14:01.773868+00:00",
+  "generated_at": "2026-08-16T15:14:34.294727+00:00",
   "nodes": {
     "approachchannel": {
       "code_fingerprint": "",
@@ -12,7 +12,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.983387071,
+      "score": 0.983378519,
       "source_file": "",
       "status": "tentative",
       "uses": 1
@@ -28,7 +28,7 @@
           "q": "Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.999955376,
+      "score": 0.99994668,
       "source_file": "ismpu/agent/gain_scheduler.py",
       "status": "tentative",
       "uses": 1
@@ -44,7 +44,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984206591,
+      "score": 0.984198032,
       "source_file": "ismpu/config/json_config.py",
       "status": "tentative",
       "uses": 1
@@ -60,7 +60,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984206591,
+      "score": 0.984198032,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
@@ -76,7 +76,7 @@
           "q": "Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.9978672,
+      "score": 0.997858522,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
@@ -92,7 +92,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984206591,
+      "score": 0.984198032,
       "source_file": "ismpu/config/scenarios.py",
       "status": "tentative",
       "uses": 1
@@ -113,7 +113,7 @@
           "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.943431051,
+      "score": 1.94341415,
       "source_file": "ismpu/control/channels.py",
       "status": "preferred",
       "uses": 2
@@ -129,7 +129,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.981333548,
+      "score": 0.981325014,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
@@ -145,7 +145,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.961637054,
+      "score": 0.961628691,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
@@ -161,7 +161,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.981333548,
+      "score": 0.981325014,
       "source_file": "ismpu/control/ground_allocator.py",
       "status": "tentative",
       "uses": 1
@@ -182,7 +182,7 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 1.96472062,
+      "score": 1.964703533,
       "source_file": "ismpu/envs/ics_sim.py",
       "status": "preferred",
       "uses": 2
@@ -203,7 +203,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 1.923734557,
+      "score": 1.923717827,
       "source_file": "ismpu/envs/observation.py",
       "status": "preferred",
       "uses": 2
@@ -219,7 +219,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.984206591,
+      "score": 0.984198032,
       "source_file": "ismpu/envs/xplane_sim.py",
       "status": "tentative",
       "uses": 1
@@ -240,7 +240,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.980720511,
+      "score": 1.980703285,
       "source_file": "ismpu/runtime/loop.py",
       "status": "preferred",
       "uses": 2
@@ -256,7 +256,7 @@
           "q": "Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.999955376,
+      "score": 0.99994668,
       "source_file": "ismpu/runtime/pretrain.py",
       "status": "tentative",
       "uses": 1
@@ -272,7 +272,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.983387071,
+      "score": 0.983378519,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "tentative",
       "uses": 1

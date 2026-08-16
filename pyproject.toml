@@ -15,10 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# torch нужен активным air/ground SFT-регрессорам; gymnasium — только изолированному legacy PPO.
-rl = [
+# PyTorch нужен только офлайн-обучению и SFT inference; runtime classical его не импортирует.
+sft = [
     "torch>=2.2",
-    "gymnasium>=0.29",
 ]
 dev = [
     "pytest>=8.0",

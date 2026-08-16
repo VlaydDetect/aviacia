@@ -1,11 +1,11 @@
-import importlib
+import ast
 import inspect
 import struct
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
-from ismpu.agent.shield import Shield, ShieldReportSnapshot
 from ismpu.config.json_config import (
     scenario_from_document,
     scenario_to_document,
@@ -16,19 +16,11 @@ from ismpu.control.failures import FailureMode
 from ismpu.control.runway_tracker import RunwayTracker
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.ics_sim import ICSSim
-from ismpu.envs.rollout_env import RolloutEnv
-from ismpu.envs.scenario import Scenario
-from ismpu.envs.splits import (
-    is_signature_holdout,
-    scenario_signature,
-)
+from ismpu.config.scenarios import Scenario
 from ismpu.io.xplane_connector import XPlaneConnector
 from ismpu.envs.xplane_sim import XPlaneSim
 from ismpu.gui.dashboard import DashboardState
 from ismpu.runtime.run_recorder import RunRecorder
-from ismpu.agent.shield import base_gains_from_pids
-from ismpu.envs.action import preset_action
-
 from tests.fakes import FakeConnector, static_sim, telemetry
 from tests.test_xplane_backend import MockXPlaneConnector
 
@@ -64,6 +56,24 @@ def test_production_cli_uses_the_unified_runtime_without_working_ics(monkeypatch
     assert "live_main" not in inspect.getsource(loop)
 
 
+def test_production_modules_never_import_the_working_ics_reference():
+    """Эталон разрешён тестам, но не должен стать скрытым runtime dependency."""
+    package = Path(__file__).resolve().parents[1] / "ismpu"
+    offenders = []
+    for path in package.rglob("*.py"):
+        if "working_ics" in path.parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [item.name for item in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            if any(name.startswith("ismpu.working_ics") for name in modules):
+                offenders.append(str(path.relative_to(package)))
+    assert offenders == []
+
+
 def test_runtime_uses_explicit_matrix_run_id_without_telemetry_guessing(monkeypatch):
     from ismpu.runtime import loop
 
@@ -92,35 +102,42 @@ def test_runtime_uses_explicit_matrix_run_id_without_telemetry_guessing(monkeypa
     assert captured["start"] == "rollout"
 
 
-def test_xplane_used_wire_packets_match_confirmed_original(monkeypatch):
-    legacy_module = importlib.import_module("ismpu.io.XPlaneConnectX")
-    legacy_socket = DatagramSocket()
-    monkeypatch.setattr(legacy_module.socket, "socket", lambda *a, **k: legacy_socket)
-    legacy = legacy_module.XPlaneConnectX()
+def test_xplane_connector_emits_the_native_wire_contract():
+    """DREF/CMND/VEHS bytes are the contract; a duplicate client is not an oracle."""
+    sock = DatagramSocket()
+    connector = XPlaneConnector(sock=sock, start_receiver=False)
 
-    modern_socket = DatagramSocket()
-    modern = XPlaneConnector(sock=modern_socket, start_receiver=False)
+    connector.send_dref("sim/test/value", 0.25)
+    connector.send_command("sim/operation/pause_on")
+    connector.send_position(
+        lat=1.0,
+        lon=2.0,
+        elevation_m=3.0,
+        roll_deg=4.0,
+        pitch_deg=5.0,
+        heading_true_deg=6.0,
+    )
 
-    legacy.sendDREF("sim/test/value", 0.25)
-    modern.sendDREF("sim/test/value", 0.25)
-    legacy.sendCMND("sim/operation/pause_on")
-    modern.sendCMND("sim/operation/pause_on")
-    legacy.sendPOSI(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
-    modern.sendPOSI(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
-
-    assert [packet for packet, _ in modern_socket.sent] == [
-        packet for packet, _ in legacy_socket.sent
+    expected_position = struct.pack(
+        "<4sxidddfff", b"VEHS", 0, 1.0, 2.0, 3.0, 6.0, 5.0, 4.0
+    )
+    assert [packet for packet, _ in sock.sent] == [
+        struct.pack("<4sxf500s", b"DREF", 0.25, b"sim/test/value"),
+        struct.pack("<4sx500s", b"CMND", b"sim/operation/pause_on"),
+        expected_position,
+        expected_position,
     ]
 
 
-def test_legacy_subscription_starts_at_zero_and_retries_with_diagnostics():
+def test_subscription_retries_with_diagnostics():
     sock = DatagramSocket()
     connector = XPlaneConnector(sock=sock, start_receiver=False)
     with pytest.raises(TimeoutError, match=r"127\.0\.0\.1:49000.*sim/test"):
-        connector.subscribeDREFs(
-            [("sim/test", 20)], timeout=0.03, retry_interval=0.01)
+        connector.subscribe(
+            ["sim/test"], frequency_hz=20, timeout_s=0.03, retry_interval_s=0.01
+        )
     packets = [struct.unpack("<4sxii400s", packet) for packet, _ in sock.sent]
-    assert packets[0][2] == 0
+    assert packets[0][2] == 1
     assert len(packets) >= 2
 
 
@@ -243,30 +260,6 @@ def test_runway_profile_delegates_geometry_to_tracker():
         tracker.point_on_centerline(1000.0))
 
 
-def test_one_shield_report_flows_through_both_levels():
-    class IdentityShield(Shield):
-        coefficient_report = None
-
-        def guard_coefficients(self, command, preset_gains):
-            result = super().guard_coefficients(command, preset_gains)
-            self.coefficient_report = result[2]
-            return result
-
-        def guard_command(self, command, runtime, report=None):
-            assert report is self.coefficient_report
-            return super().guard_command(command, runtime, report=report)
-
-    sim, _ = static_sim()
-    controller = ControllingSystem(sim)
-    shield = IdentityShield()
-    env = RolloutEnv(sim, controller, shield=shield)
-    scenario = Scenario.from_preset("default")
-    env.reset(scenario)
-    action = preset_action(base_gains_from_pids(controller.pids))
-    _obs, _reward, _terminated, _truncated, info = env.step(action)
-    assert isinstance(info["shield"], ShieldReportSnapshot)
-
-
 def test_dashboard_http_queue_applies_only_at_tick_boundary(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
@@ -287,15 +280,6 @@ def test_dashboard_http_queue_applies_only_at_tick_boundary(tmp_path):
     assert applied[0]["status"] == "applied"
     assert controller.pids["pid_brake_l"].kp == pytest.approx(old * 1.1)
     recorder.finish()
-
-
-def test_signature_holdout_is_stable_and_not_failure_family_based():
-    engine = Scenario.from_preset(
-        "default", failures=(FailureMode.ENGINE_OUT_LEFT,), scenario_id="a")
-    same = Scenario.from_preset(
-        "default", failures=(FailureMode.ENGINE_OUT_LEFT,), scenario_id="b")
-    assert scenario_signature(engine) == scenario_signature(same)
-    assert is_signature_holdout(engine) == is_signature_holdout(same)
 
 
 def test_xplane_ignores_failures_outside_rollout_contract():

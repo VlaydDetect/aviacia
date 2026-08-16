@@ -57,7 +57,7 @@ class ControlsState:
 
     # --- воздушный участок: единицы ICD --- #
     # Префикс `cmd_` не косметика: по нему `config/regulators.py` собирает
-    # `FORBIDDEN_DIRECT_OUTPUTS` — список команд, которые обучаемый слой не выдаёт никогда.
+    # SFT не заполняет эти поля: сеть меняет только kp/ki/kd, а команды всегда считает PID.
     # Поле, названное иначе, молча выпало бы из контракта ТЗ.
     cmd_elevator: float = 0.0
     """`ElevatorCmd` — продольная команда в **g** (нормальная перегрузка), а не в градусах руля:
@@ -158,7 +158,6 @@ class LongitudinalChannel:
         self.pid_rev_r = pid_rev_r
         self.traveled_distance_m = 0.0
         self.last_diagnostics: LongitudinalDiagnostics | None = None
-        self.w_lon = 1.0
         self.rollout_started = False
         self.initialized = False
         self._previous_speed_ms: float | None = None
@@ -196,18 +195,16 @@ class LongitudinalChannel:
                   if self._previous_speed_ms is not None and dt_distance > 0.0 else 0.0)
         )
 
-        brake_left = self.w_lon * self.pid_brake_l.compute(error, dt, measurement=speed)
-        brake_right = self.w_lon * self.pid_brake_r.compute(error, dt, measurement=speed)
+        brake_left = self.pid_brake_l.compute(error, dt, measurement=speed)
+        brake_right = self.pid_brake_r.compute(error, dt, measurement=speed)
         speed_kts = speed * Converts.MS_TO_KTS
         reverse_allowed = speed_kts > 60.0
         if reverse_allowed:
             # Реверс имеет диапазон [-1, 0], поэтому его ошибка должна быть отрицательной,
             # когда ВС быстрее профиля. Прежний положительный знак всегда зажимал выход в 0.
             reverse_error = -error
-            reverse_left = self.w_lon * self.pid_rev_l.compute(
-                reverse_error, dt, measurement=speed)
-            reverse_right = self.w_lon * self.pid_rev_r.compute(
-                reverse_error, dt, measurement=speed)
+            reverse_left = self.pid_rev_l.compute(reverse_error, dt, measurement=speed)
+            reverse_right = self.pid_rev_r.compute(reverse_error, dt, measurement=speed)
         else:
             reverse_left = reverse_right = 0.0
             self.pid_rev_l.reset()
@@ -270,7 +267,6 @@ class LateralChannel:
     def __init__(self, pid: PIDController, tracker: RunwayTracker) -> None:
         self.pid = pid
         self.tracker = tracker
-        self.w_lat = 1.0
         self.last_diagnostics: LateralDiagnostics | None = None
         self.last_guidance: GuidanceState | None = None
         self._last_guidance_telemetry: "Telemetry | None" = None
@@ -344,7 +340,7 @@ class LateralChannel:
         return result
 
     def guidance_for(self, telemetry: "Telemetry") -> GuidanceState | None:
-        """Единый GuidanceState текущего кадра для control/observation/reward."""
+        """Вернуть тот же ``GuidanceState``, который использует управляющий такт и recorder."""
         if not telemetry.valid or telemetry.groundspeed_ms is None:
             return None
         return self._guidance(telemetry, telemetry.groundspeed_ms)
@@ -386,8 +382,8 @@ class LateralChannel:
                 telemetry.track_true_deg
                 if telemetry.track_true_deg is not None else telemetry.heading_true_deg)
         measurement = self._unwrap_track(measured_track)
-        limited = self.w_lat * self.pid.compute(error, dt, measurement=measurement)
-        requested = self.w_lat * self.pid.last_unconstrained
+        limited = self.pid.compute(error, dt, measurement=measurement)
+        requested = self.pid.last_unconstrained
         result = LateralDiagnostics(
             valid=True,
             value=measured_track,

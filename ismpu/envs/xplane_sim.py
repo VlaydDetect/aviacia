@@ -394,16 +394,10 @@ class XPlaneSim(SimInterface):
             speedbrakes_ratio=-0.5
         )
 
-        self.connector.sendCMND("sim/view/chase")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
-        self.connector.sendCMND("sim/general/up_fast")
+        self.connector.send_command("sim/view/chase")
+        # Девять импульсов поднимают внешнюю камеру на удобную для визуальной проверки высоту.
+        for _ in range(9):
+            self.connector.send_command("sim/general/up_fast")
 
     def teleport_approach(self, setup: ApproachSetup) -> None:
         altitude_m = setup.radio_altitude_ft * Converts.FT_TO_M
@@ -451,15 +445,15 @@ class XPlaneSim(SimInterface):
             pitch_deg=pitch_deg,
             heading_true_deg=heading_deg,
         )
-        self.connector.sendCTRL(
-            lat_control=0.0,
-            lon_control=0.0,
-            rudder_control=0.0,
+        self.connector.send_controls(
+            roll=0.0,
+            pitch=0.0,
+            rudder=0.0,
             throttle=0.0,
             gear=1,
             flaps=flap_ratio,
             speedbrakes=speedbrakes_ratio,
-            park_brake=0.0,
+            parking_brake=0.0,
         )
         heading_rad = math.radians(heading_deg)
         speed_ms = speed_knots * Converts.KTS_TO_MS

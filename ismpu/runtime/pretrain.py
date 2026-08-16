@@ -7,7 +7,7 @@ import copy
 import hashlib
 import json
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -21,7 +21,6 @@ from ismpu.agent.pid_gain_regressor import (
     feature_schema_hash,
 )
 from ismpu.config.run_matrix import SOURCE_SHA256
-from ismpu.config.scenarios import SCENARIOS
 from ismpu.config.segments import FlightSegment
 from ismpu.runtime.run_reader import RunReader
 from ismpu.runtime.sft import FEATURES, GAIN_LAYOUT, feature_vector, gain_vector_from_row
@@ -29,6 +28,13 @@ from ismpu.runtime.sft import FEATURES, GAIN_LAYOUT, feature_vector, gain_vector
 
 @dataclass(frozen=True)
 class RunSequence:
+    """Один принятый прогон, уже приведённый к матрицам признаков и целей.
+
+    ``features`` и ``targets`` сохраняют исходный порядок кадров. ``valid`` запрещает
+    строить окно через пропуск телеметрии: два валидных фрагмента одного CSV не должны
+    склеиваться в физически несуществующую двухсекундную историю.
+    """
+
     run_id: str
     condition_key: str
     features: np.ndarray
@@ -40,11 +46,14 @@ class RunSequence:
 
 @dataclass(frozen=True)
 class RunSplit:
+    """Разбиение по целым прогонам; один ``run_id`` встречается ровно в одной части."""
+
     train: tuple[RunSequence, ...]
     validation: tuple[RunSequence, ...]
     test: tuple[RunSequence, ...]
 
     def run_ids(self) -> dict[str, list[str]]:
+        """Сериализовать membership split для checkpoint-аудита и leakage-проверки."""
         return {
             name: [run.run_id for run in getattr(self, name)]
             for name in ("train", "validation", "test")
@@ -53,6 +62,8 @@ class RunSplit:
 
 @dataclass
 class SftTrainConfig:
+    """Численные параметры одного воспроизводимого запуска обучения."""
+
     window_frames: int = DEFAULT_WINDOW_FRAMES
     hidden_size: int = 64
     epochs: int = 40
@@ -68,21 +79,19 @@ class SftTrainConfig:
 
 @dataclass
 class PretrainRunConfig:
+    """Пути и участки для CLI, обучающего независимые air/ground checkpoints."""
+
     runs_root: str | Path = "runs"
     checkpoint_dir: str | Path = "checkpoints"
     segments: tuple[str, ...] = ("air", "ground")
     matrix_hash: str = SOURCE_SHA256
     train: SftTrainConfig = field(default_factory=SftTrainConfig)
-    # Совместимость каталожных тестов до удаления live-capture в Этапе 9.
-    variants_per_preset: int = 20
-    presets: tuple[str, ...] | None = None
-    include_drafts: bool = False
-    aircraft_profile: str = "mc21"
-    backend: str = "xplane"
 
 
 @dataclass(frozen=True)
 class TrainingResult:
+    """Итог обучения участка и данные, необходимые для автоматической проверки gate."""
+
     segment: str
     checkpoint: Path
     metrics: dict
@@ -330,6 +339,8 @@ def train_segment(
 
 
 def run_pretrain(config: PretrainRunConfig | None = None) -> dict[str, TrainingResult]:
+    """Последовательно обучить выбранные участки из одного каталога принятых прогонов."""
+
     cfg = config or PretrainRunConfig()
     result = {}
     for segment in cfg.segments:
@@ -340,51 +351,9 @@ def run_pretrain(config: PretrainRunConfig | None = None) -> dict[str, TrainingR
     return result
 
 
-def build_scenarios(cfg: PretrainRunConfig) -> list:
-    """Legacy-каталог accepted presets; активный offline trainer его не вызывает."""
-    selected = _selected_presets(cfg)
-    return [replace(base, scenario_id=f"{base.scenario_id}-v{variant:02d}")
-            for base in selected for variant in range(cfg.variants_per_preset)]
-
-
-def _selected_presets(cfg: PretrainRunConfig) -> list:
-    if cfg.include_drafts:
-        raise ValueError("SFT допускает только ControlProfile со статусом accepted")
-    if cfg.presets is not None:
-        unknown = [name for name in cfg.presets if name not in SCENARIOS]
-        if unknown:
-            raise KeyError(f"неизвестные пресеты для SFT: {unknown}")
-        chosen = [SCENARIOS[name] for name in cfg.presets]
-    else:
-        chosen = list(SCENARIOS.values())
-    chosen = [scenario for scenario in chosen if (
-        not scenario.matrix_codes or FlightSegment.ROLLOUT in scenario.matrix_codes)]
-    rejected = [scenario for scenario in chosen if not scenario.is_accepted(
-        cfg.aircraft_profile, FlightSegment.ROLLOUT)]
-    if rejected:
-        print(f"[SFT] пропущены не-accepted пресеты ({len(rejected)}): "
-              + ", ".join(scenario.scenario_id for scenario in rejected))
-    accepted = [scenario for scenario in chosen if scenario not in rejected]
-    if not accepted:
-        raise ValueError("для SFT не осталось ни одного accepted пресета")
-    return accepted
-
-
-def matrix_preset_names(
-    *, only_calibrated: bool = True, aircraft_profile: str = "mc21",
-) -> tuple[str, ...]:
-    """Legacy-представление наземных строк; dataset строится по run-directory."""
-    from ismpu.config.run_matrix import ground_cases
-
-    cases = [case for case in ground_cases() if case.preset in SCENARIOS]
-    if only_calibrated:
-        cases = [case for case in cases if SCENARIOS[case.preset].is_accepted(
-            aircraft_profile,
-            FlightSegment.TAXI if case.segment == "taxi" else FlightSegment.ROLLOUT)]
-    return tuple(case.preset for case in cases)
-
-
 def _run_directories(sources: str | Path | Sequence[str | Path]) -> list[Path]:
+    """Найти каталоги прогонов без рекурсивного обхода и скрытой загрузки CSV."""
+
     values = [sources] if isinstance(sources, (str, Path)) else list(sources)
     directories: list[Path] = []
     for value in values:
@@ -397,6 +366,8 @@ def _run_directories(sources: str | Path | Sequence[str | Path]) -> list[Path]:
 
 
 def _condition_key(manifest: dict, first_row: dict, segment: str) -> str:
+    """Стабильный ключ физических условий для стратификации train/validation/test."""
+
     scenario = manifest.get("scenario") if isinstance(manifest.get("scenario"), dict) else {}
     conditions = scenario.get("conditions", {})
     condition = conditions.get(segment) or conditions.get(
@@ -411,10 +382,14 @@ def _condition_key(manifest: dict, first_row: dict, segment: str) -> str:
 
 
 def _stable_rank(seed: int, condition: str, run_id: str) -> str:
+    """Детерминированно перемешать группу без зависимости от порядка файлов на диске."""
+
     return hashlib.sha256(f"{seed}:{condition}:{run_id}".encode()).hexdigest()
 
 
 def _target_rows(runs: Sequence[RunSequence], window_frames: int) -> np.ndarray:
+    """Вернуть цели только тех кадров, для которых существует непрерывное полное окно."""
+
     arrays = [run.targets[list(_window_ends(run, window_frames))] for run in runs]
     arrays = [array for array in arrays if len(array)]
     if not arrays:
@@ -423,6 +398,8 @@ def _target_rows(runs: Sequence[RunSequence], window_frames: int) -> np.ndarray:
 
 
 def _fit_feature_normalization(runs: Sequence[RunSequence]) -> Normalization:
+    """Потоково оценить статистики train-части, не объединяя все кадры в один массив."""
+
     size = runs[0].features.shape[1]
     count = 0
     total = np.zeros(size, dtype=np.float64)
@@ -447,11 +424,15 @@ def _fit_feature_normalization(runs: Sequence[RunSequence]) -> Normalization:
 
 
 def _valid_mask(run: RunSequence) -> np.ndarray:
+    """Единая булева маска; старые синтетические тестовые sequences считаются валидными."""
+
     return (np.ones(len(run.features), dtype=bool) if run.valid is None
             else np.asarray(run.valid, dtype=bool))
 
 
 def _window_ends(run: RunSequence, window_frames: int):
+    """Индексы концов окон, целиком состоящих из валидных последовательных кадров."""
+
     valid = _valid_mask(run)
     for end in range(window_frames - 1, len(valid)):
         if valid[end + 1 - window_frames:end + 1].all():
@@ -459,12 +440,16 @@ def _window_ends(run: RunSequence, window_frames: int):
 
 
 def _physical_bounds(runs: Sequence[RunSequence], window_frames: int) -> tuple[np.ndarray, np.ndarray]:
+    """Физический envelope GainGuard: 0.3…2.5 от наблюдённых expert gains."""
+
     targets = _target_rows(runs, window_frames)
     scaled_a, scaled_b = targets * 0.3, targets * 2.5
     return np.minimum(scaled_a, scaled_b).min(axis=0), np.maximum(scaled_a, scaled_b).max(axis=0)
 
 
 def _normalized_mse(model, dataset, device, batch_size: int) -> float:
+    """Средний MSE в нормализованном пространстве без построения autograd-графа."""
+
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     total, count = 0.0, 0
     model.eval()
@@ -477,6 +462,8 @@ def _normalized_mse(model, dataset, device, batch_size: int) -> float:
 
 
 def _predict(model, dataset, target_norm, device, batch_size: int) -> np.ndarray:
+    """Выполнить batched inference и вернуть абсолютные коэффициенты в исходных единицах."""
+
     outputs = []
     model.eval()
     with torch.no_grad():
@@ -489,6 +476,8 @@ def _regression_metrics(
     actual: np.ndarray, predicted: np.ndarray, baseline: np.ndarray,
     gain_range: np.ndarray, layout: Sequence[str], mae_limit: float, p95_limit: float,
 ) -> dict:
+    """Посчитать per-gain MAE/p95 и сравнение с постоянным train baseline."""
+
     error = np.abs(predicted - actual)
     baseline_error = np.abs(actual - baseline)
     safe_range = np.maximum(np.abs(gain_range), 1e-12)
@@ -518,29 +507,17 @@ def _regression_metrics(
 
 
 def _seed_everything(seed: int) -> None:
+    """Синхронизировать генераторы NumPy/Torch для побитово повторяемого CPU-обучения."""
+
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def smoke_pretrain(env, scenarios, *, npgs=None, pretrain=None, max_steps: int = 200):
-    """Временная совместимость PPO-тестов; production SFT этот live-capture не импортирует."""
-    from ismpu.agent.gain_scheduler import NPGS, NPGSConfig
-    from ismpu.agent.pretrain import PretrainConfig, pretrain_sft
-    from ismpu.runtime.capture import capture_dataset
-
-    net = npgs or NPGS(
-        NPGSConfig(window=env.history_len, aircraft_profile=env.sim.aircraft_profile_name),
-        gain_space=env.gain_space,
-    )
-    dataset, _ = capture_dataset(env, scenarios, max_steps=max_steps, log=None)
-    history = pretrain_sft(
-        net, dataset, pretrain or PretrainConfig(epochs=3, batch_size=64, device="cpu"))
-    return net, dataset, history
-
-
 def cli(argv: list[str] | None = None) -> int:
+    """CLI офлайн-обучения; сеть никогда не открывает UDP и не сбрасывает X-Plane."""
+
     parser = argparse.ArgumentParser(description="Offline SFT PID gain regressors")
     parser.add_argument("runs_root", nargs="?", default="runs")
     parser.add_argument("--segment", choices=("air", "ground", "both"), default="both")

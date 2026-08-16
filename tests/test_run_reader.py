@@ -24,7 +24,7 @@ def _frame(speed_kts: float, xte_m: float = 0.0) -> Telemetry:
     ))
 
 
-def _record_ground_run(tmp_path, scenario=None):
+def _record_ground_run(tmp_path, scenario=None, *, record_sft_fallback=False):
     scenario = scenario or Scenario.from_preset("default")
     controller = ControllingSystem()
     controller.bind_scenario(scenario, "mc21")
@@ -37,6 +37,11 @@ def _record_ground_run(tmp_path, scenario=None):
     for index, speed in enumerate((110.0, 105.0, 100.0), 1):
         frame = _frame(speed, xte_m=0.1 * index)
         controller.control_step(0.05, frame, send=False)
+        if record_sft_fallback:
+            controller.sft_diagnostics = {
+                "mode": "sft-shadow", "segment": "ground", "fallback": index == 2,
+                "reason": "test_guard" if index == 2 else None,
+            }
         recorder.record(frame, controller, elapsed_s=index * 0.05)
     recorder.finish({"stop_reason": "completed", "conditions_valid": True})
     return recorder
@@ -101,13 +106,16 @@ def test_legacy_adapter_does_not_invent_missing_pid_terms(tmp_path):
 
 
 def test_report_contains_matrix_metrics_and_aggregation_uses_workbook_columns(tmp_path):
-    recorder = _record_ground_run(tmp_path, scenario_for_matrix_run("Б.1.1/1"))
+    recorder = _record_ground_run(
+        tmp_path, scenario_for_matrix_run("Б.1.1/1"), record_sft_fallback=True
+    )
     report = json.loads((recorder.directory / "report.json").read_text(encoding="utf-8"))
 
     assert report["acceptance_valid"]
     assert report["metrics"]["max_deviations"]["rollout_xte_m"] == pytest.approx(0.3)
     assert report["metrics"]["speed_profile"]["max_abs_error_ms"] is not None
     assert report["metrics"]["saturation"]["ratio"] is not None
+    assert report["metrics"]["tz_diagnostics"]["sft_fallbacks"] == 1
     assert report["matrix_results"][0]["Шифр"] == "Б.1.1"
     assert report["matrix_results"][0]["Статус"] in {"PASS", "FAIL"}
 

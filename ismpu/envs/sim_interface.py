@@ -36,6 +36,8 @@ class ShutdownReport:
 
 
 class RunStopReason(str, Enum):
+    """Исчерпывающие причины штатного/аварийного завершения единого runtime loop."""
+
     COMPLETED = "completed"
     OPERATOR_COMPLETED = "operator_completed"
     GO_AROUND = "go_around"
@@ -46,6 +48,8 @@ class RunStopReason(str, Enum):
 
 @dataclass(frozen=True)
 class RunResult:
+    """Причина остановки вместе с best-effort результатом освобождения backend."""
+
     reason: RunStopReason
     shutdown: ShutdownReport | None = None
     details: str | None = None
@@ -53,6 +57,8 @@ class RunResult:
 
 @dataclass(frozen=True)
 class XPlaneDiagnostics:
+    """Снимок готовности resettable backend для recorder/dashboard."""
+
     ready: bool = False
     ignored_failures: tuple[str, ...] = ()
     missing_or_stale_datarefs: tuple[str, ...] = ()
@@ -61,6 +67,8 @@ class XPlaneDiagnostics:
 
 @dataclass(frozen=True)
 class ControlDiagnostics:
+    """Backend-neutral диагностические значения текущего управляющего такта."""
+
     segment: str
     guidance: Mapping[str, float | str | None] | None = None
     values: Mapping[str, Any] = field(default_factory=dict)

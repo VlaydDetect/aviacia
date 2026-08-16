@@ -106,6 +106,7 @@ THROUGH_PROFILE_CODES = {
 
 
 def normalize_code(value: str) -> str:
+    """Нормализовать латинские A/B и регистр к шифрам книги ``А/Б``."""
     return value.strip().upper().replace("A", "А").replace("B", "Б")
 
 
@@ -341,6 +342,7 @@ if (
 
 
 def resolve_matrix_run(value: str | MatrixRun) -> MatrixRun:
+    """Разрешить только полный ``<шифр>/<номер>`` и вернуть точную строку JSON."""
     if isinstance(value, MatrixRun):
         return value
     key = value.strip()
@@ -358,24 +360,9 @@ def resolve_matrix_run(value: str | MatrixRun) -> MatrixRun:
 
 
 def runs_for_code(code: str) -> tuple[MatrixRun, ...]:
+    """Вернуть строки одного шифра в исходном порядке книги."""
     normalized = normalize_code(code)
     try:
         return tuple(_BY_CODE[normalized])
     except KeyError as exc:
         raise KeyError(f"в матрице нет шифра {code!r}") from exc
-
-
-def cases_for_segment(segment: str) -> tuple[MatrixCase, ...]:
-    return tuple(case for case in MATRIX_CASES if case.segment == segment)
-
-
-def runs_for_segment(segment: str) -> tuple[MatrixRun, ...]:
-    return tuple(run for run in MATRIX_RUNS if run.segment == segment)
-
-
-def ground_cases() -> tuple[MatrixCase, ...]:
-    return GROUND_CASES
-
-
-def ground_runs() -> tuple[MatrixRun, ...]:
-    return tuple(run for run in MATRIX_RUNS if run.segment in ("rollout", "taxi", "through"))

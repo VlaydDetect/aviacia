@@ -5,7 +5,6 @@ from dataclasses import replace
 import pytest
 
 from ismpu.config.scenarios import (
-    AircraftControlSet,
     SCENARIOS,
     Scenario,
     compose_scenario,

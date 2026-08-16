@@ -12,6 +12,8 @@ from typing import Iterable
 
 @dataclass(frozen=True)
 class DataRefSample:
+    """Последнее значение DataRef и monotonic timestamp его UDP-пакета."""
+
     value: float
     timestamp: float
 
@@ -45,15 +47,6 @@ class XPlaneConnector:
                 target=self._receive_loop, name="xplane-rref", daemon=True)
             self._thread.start()
 
-    @property
-    def current_dref_values(self) -> dict:
-        """Совместимое read-only представление старого XPlaneConnectX."""
-        with self._lock:
-            return {
-                name: {"value": sample.value, "timestamp": sample.timestamp}
-                for name, sample in self._samples.items()
-            }
-
     def subscribe(
             self,
             datarefs: Iterable[str],
@@ -62,6 +55,7 @@ class XPlaneConnector:
             timeout_s: float = 0.0,
             retry_interval_s: float = 0.5,
     ) -> None:
+        """Назначить стабильные RREF indices и при необходимости дождаться первого значения."""
         requested = []
         with self._lock:
             for name in datarefs:
@@ -83,30 +77,8 @@ class XPlaneConnector:
                 retry_interval_s=retry_interval_s,
             )
 
-    def subscribeDREFs(
-            self,
-            subscribed_drefs,
-            history: float = 0.0,
-            timeout: float = 0.0,
-            retry_interval: float = 0.5,
-            **_,
-    ) -> None:
-        """Совместимость с прежним клиентом."""
-        del history
-        requested = tuple(subscribed_drefs)
-        with self._lock:
-            if not self._dref_to_index:
-                self._next_index = 0
-        for name, frequency in requested:
-            self.subscribe((name,), frequency_hz=frequency, timeout_s=0.0)
-        if timeout > 0:
-            self.wait_for(
-                (name for name, frequency in requested if frequency > 0),
-                timeout_s=timeout,
-                retry_interval_s=retry_interval,
-            )
-
     def unsubscribe(self, datarefs: Iterable[str] | None = None) -> None:
+        """Послать частоту 0 для выбранных или всех зарегистрированных DataRef."""
         with self._lock:
             names = tuple(datarefs) if datarefs is not None else tuple(self._dref_to_index)
             indexed = [(self._dref_to_index.get(name), name) for name in names]
@@ -115,6 +87,7 @@ class XPlaneConnector:
                 self._send_rref(index, name, 0)
 
     def value(self, dataref: str, *, max_age_s: float | None = None) -> float | None:
+        """Вернуть одно свежее значение; stale/missing представлены ``None``."""
         with self._lock:
             sample = self._samples.get(dataref)
         if sample is None:
@@ -124,6 +97,7 @@ class XPlaneConnector:
         return sample.value
 
     def snapshot(self, *, max_age_s: float | None = None) -> dict[str, float]:
+        """Атомарно снять все свежие значения без раскрытия внутреннего mutable cache."""
         with self._lock:
             items = tuple(self._samples.items())
         now = time.monotonic()
@@ -144,6 +118,7 @@ class XPlaneConnector:
             timeout_s: float,
             retry_interval_s: float = 0.5,
     ) -> None:
+        """Повторять RREF requests до получения всех значений либо подробного timeout."""
         pending = set(datarefs)
         deadline = time.monotonic() + timeout_s
         next_retry = time.monotonic() + max(0.01, retry_interval_s)
@@ -168,16 +143,15 @@ class XPlaneConnector:
                 f"{timeout_s:.2f} с; отсутствуют DataRef: {', '.join(sorted(pending))}")
 
     def send_dref(self, dataref: str, value: float) -> None:
+        """Отправить один нативный 509-byte DREF packet."""
         encoded = dataref.encode("utf-8")
         if len(encoded) >= 500:
             raise ValueError("имя DataRef длиннее 499 байт")
         packet = struct.pack('<4sxf500s', b'DREF', float(value), encoded)
         self.sock.sendto(packet, self.address)
 
-    def sendDREF(self, dataref: str, value: float) -> None:
-        self.send_dref(dataref, value)
-
     def send_command(self, command: str) -> None:
+        """Отправить один нативный CMND packet."""
         encoded = command.encode("utf-8")
         if len(encoded) >= 500:
             raise ValueError("команда X-Plane длиннее 499 байт")
@@ -186,13 +160,12 @@ class XPlaneConnector:
             self.address,
         )
 
-    def sendCMND(self, command: str) -> None:
-        self.send_command(command)
-
     def reload_aircraft(self) -> None:
+        """Перезагрузить текущий самолёт без открытия aircraft chooser."""
         self.send_command("sim/operation/reload_aircraft_no_art")
 
     def fix_all_systems(self) -> None:
+        """Снять X‑Plane failures перед применением нового Scenario."""
         self.send_command("sim/operation/fix_all_systems")
 
     def send_position(
@@ -206,6 +179,7 @@ class XPlaneConnector:
             heading_true_deg: float,
             aircraft_index: int = 0,
     ) -> None:
+        """Телепортировать aircraft через VEHS; packet дублируется из-за особенности высоты."""
         packet = struct.pack(
             '<4sxidddfff',
             b"VEHS",
@@ -221,76 +195,40 @@ class XPlaneConnector:
         self.sock.sendto(packet, self.address)
         self.sock.sendto(packet, self.address)
 
-    def sendPOSI(self, lat, lon, elev, phi, theta, psi_true, ac=0) -> None:
-        self.send_position(
-            lat=lat, lon=lon, elevation_m=elev, roll_deg=phi, pitch_deg=theta,
-            heading_true_deg=psi_true, aircraft_index=ac)
+    def send_controls(
+            self,
+            *,
+            roll: float,
+            pitch: float,
+            rudder: float,
+            throttle: float,
+            gear: int,
+            flaps: float,
+            speedbrakes: float,
+            parking_brake: float,
+    ) -> None:
+        """Set the eight controls needed while placing an X-Plane test aircraft.
 
-    def sendCTRL(self, lat_control: float, lon_control: float, rudder_control: float, throttle: float, gear: int,
-                 flaps: float, speedbrakes: float, park_brake: float) -> None:
-        """Send basic controls to the ego aircraft. There are hundreds of DataRefs that provide more fine-grained control. These can be set through the setDREF method.
-
-        Args:
-            lat_control (float): Lateral pilot input, i.e., yoke rotation, or side stick left/right position. Ranges from [-1...1].
-            lon_control (float): Longitudinal pilot input, i.e., yoke and side stick forward/backward position. Ranges from [-1...1].
-            rudder_control (float): Rudder pilor input. Ranges from [-1...1].
-            throttle (float): Throttle position. Ranges from [-1...1] with -1 being full reverse thrust, and 1 being full forward thrust.
-            gear (int): Requested gear position. 0 corresponds to gear up, and 1 corresponds to gear down.
-            flaps (float): Requested flaps position. Ranges from [0...1].
-            speedbrakes (float): Requested speedbakes position. Possible values are {-0.5, [0...1]} where -0.5 means the speedbrake is armed, 0 is retracted, and 1 is fully deployed.
-            park_brake (float): Requested park brake ratio. Ranged from [0...1]
-
-        Example:
-            xpc = XPlaneConnectX()
-            xpc.sendCTRL(lat_control=-0.2, lon_control=0.0, rudder_control=0.2, throttle=0.8, gear=1, flaps=0.5, speedbrakes=0, park_brake=0)
+        X-Plane has no useful aggregate reset packet for these controls.  Sending the
+        ordinary DREF packets keeps this method on the same protocol path as live control
+        and makes the exact set of modified simulator values explicit.
         """
-
-        # lateral control
-        dref = "sim/cockpit2/controls/yoke_roll_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', lat_control, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # longitudinal control
-        dref = "sim/cockpit2/controls/yoke_pitch_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', lon_control, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # rudder control
-        dref = "sim/cockpit2/controls/yoke_heading_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', rudder_control, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # throttle
-        dref = "sim/cockpit2/engine/actuators/throttle_jet_rev_ratio_all"
-        msg = struct.pack('<4sxf500s', b'DREF', throttle, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # gear
-        dref = "sim/cockpit/switches/gear_handle_status"
-        msg = struct.pack('<4sxf500s', b'DREF', gear, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # flaps
-        # dref = "sim/cockpit2/controls/flap_handle_request_ratio" #this only for X-Plane 12.0+
-        dref = "sim/cockpit2/controls/flap_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', flaps, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # speedbrakes
-        dref = "sim/cockpit2/controls/speedbrake_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', speedbrakes, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
-
-        # park brake
-        dref = "sim/cockpit2/controls/parking_brake_ratio"
-        msg = struct.pack('<4sxf500s', b'DREF', park_brake, dref.encode('UTF-8'))
-        self.sock.sendto(msg, self.address)
+        values = {
+            "sim/cockpit2/controls/yoke_roll_ratio": roll,
+            "sim/cockpit2/controls/yoke_pitch_ratio": pitch,
+            "sim/cockpit2/controls/yoke_heading_ratio": rudder,
+            "sim/cockpit2/engine/actuators/throttle_jet_rev_ratio_all": throttle,
+            "sim/cockpit/switches/gear_handle_status": gear,
+            "sim/cockpit2/controls/flap_ratio": flaps,
+            "sim/cockpit2/controls/speedbrake_ratio": speedbrakes,
+            "sim/cockpit2/controls/parking_brake_ratio": parking_brake,
+        }
+        for dataref, value in values.items():
+            self.send_dref(dataref, value)
 
     def pause(self, flag: bool) -> None:
+        """Переключить паузу X‑Plane нативной командой."""
         self.send_command("sim/operation/pause_on" if flag else "sim/operation/pause_off")
-
-    def pauseSIM(self, flag: bool) -> None:
-        self.pause(flag)
 
     def inject_rref_packet(self, packet: bytes, *, timestamp: float | None = None) -> None:
         """Разобрать пакет; публично для детерминированных mock-тестов."""
@@ -324,6 +262,7 @@ class XPlaneConnector:
             self.inject_rref_packet(packet)
 
     def close(self) -> None:
+        """Идемпотентно отменить подписки, закрыть socket и завершить receiver thread."""
         if self._stop.is_set():
             return
         try:
@@ -342,7 +281,3 @@ class XPlaneConnector:
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.close()
         return False
-
-
-# Старое публичное имя оставлено для пользовательских скриптов.
-XPlaneConnectX = XPlaneConnector

@@ -30,7 +30,7 @@ from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE, SOURCE_SHA256
 from ismpu.config.scenarios import (
     SCENARIOS, ProfileStatus, Scenario, rebind_matrix_run, resolve_scenario,
-    scenario_for_matrix_run, select_for_telemetry,
+    scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario,
 )
 from ismpu.config.json_config import load_scenario
 
@@ -394,9 +394,9 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--ip", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--xplane-root", default=None)
-    parser.add_argument("--aircraft-profile", default=None)
-    parser.add_argument("--runway-profile", default=None)
-    parser.add_argument("--run-id", default=None)
+    parser.add_argument("--aircraft-profile", default="mc21")
+    parser.add_argument("--runway-profile", default="uuee-06r")
+    parser.add_argument("--run-id", default="Б.4.1")
     parser.add_argument(
         "--scenario-json", default=None,
         help="promoted scenario JSON; вместе с --run-id переносит overrides на строку того же шифра")
@@ -416,4 +416,14 @@ def cli(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(cli())
+    # raise SystemExit(cli())
+
+    main(
+        preset=compose_matrix_scenario("AB-default", approach_run="A.1.2/1", rollout_run="B.1.1/1"),
+        backend="ics",
+        aircraft_profile="mc21",
+        runway_profile="uuee-06r",
+        # dashboard=True,
+        # dashboard_tune=True,
+    )
+

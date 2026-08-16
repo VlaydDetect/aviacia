@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ismpu.control.system import ControllingSystem
-from ismpu.envs.scenario import Scenario, scenario_for_matrix_run
+from ismpu.config.scenarios import Scenario, scenario_for_matrix_run
 from ismpu.config.segments import FlightSegment
 from ismpu.runtime.run_recorder import TELEMETRY_FIELDS, RunRecorder
 from ismpu.io.ics_connector import ICSInputs, ICSOutputs

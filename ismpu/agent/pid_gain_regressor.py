@@ -40,6 +40,7 @@ class Normalization:
 
     @classmethod
     def fit(cls, values: ArrayLike) -> "Normalization":
+        """Оценить mean/scale и обучающие min/max по конечной двумерной выборке."""
         data = np.asarray(values, dtype=np.float64)
         if data.ndim != 2 or not len(data):
             raise ValueError("normalization requires a non-empty 2-D array")
@@ -51,6 +52,7 @@ class Normalization:
 
     @classmethod
     def from_snapshot(cls, value: Mapping[str, Any]) -> "Normalization":
+        """Восстановить и строго проверить normalization из checkpoint."""
         result = cls(*(np.asarray(value[key], dtype=np.float64)
                        for key in ("mean", "scale", "minimum", "maximum")))
         size = len(result.mean)
@@ -67,6 +69,7 @@ class Normalization:
     def transform(
         self, values: ArrayLike, *, ood_z: float = 8.0,
     ) -> tuple[NDArray[np.float32], bool]:
+        """Нормировать признаки и сообщить выход за OOD z-порог."""
         data = np.asarray(values, dtype=np.float64)
         if data.shape[-1:] != self.mean.shape:
             raise ValueError(
@@ -77,6 +80,7 @@ class Normalization:
         return normalized.astype(np.float32), bool(np.any(np.abs(normalized) > ood_z))
 
     def inverse(self, values: ArrayLike) -> NDArray[np.float64]:
+        """Вернуть нормированный prediction в физические единицы gains."""
         data = np.asarray(values, dtype=np.float64)
         if data.shape[-1:] != self.mean.shape:
             raise ValueError(
@@ -84,6 +88,7 @@ class Normalization:
         return data * self.scale + self.mean
 
     def snapshot(self) -> dict[str, list[float]]:
+        """Сериализовать normalization в независимые от NumPy списки."""
         return {
             "mean": self.mean.tolist(), "scale": self.scale.tolist(),
             "minimum": self.minimum.tolist(), "maximum": self.maximum.tolist(),
@@ -107,6 +112,7 @@ class PidGainRegressor(nn.Module):
         self.checkpoint: dict[str, Any] | None = None
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Предсказать gains по последнему hidden state окна ``(B,T,F)``."""
         single = features.ndim == 2
         if single:
             features = features.unsqueeze(0)
@@ -125,6 +131,7 @@ class PidGainRegressor(nn.Module):
         feature_normalization: Normalization,
         target_normalization: Normalization,
     ) -> tuple[NDArray[np.float64], bool]:
+        """Выполнить deterministic inference и вернуть физические gains плюс OOD flag."""
         normalized, ood = feature_normalization.transform(window)
         device = next(self.parameters()).device
         output = self(torch.as_tensor(normalized, dtype=torch.float32, device=device))
@@ -164,6 +171,7 @@ class PidGainRegressor(nn.Module):
         require_gate: bool = True,
         require_ics_activation: bool = False,
     ) -> tuple["PidGainRegressor", dict[str, Any]]:
+        """Загрузить модель только после проверки полного train↔runtime контракта."""
         payload = torch.load(path, map_location=map_location, weights_only=False)
         _validate_checkpoint(payload)
         if expected_segment is not None and payload["segment"] != expected_segment:
@@ -197,6 +205,7 @@ class PidGainRegressor(nn.Module):
 
     @classmethod
     def load(cls, path: str | PathLike[str], **kwargs) -> "PidGainRegressor":
+        """Краткая форма ``load_checkpoint`` для потребителя, которому не нужна metadata."""
         return cls.load_checkpoint(path, **kwargs)[0]
 
 
@@ -246,6 +255,8 @@ def _validate_checkpoint(payload: Mapping[str, Any]) -> None:
 
 @dataclass(frozen=True)
 class GuardResult:
+    """Фактически разрешённые gains и причина ограничений/fallback."""
+
     gains: NDArray[np.float64]
     fallback: bool
     rate_limited: bool
@@ -289,44 +300,43 @@ class GainGuard:
         ood: bool = False,
         model_error: str | None = None,
     ) -> GuardResult:
+        """Проверить prediction и ограничить его относительно accepted preset/предыдущего такта."""
         preset_vec = np.asarray(preset, dtype=np.float64).reshape(-1)
         previous_vec = np.asarray(previous, dtype=np.float64).reshape(-1)
         shape = self.physical_low.shape
         if preset_vec.shape != shape or not np.isfinite(preset_vec).all():
             raise ValueError("accepted preset violates GainGuard contract")
 
-        def fallback(reason: str) -> GuardResult:
+        def _fallback(reason: str) -> GuardResult:
             return GuardResult(preset_vec.copy(), True, False, reason)
 
         if not telemetry_valid:
-            return fallback("telemetry_dropout")
+            return _fallback("telemetry_dropout")
         if not window_ready:
-            return fallback("window_incomplete")
+            return _fallback("window_incomplete")
         if model_error is not None:
-            return fallback(f"model_error:{model_error}")
+            return _fallback(f"model_error:{model_error}")
         if ood:
-            return fallback("feature_ood")
+            return _fallback("feature_ood")
         if prediction is None:
-            return fallback("prediction_missing")
+            return _fallback("prediction_missing")
         candidate = np.asarray(prediction, dtype=np.float64).reshape(-1)
         if candidate.shape != shape or not np.isfinite(candidate).all():
-            return fallback("prediction_nonfinite_or_wrong_shape")
+            return _fallback("prediction_nonfinite_or_wrong_shape")
         if previous_vec.shape != shape or not np.isfinite(previous_vec).all():
-            return fallback("previous_gains_invalid")
+            return _fallback("previous_gains_invalid")
         if not math.isfinite(dt) or dt <= 0.0:
-            return fallback("invalid_dt")
+            return _fallback("invalid_dt")
 
         relative_a = preset_vec * self.relative_low
         relative_b = preset_vec * self.relative_high
         low = np.maximum(self.physical_low, np.minimum(relative_a, relative_b))
         high = np.minimum(self.physical_high, np.maximum(relative_a, relative_b))
         if np.any(low > high) or np.any(candidate < low) or np.any(candidate > high):
-            return fallback("gain_bounds")
+            return _fallback("gain_bounds")
 
         max_step = np.abs(preset_vec) * self.rate_fraction_per_s * dt
         limited = np.clip(candidate, previous_vec - max_step, previous_vec + max_step)
         limited = np.clip(limited, low, high)
         was_limited = not np.array_equal(limited, candidate)
         return GuardResult(limited, False, was_limited, "rate_limited" if was_limited else None)
-
-    apply = guard

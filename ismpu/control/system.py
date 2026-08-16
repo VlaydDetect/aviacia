@@ -10,7 +10,7 @@ guidance и allocator органов управления.
 
 **Воздушные регуляторы живут отдельно от `self.pids`.** Словарь `pids` — ровно пять
 регуляторов земли; три регулятора захода лежат в `approach_channel.pids`. Поэтому два SFT
-checkpoint имеют независимые layout 15 и 9 и не переопределяют старый PPO action space.
+checkpoint имеют независимые layout: 15 коэффициентов земли и 9 коэффициентов воздуха.
 """
 
 from typing import TYPE_CHECKING, ClassVar, Optional
@@ -24,7 +24,7 @@ from ismpu.control.ground_allocator import GroundControlAllocator
 from ismpu.control.approach import ApproachController
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
 from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerances
-from ismpu.control.failures import FailureManager, FailureMode
+from ismpu.control.failures import FailureManager
 from ismpu.control.flight import (
     FlightSegment, ApproachRefused, initial_segment, segment_is_decidable, touched_down,
     approach_blocker, ils_blocker, above_decision_height, at_lateral_alignment_gate,
@@ -64,13 +64,12 @@ class ControllingSystem:
         while not controller.control_step(DT):
             pass
 
-    `control_step` сам читает телеметрию и сам отправляет команды через `sim`. Среда обучения
-    (`RolloutEnv`) вместо этого подаёт кадр параметром и ставит `send=False`, чтобы вклинить
-    Shield между расчётом и отправкой.
+    `control_step` сам читает телеметрию и сам отправляет команды через `sim`. Для
+    детерминированного replay и unit-тестов можно подать конкретный кадр и ``send=False``;
+    такой вызов вычисляет те же команды, но не выполняет внешний I/O.
 
-    Без `begin_flight` участок остаётся пробегом. Это осознанное умолчание: среда обучения и все
-    офлайн-разборы работают именно с пробегом, и «угадывать» для них воздушный заход по кадру без
-    пакета стенда нельзя.
+    Без `begin_flight` участок остаётся пробегом. Это осознанное умолчание для синтетических
+    наземных тестов: по кадру без пакета стенда нельзя достоверно объявить воздушный заход.
     """
 
     def __init__(
@@ -224,35 +223,6 @@ class ControllingSystem:
         self.approach_channel = ApproachController(config)
         return self.approach_channel
 
-    def set_longitudinal_params(
-        self,
-        lookahead_min: float,
-        lookahead_gain: float,
-        xte_gain: float,
-    ) -> None:
-        """Обновить параметры геометрического наведения латерального канала.
-
-        Имя сохранено для совместимости с ранним API конфигурации.
-        """
-        self.lateral_channel.tracker.lookahead_min = lookahead_min
-        self.lateral_channel.tracker.lookahead_gain = lookahead_gain
-        self.lateral_channel.tracker.xte_gain = xte_gain
-
-    def set_lateral_params(self, steering_brake_gain: float, steering_rev_gain: float) -> None:
-        self.ground_allocator.steering_brake_gain = steering_brake_gain
-        self.ground_allocator.steering_rev_gain = steering_rev_gain
-
-    def set_channel_weights(self, w_lon: float, w_lat: float) -> None:
-        """Веса влияния каналов (актор, §6): множители к выходам каналов. 1.0 = классика."""
-        self.longitudinal_channel.w_lon = w_lon
-        self.lateral_channel.w_lat = w_lat
-
-    def set_velocity_law(self, law: VelocityLaw) -> None:
-        self.longitudinal_channel.trajectory.set_law(law)
-
-    def apply_failure(self, mode: FailureMode) -> None:
-        self.failures.activate(mode)
-
     def sync_failures(self, telemetry: Telemetry | None) -> None:
         """Привести модель отказов к тому, что сообщает борт (`ICSInputs.Fault*`).
 
@@ -352,8 +322,8 @@ class ControllingSystem:
         и только на первом такте делается отдельный `sim.read_telemetry()`. Так на стенде выходит
         ровно один приём UDP на такт, а не два.
 
-        `send=False` — команды считаются в `self.state`, но не отправляются: между расчётом и
-        отправкой вклинивается Shield (`RolloutEnv`), а отправляет уже вызывающий.
+        `send=False` — команды считаются в `self.state`, но не отправляются. Это канонический
+        путь replay: он сравнивает результат по каждому кадру, не открывая UDP-сокет.
         """
         if telemetry is None:
             telemetry = self.last_telemetry if self.last_telemetry is not None else self._read()
@@ -652,8 +622,8 @@ class ControllingSystem:
                 "кадр параметром и используйте send=False.")
         return self.sim
 
-    # Фактически применённая команда ≠ выходу PID: её меняют вес канала, allocator, rate limit
-    # и доступность актуатора. Без tracking интегратор копит на недоступный орган.
+    # Фактически применённая команда ≠ выходу PID: её меняют allocator, rate limit и
+    # доступность актуатора. Без tracking интегратор копил бы на недоступный орган.
     def _track_applied(self, dt: float) -> None:
         """Back-calculation по итоговым командам. No-op, пока у PID не задан `tracking_tau_s`."""
         allocation = self.ground_allocator.last_diagnostics
@@ -676,29 +646,19 @@ class ControllingSystem:
             if base is not None else self.state.cmd_rev_r)
         applied = (
             ("runway_center_pid", steering,
-             allocation.steering_request if allocation is not None else steering,
-             self.lateral_channel.w_lat),
+             allocation.steering_request if allocation is not None else steering),
             ("pid_brake_l", brake_left,
-             base.brake_left if base is not None else brake_left,
-             self.longitudinal_channel.w_lon),
+             base.brake_left if base is not None else brake_left),
             ("pid_brake_r", brake_right,
-             base.brake_right if base is not None else brake_right,
-             self.longitudinal_channel.w_lon),
+             base.brake_right if base is not None else brake_right),
             ("pid_rev_l", reverse_left,
-             base.reverse_left if base is not None else reverse_left,
-             self.longitudinal_channel.w_lon),
+             base.reverse_left if base is not None else reverse_left),
             ("pid_rev_r", reverse_right,
-             base.reverse_right if base is not None else reverse_right,
-             self.longitudinal_channel.w_lon),
+             base.reverse_right if base is not None else reverse_right),
         )
-        for regulator, command, requested, weight in applied:
+        for regulator, command, requested in applied:
             pid = self.pids.get(regulator)
             if pid is not None:
-                if abs(weight) > 1e-12:
-                    command /= weight
-                    requested /= weight
-                else:
-                    command, requested = 0.0, pid.last_output
                 pid.track(command, dt, commanded_output=requested)
 
     def control_exception(self) -> None:

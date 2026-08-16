@@ -14,14 +14,12 @@ from ismpu.config.approach import (
 from ismpu.config.run_matrix import (
     RUN_MATRIX, MATRIX_CASES, MATRIX_RUNS, RUN_BY_ID, APPROACH_CASES, GROUND_CASES,
     APPROACH_CONDITIONS, GROUND_CONDITIONS, CASE_BY_CODE, CATALOG_PATH, COLUMNS,
-    SOURCE_SHA256, THROUGH_PROFILE_CODES, TOTAL_RUNS, ground_cases, resolve_matrix_run,
+    SOURCE_SHA256, THROUGH_PROFILE_CODES, TOTAL_RUNS, resolve_matrix_run,
 )
 from ismpu.config.scenarios import (
-    CONTROL_PROFILES,
     ProfileStatus,
     SCENARIOS,
     compose_matrix_scenario,
-    matrix_battery,
     resolve_scenario,
     scenario_for_matrix_run,
     select_scenario,
@@ -29,7 +27,6 @@ from ismpu.config.scenarios import (
 from ismpu.config.segments import FlightSegment
 from ismpu.control.failures import FailureMode
 from ismpu.control.system import ControllingSystem
-from ismpu.runtime.pretrain import PretrainRunConfig, build_scenarios, matrix_preset_names
 from ismpu.tools.import_run_matrix import import_workbook
 from ismpu.utils.converts import Converts
 
@@ -194,7 +191,6 @@ def test_through_rows_expand_to_fixed_profiles_and_keep_one_selected_run():
 
 
 def test_control_profile_has_one_base_per_code_and_sparse_run_override():
-    assert set(CONTROL_PROFILES) == {case.code for case in MATRIX_CASES}
     scenario = scenario_for_matrix_run("Б.1.1/2")
     source = scenario.aircraft_controls["mc21"]
     profile = replace(
@@ -270,51 +266,3 @@ def test_scenarios_resolve_by_matrix_code_in_either_alphabet():
     assert resolve_scenario("A.1.2").scenario_id == "a_1_2_flare"
     with pytest.raises(KeyError):
         resolve_scenario("Ж.9.9")
-
-
-def test_matrix_battery_follows_the_table_order():
-    battery = matrix_battery()
-    assert [scenario.scenario_id for scenario in battery] == [
-        run.matrix_run_id for run in MATRIX_RUNS
-    ]
-    assert [scenario.scenario_id for scenario in matrix_battery("taxi")] == [
-        f"Б.1.2/{number}" for number in range(1, 15)
-    ]
-
-
-def test_sft_accepts_only_accepted_profiles(capsys):
-    with pytest.raises(ValueError, match="SFT"):
-        build_scenarios(PretrainRunConfig(
-            variants_per_preset=1, aircraft_profile="mc21", backend="ics",
-        ))
-    assert "пропущены не-accepted" in capsys.readouterr().out
-    with pytest.raises(ValueError, match="только.*accepted"):
-        build_scenarios(PretrainRunConfig(
-            presets=("default",), include_drafts=True, aircraft_profile="mc21",
-        ))
-
-
-def test_sft_named_accepted_presets_and_matrix_names(capsys, monkeypatch):
-    base = SCENARIOS["default"]
-    mc21 = base.aircraft_controls["mc21"]
-    accepted_profile = replace(
-        mc21,
-        statuses={**mc21.statuses, FlightSegment.ROLLOUT: ProfileStatus.ACCEPTED},
-    )
-    accepted = replace(
-        base,
-        scenario_id="accepted_ground",
-        aircraft_controls={**base.aircraft_controls, "mc21": accepted_profile},
-    )
-    monkeypatch.setitem(SCENARIOS, "accepted_ground", accepted)
-    scenarios = build_scenarios(PretrainRunConfig(
-        variants_per_preset=2, presets=("accepted_ground",),
-        aircraft_profile="mc21", backend="ics",
-    ))
-    assert {scenario.scenario_id.split("-v", 1)[0] for scenario in scenarios} == {
-        "accepted_ground",
-    }
-    assert len(scenarios) == 2
-    assert matrix_preset_names(only_calibrated=False) == tuple(
-        case.preset for case in ground_cases())
-    assert matrix_preset_names() == ()

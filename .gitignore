@@ -13,3 +13,6 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 runs/
+checkpoints/
+# Старый runtime/checkpoints не является каталогом поставки; модели хранятся только снаружи package.
+ismpu/runtime/checkpoints/

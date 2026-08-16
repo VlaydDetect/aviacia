@@ -5,7 +5,7 @@ import pytest
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.ics_sim import Telemetry
-from ismpu.envs.scenario import Scenario
+from ismpu.config.scenarios import Scenario
 
 from tests.fakes import airborne_inputs
 

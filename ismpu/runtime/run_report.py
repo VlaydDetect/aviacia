@@ -110,7 +110,9 @@ def build_run_report(
 
 
 def _metrics(reader: RunReader) -> dict:
-    samples = valid_samples = dropout_samples = ground_samples = approach_samples = saturation_ticks = 0
+    """Свести поток записанных кадров в метрики ТЗ, SFT и диагностики стенда."""
+    samples = valid_samples = dropout_samples = ground_samples = approach_samples = 0
+    saturation_ticks = sft_fallbacks = 0
     first_time = last_time = final_speed = final_distance = None
     xte_rollout = xte_taxi = heading_max = None
     approach_course = approach_glideslope = approach_axis = None
@@ -255,6 +257,10 @@ def _metrics(reader: RunReader) -> dict:
             saturation_by_channel[key] = saturation_by_channel.get(key, 0) + 1
         if saturated or allocator:
             saturation_ticks += 1
+        # Fallback считается по фактически записанным тактам, а не по внутреннему
+        # счётчику модели: так report остаётся воспроизводимым только из артефакта.
+        if bool(row.get("sft_fallback")):
+            sft_fallbacks += 1
 
         failures = tuple(row.get("faults") or ())
         commands = tuple(_optional(row.get(name)) for name in (
@@ -309,7 +315,7 @@ def _metrics(reader: RunReader) -> dict:
         "heading_max_deg": heading_max,
         "final_speed_kts": None if final_speed is None else final_speed * Converts.MS_TO_KTS,
         "saturation_ratio": saturation_ticks / valid_samples if valid_samples else None,
-        "shield_fallbacks": 0,
+        "sft_fallbacks": sft_fallbacks,
         "rate_p95": {},
     }
     return {

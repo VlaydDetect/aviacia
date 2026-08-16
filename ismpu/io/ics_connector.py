@@ -27,6 +27,8 @@ LISTEN_IP_ANY = "0.0.0.0"
 
 
 class GearState(IntEnum):
+    """Дискретное положение стойки в кодировке ICSInputs."""
+
     NoneState = 0
     UpLock = 1
     Move = 2
@@ -34,6 +36,8 @@ class GearState(IntEnum):
 
 
 class ControlModeState(IntEnum):
+    """Режим управления/индикации, передаваемый в каждом ICSOutputs."""
+
     Off = 0
     Approach = 1
     Landing = 2
@@ -43,6 +47,8 @@ class ControlModeState(IntEnum):
 
 
 class ReverseEngineType(IntEnum):
+    """Состояние створок реверса; величину задаёт отрицательный throttle rate."""
+
     Off = 0
     Arm = 1
     Deploy = 2
@@ -50,6 +56,8 @@ class ReverseEngineType(IntEnum):
 
 @dataclass
 class ICSInputs:
+    """Полная известная входная схема стенда; единицы определены в ``ICSInterface.cs``."""
+
     AgentIsActive: int
 
     # Фаза полета
@@ -209,6 +217,8 @@ class ICSInputs:
 
 @dataclass
 class ICSOutputs:
+    """Команды и mode flags, сериализуемые ровно в ожидаемый стендом JSON."""
+
     ControlValidMask: int = 0
     """По умолчанию **не заявлен ни один канал**. Прежняя единица означала, что каждый пакет,
     собранный без явной маски (в том числе пакет деактивации), заявлял руль высоты со значением
@@ -251,6 +261,7 @@ class ICSOutputs:
     reserved: str = ""
 
     def to_json_bytes(self) -> bytes:
+        """Сериализовать enums и 14 reserved zeros в точные UTF‑8 bytes wire contract."""
         dict_data = asdict(self)
         # Преобразуем Enums обратно в их целочисленные значения перед сериализацией
         dict_data['ControlMode'] = int(dict_data['ControlMode'])
@@ -374,37 +385,9 @@ class ICSBenchConnector:
 
     @property
     def send_error_count(self) -> int:
+        """Число последовательных best-effort ошибок текущего sender."""
         return self._sender.error_count
 
     def close(self):
+        """Освободить единственный UDP-сокет коннектора."""
         self.sock.close()
-
-
-def main():
-    """Диагностический приём телеметрии. Управление отсюда **не выдаётся**.
-
-    Прежняя версия гнала `ElevatorCmd = 200.0` в цикле без пауз. В единицах ICD это 200 g —
-    команда вне физического смысла, да ещё и с неограниченным темпом отправки. Для проверки
-    авторитета органов есть отдельные инструменты; точка входа транспорта должна только читать.
-    """
-    connector = ICSBenchConnector(listen_ip=LISTEN_IP_ANY, listen_port=3030)
-    print("Интерфейс ICS запущен. Ожидание данных от стенда...")
-    try:
-        while True:
-            inputs = connector.receive_inputs(timeout=2.0)
-            if inputs is None:
-                print("[ICS] телеметрии нет")
-                continue
-            print(f"[ICS] active={inputs.AgentIsActive} phase={inputs.FlightPhase} "
-                  f"ra={inputs.RadioAltitude:.1f} ias={inputs.IndicatedAirspeed:.1f} "
-                  f"gs={inputs.GroundSpeed:.1f} wow="
-                  f"{inputs.NoseGearWeightOnWheels}/{inputs.LeftGearWeightOnWheels}/"
-                  f"{inputs.RightGearWeightOnWheels}")
-    except KeyboardInterrupt:
-        print("\nИнтерфейс остановлен пользователем.")
-    finally:
-        connector.close()
-
-
-if __name__ == "__main__":
-    main()

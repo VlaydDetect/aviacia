@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from ismpu.agent.gain_space import gain_space_for
+from ismpu.config.scenarios import SCENARIOS
 from ismpu.config.segments import FlightSegment
 from ismpu.io.ics_connector import ICSInputs
 from ismpu.runtime.run_reader import RunReader
@@ -27,6 +27,8 @@ from ismpu.runtime.run_recorder import RunEvent, RunSample, controller_pids
 
 @dataclass(frozen=True)
 class ViewSpec:
+    """Отображаемое имя, PID source и физическая фаза одной панели графика."""
+
     key: str
     label: str
     pid_key: str
@@ -35,6 +37,8 @@ class ViewSpec:
 
 @dataclass(frozen=True)
 class GainChange:
+    """Immutable запрос HTTP-thread, ожидающий применения control-thread."""
+
     request_id: int
     old_revision: int
     segment: str
@@ -45,6 +49,8 @@ class GainChange:
 
 @dataclass(frozen=True)
 class DashboardSnapshot:
+    """Инкремент после sequence cursor и редкие metadata при reset."""
+
     run_id: str
     last_sequence: int
     reset: bool
@@ -54,6 +60,7 @@ class DashboardSnapshot:
     latest: dict | None = None
 
     def as_dict(self) -> dict:
+        """Преобразовать tuples в JSON arrays, не добавляя отсутствующие тяжёлые секции."""
         result = {
             "run_id": self.run_id,
             "last_sequence": self.last_sequence,
@@ -88,10 +95,6 @@ _CONFIG_FIELD = {
     "roll": "roll_pid", "pitch": "pitch_pid", "air_speed": "speed_pid",
     "steer": "runway_center", "brake_l": "brake_l", "brake_r": "brake_r",
     "reverse_l": "rev_l", "reverse_r": "rev_r",
-}
-_GROUND_REGULATOR = {
-    "steer": "runway_center_pid", "brake_l": "pid_brake_l",
-    "brake_r": "pid_brake_r", "reverse_l": "pid_rev_l", "reverse_r": "pid_rev_r",
 }
 _APPLIED_FIELD = {
     "roll": "cmd_aileron_deg", "pitch": "cmd_elevator_g",
@@ -150,14 +153,10 @@ class DashboardState:
         recorder=None,
         tune_enabled: bool = False,
         control_mode: str = "classical",
-        npgs_active: bool = False,
         tuning_queue_size: int = 64,
-        **_legacy_options,
     ) -> None:
         if controller is not None and recorder is None:
             raise ValueError("live dashboard requires the run's RunRecorder")
-        if npgs_active:
-            control_mode = "sft-active"
         if control_mode not in CONTROL_MODES:
             raise ValueError(f"unknown control mode: {control_mode}")
         self.controller = controller
@@ -166,7 +165,6 @@ class DashboardState:
         self.recorder = recorder
         self.tune_enabled = bool(tune_enabled)
         self.control_mode = control_mode
-        self.npgs_active = control_mode == "sft-active"
         self._live = recorder is not None
         self._run_id = recorder.execution_id if recorder is not None else "replay"
         self._manifest = recorder.manifest if recorder is not None else {}
@@ -187,13 +185,16 @@ class DashboardState:
 
     @property
     def run_id(self) -> str:
+        """Стабильный execution id live/replay источника."""
         return self._run_id
 
     @property
     def view_names(self) -> tuple[str, ...]:
+        """Вернуть подписи всех девяти панелей в порядке HTML layout."""
         return tuple(spec.label for spec in VIEW_SPECS)
 
     def snapshot(self, since_sequence: int = -1, run_id: str | None = None) -> DashboardSnapshot:
+        """Вернуть только новые recorder updates; смена run_id принудительно сбрасывает cursor."""
         run_changed = run_id not in (None, "", self._run_id)
         cursor = -1 if run_changed else since_sequence
         last, reset, updates = self._updates(cursor)
@@ -216,6 +217,7 @@ class DashboardState:
         )
 
     def payload(self, since_sequence: int = -1, run_id: str | None = None) -> dict:
+        """JSON-ready форма ``snapshot`` для ``GET /api/state``."""
         return self.snapshot(since_sequence, run_id).as_dict()
 
     def _updates(self, since: int):
@@ -230,6 +232,7 @@ class DashboardState:
         self, pid_key: str, gains: Mapping[str, object], *,
         revision: int | None = None, segment: str | None = None,
     ) -> dict:
+        """Проверить HTTP-запрос и поставить полный PID triplet в control-thread queue."""
         if pid_key not in ALL_PID_KEYS:
             raise KeyError(pid_key)
         active_segment, current_revision = self._live_position()
@@ -253,6 +256,7 @@ class DashboardState:
     def enqueue_revert(
         self, *, revision: int | None = None, segment: str | None = None,
     ) -> dict:
+        """Поставить восстановление gains начала запуска для активного участка."""
         active_segment, current_revision = self._live_position()
         segment = segment or active_segment
         revision = current_revision if revision is None else int(revision)
@@ -357,6 +361,7 @@ class DashboardState:
         )
 
     def cancel_pending_gain_updates(self) -> None:
+        """Закрыть tuning и записать отказ для каждого неисполненного запроса."""
         with self._lock:
             self._accept_tuning = False
             pending, self._queue = tuple(self._queue), deque()
@@ -381,6 +386,7 @@ class DashboardState:
         self.replay_summary = reader.summary()
 
     def save_candidate(self, *, segment: str | None = None, label: str = "dashboard") -> Path:
+        """Сохранить фактически записанный effective config, не изменяя SCENARIOS."""
         if not self._live or self.recorder is None:
             raise RuntimeError("replay is read-only")
         if self.recorder.recording_failed:
@@ -408,8 +414,6 @@ class DashboardState:
         if self._replay_updates is not None:
             self._replay_updates = _load_updates(RunReader(self.recorder.directory))
         return path
-
-    export_gains = save_candidate
 
     def _ensure_editable(self, pid_key: str, active_segment: str) -> None:
         if not self._live:
@@ -656,6 +660,7 @@ class DashboardState:
 
     @classmethod
     def from_csv(cls, path: str | Path, **_options) -> "DashboardState":
+        """Построить read-only state из run-directory либо поддерживаемого CSV."""
         reader = RunReader(path)
         state = cls()
         state._manifest, state._report = reader.manifest, reader.report
@@ -677,6 +682,8 @@ class DashboardState:
 
 
 class DashboardServer:
+    """Loopback-only HTTP lifecycle вокруг одного ``DashboardState``."""
+
     def __init__(self, state: DashboardState, *, host: str = "127.0.0.1", port: int = 8765) -> None:
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("PID dashboard may bind only to a loopback address")
@@ -686,9 +693,11 @@ class DashboardServer:
 
     @property
     def address(self) -> tuple[str, int]:
+        """Фактически привязанные host/port, включая ephemeral port 0 в тестах."""
         return self.httpd.server_address[:2]
 
     def start(self) -> "DashboardServer":
+        """Идемпотентно запустить daemon HTTP thread."""
         if self.thread is None:
             self.thread = threading.Thread(
                 target=self.httpd.serve_forever, name="ismpu-pid-dashboard", daemon=True)
@@ -696,6 +705,7 @@ class DashboardServer:
         return self
 
     def stop(self) -> None:
+        """Отклонить pending tuning, остановить thread и закрыть listening socket."""
         self.state.cancel_pending_gain_updates()
         if self.thread is not None:
             self.httpd.shutdown()
@@ -715,9 +725,12 @@ def _handler_factory(state: DashboardState):
     html_path = Path(__file__).with_name("dashboard.html")
 
     class Handler(BaseHTTPRequestHandler):
+        """Минимальный JSON/HTML handler без доступа к mutable controller state."""
+
         protocol_version = "HTTP/1.1"
 
         def log_message(self, _format, *_args):
+            """Не засорять 20-Hz консоль стандартным access log HTTP-сервера."""
             return
 
         def _json(self, status: int, payload) -> None:
@@ -733,6 +746,7 @@ def _handler_factory(state: DashboardState):
             self.close_connection = True
 
         def do_GET(self):
+            """Отдать статический HTML, incremental state либо replay artifact."""
             request = urlsplit(self.path)
             if request.path in {"/", "/dashboard.html"}:
                 body = html_path.read_bytes()
@@ -760,6 +774,7 @@ def _handler_factory(state: DashboardState):
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self):
+            """Валидировать tuning/candidate запрос и вернуть явный JSON status."""
             request = urlsplit(self.path)
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -892,19 +907,43 @@ def _gains_from_samples(updates) -> dict[str, dict[str, dict[str, float]]]:
 
 
 def _gain_ranges(profile: str, initial: Mapping) -> dict:
+    """Build safe dashboard sliders from the scenarios users can actually run.
+
+    The retired RL gain space used to own a second copy of these limits.  For manual
+    tuning the useful bound is simpler: half the smallest and twice the largest
+    positive coefficient already present in the scenario registry.  A manifest-only
+    replay can still fall back to the gains recorded in that run.
+    """
     result = copy.deepcopy(_AIR_RANGES)
-    try:
-        space = gain_space_for(profile)
-        lo, hi = space.lo_map, space.hi_map
-        for key, regulator in _GROUND_REGULATOR.items():
-            result[key] = {
-                name: (float(lo[regulator][name]), float(hi[regulator][name]),
-                       max((float(hi[regulator][name]) - float(lo[regulator][name])) / 400.0,
-                           1e-8))
-                for name in ("kp", "ki", "kd")}
-    except (KeyError, ValueError):
+    controls = []
+    for scenario in SCENARIOS.values():
+        if profile not in scenario.aircraft_controls:
+            continue
+        for segment in (FlightSegment.ROLLOUT, FlightSegment.TAXI):
+            controls.append(scenario.control_for(profile, segment))
+
+    for key in GROUND_PID_KEYS:
+        field = _CONFIG_FIELD[key]
+        ranges = {}
+        for name in ("kp", "ki", "kd"):
+            values = [
+                abs(float(getattr(control, field)[name]))
+                for control in controls
+                if name in getattr(control, field)
+            ]
+            positive = [value for value in values if value > 0.0]
+            if positive:
+                low, high = min(positive) / 2.0, max(positive) * 2.0
+                ranges[name] = (low, high, max((high - low) / 400.0, 1e-8))
+        if len(ranges) == 3:
+            result[key] = ranges
+
+    # Old artifacts may name an aircraft profile no longer present in the registry.
+    if not GROUND_PID_KEYS.issubset(result):
         ground = initial.get("rollout") or initial.get("taxi") or {}
         for key in GROUND_PID_KEYS:
+            if key in result:
+                continue
             values = ground.get(key, {"kp": 1.0, "ki": 1.0, "kd": 1.0})
             result[key] = {
                 name: (0.0, max(abs(float(values[name])) * 2.0, 1e-6),
@@ -978,6 +1017,7 @@ _TELEMETRY_SPECS = tuple({
 
 
 def main(argv=None) -> None:
+    """Запустить локальный read-only replay dashboard до ``Ctrl+C``."""
     parser = argparse.ArgumentParser(description="ИСМПУ PID dashboard replay")
     parser.add_argument("--replay", required=True)
     parser.add_argument("--port", type=int, default=8765)

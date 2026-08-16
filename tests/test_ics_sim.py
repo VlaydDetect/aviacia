@@ -1,4 +1,4 @@
-"""Тесты стенда (`ICSSim`), подбора сценария и генератора — без реального стенда."""
+"""Тесты стенда (`ICSSim`) и подбора сценария — без реального стенда."""
 
 import math
 from dataclasses import fields
@@ -18,7 +18,6 @@ from ismpu.config.ics import (
 from ismpu.config.scenarios import (
     Scenario, SCENARIOS, select_scenario, select_for_telemetry, weather_distance,
 )
-from ismpu.envs.scenario_generator import ScenarioGenerator
 from ismpu.config.scenarios import DEFAULT, NWS_FAIL
 from ismpu.config.segments import FlightSegment
 from ismpu.envs.weather import WeatherState, RunwayCondition, WEATHER_PRESETS
@@ -298,7 +297,6 @@ def test_ics_requires_profile_and_records_nonfatal_transition_mismatch():
     approach = sim.condition_match
     assert approach.matrix_run_id == "Б.4.2/1"
     assert approach.matrix_code == "Б.4.2"
-    assert approach.exact
     assert not approach.weather_matches
     assert approach.acceptance_valid
     assert sim.conditions_valid
@@ -699,7 +697,7 @@ def test_controller_without_a_bench_fails_loudly():
     with pytest.raises(RuntimeError, match="стенд"):
         controller.control_step(DT, telemetry(), send=True)
 
-    # ...но чистый расчёт без отправки работает и без стенда — это путь RL-среды.
+    # Чистый расчёт без отправки нужен replay-тестам и диагностике алгоритма.
     assert controller.control_step(DT, telemetry(), send=False) is False
 
 
@@ -765,58 +763,10 @@ def test_select_for_telemetry_falls_back_to_default_without_telemetry():
 
 
 # --------------------------------------------------------------------------- #
-# ScenarioGenerator
-# --------------------------------------------------------------------------- #
-
-def test_generator_is_deterministic_for_same_seed():
-    g1, g2 = ScenarioGenerator(seed=42), ScenarioGenerator(seed=42)
-    a = [g1.sample().to_dict() for _ in range(5)]
-    b = [g2.sample().to_dict() for _ in range(5)]
-    assert a == b
-
-
-def test_generator_zero_difficulty_has_no_failures():
-    gen = ScenarioGenerator(seed=1)
-    for _ in range(5):
-        assert gen.sample(difficulty=0.0).failures == ()
-
-
-def test_generator_high_difficulty_produces_failures():
-    gen = ScenarioGenerator(seed=1)
-    any_failure = any(gen.sample(difficulty=1.0).failures for _ in range(15))
-    assert any_failure
-
-
-def test_generator_samples_are_valid_and_serializable():
-    gen = ScenarioGenerator(seed=3)
-    for _ in range(10):
-        s = gen.sample()
-        assert 300.0 <= s.weather.visibility_m <= 16000.0
-        assert Scenario.from_dict(s.to_dict()).to_dict() == s.to_dict()
-
-
-def test_battery_covers_key_cases_and_roundtrips():
-    battery = ScenarioGenerator(seed=0).battery()
-    ids = {s.scenario_id for s in battery}
-    assert {"nominal", "nws_fail", "icy", "crosswind"} <= ids
-    for s in battery:
-        assert Scenario.from_dict(s.to_dict()).to_dict() == s.to_dict()
-
-
-def test_generator_embeds_control_config():
-    s = ScenarioGenerator(seed=1).sample(difficulty=0.0)
-    assert s.provenance[FlightSegment.ROLLOUT] == "default"
-    assert s.control_for("mc21", FlightSegment.ROLLOUT) == \
-           DEFAULT.control_for("mc21", FlightSegment.ROLLOUT)
-
-
-# --------------------------------------------------------------------------- #
 # Единые пресеты сценариев (управление + условия калибровки)
 # --------------------------------------------------------------------------- #
 
 def test_scenarios_is_the_only_registry():
-    import ismpu.envs.scenario as compatibility_module
-    assert not hasattr(compatibility_module, "SCENARIO_PRESETS")
     assert SCENARIOS["default"] is DEFAULT
     assert SCENARIOS["nws_fail"] is NWS_FAIL
 

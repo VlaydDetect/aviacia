@@ -524,8 +524,8 @@ class ICSSim(SimInterface):
         """Начало эпизода: сброс рукопожатия и первый кадр со стенда.
 
         Средой распоряжается Заказчик, поэтому сбрасывать здесь нечего — ни телепорта, ни
-        погоды, ни отказов мы не задаём. `scenario` принимается только ради единообразия вызова
-        из `RolloutEnv` и на состояние стенда не влияет.
+        погоды, ни отказов мы не задаём. `scenario` принимается ради общего ``SimInterface``:
+        X-Plane применяет его при reset, а ICS только сохраняет ожидаемые условия для сверки.
         """
         self.engagement.reset()
         self._scenario = scenario
@@ -557,7 +557,7 @@ class ICSSim(SimInterface):
         self._entered_segment = segment
         self.condition_match = report
         self.condition_matches.append(report)
-        self.conditions_valid = self.conditions_valid and report.exact
+        self.conditions_valid = self.conditions_valid and report.acceptance_valid
         if self.validate_conditions and initial and not report.failures_match:
             missing = ", ".join(sorted(f.name for f in report.missing_failures)) or "—"
             unexpected = ", ".join(sorted(f.name for f in report.unexpected_failures)) or "—"
