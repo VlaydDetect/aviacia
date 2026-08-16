@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ismpu.config.scenarios import Scenario
 from ismpu.config.segments import FlightSegment
+from ismpu.config.runway_profiles import RunwayProfile, UUEE_06R
 from ismpu.control.failures import FailureMode
 from ismpu.control.system import ControllingSystem
 from ismpu.envs.ics_sim import Telemetry
@@ -165,10 +166,19 @@ class RunReader:
             telemetry = telemetry_from_row(row)
             if not started:
                 segment = str(row.get("segment") or "rollout")
+                recorded_segment = (
+                    FlightSegment(segment)
+                    if segment in {item.value for item in FlightSegment}
+                    else FlightSegment.ROLLOUT)
                 controller.begin_flight(
                     telemetry,
                     FlightSegment.TAXI if segment == FlightSegment.TAXI.value else None,
                 )
+                # X-Plane/legacy telemetry intentionally has no synthetic ICS packet, so the
+                # live supervisor defers its irreversible segment decision. Replay may trust
+                # the segment persisted in RunSample and must configure that law immediately.
+                controller.segment = recorded_segment
+                controller.activate_segment(recorded_segment, telemetry)
                 started = True
             _apply_recorded_gains(controller, row)
             controller.control_step(_number(row.get("dt"), 0.05), telemetry, send=False)
@@ -252,6 +262,7 @@ def telemetry_from_row(row: dict) -> Telemetry:
             LocDeviation=_number(row.get("loc_deviation"), 0.0),
             GSDeviation=_number(row.get("gs_deviation"), 0.0),
         )
+    runway_profile = _runway_profile_from_row(row)
     failures = frozenset(
         FailureMode[name] for name in (row.get("faults") or []) if name in FailureMode.__members__)
     return Telemetry(
@@ -281,8 +292,31 @@ def telemetry_from_row(row: dict) -> Telemetry:
         weight_on_wheels_direct=_bool_or_none(row.get("weight_on_wheels")),
         flight_phase_direct=row.get("flight_phase"), faults_direct=failures,
         agent_is_active_direct=_bool_or_none(row.get("agent_active")),
+        runway_profile=runway_profile,
         valid=bool(row.get("valid", True)),
     )
+
+
+def _runway_profile_from_row(row: dict) -> RunwayProfile | None:
+    geometry = (
+        row.get("runway_threshold_lat"), row.get("runway_threshold_lon"),
+        row.get("runway_end_lat"), row.get("runway_end_lon"),
+        row.get("runway_heading_true_deg"), row.get("runway_elevation_m"),
+    )
+    if all(value is not None for value in geometry):
+        return RunwayProfile(
+            name=str(row.get("runway_profile_name") or "recorded"),
+            airport=str(row.get("runway_airport") or ""),
+            runway=str(row.get("runway_designator") or ""),
+            threshold_lat=float(geometry[0]), threshold_lon=float(geometry[1]),
+            end_lat=float(geometry[2]), end_lon=float(geometry[3]),
+            heading_true_deg=float(geometry[4]), elevation_m=float(geometry[5]),
+            width_m=float(row.get("runway_width_m") or 60.0),
+        )
+    # Compatibility for schema-v2 synthetic UUEE logs recorded before geometry columns.
+    if row.get("guidance_source") == "geodetic":
+        return UUEE_06R
+    return None
 
 
 def _apply_recorded_gains(controller, row: dict) -> None:

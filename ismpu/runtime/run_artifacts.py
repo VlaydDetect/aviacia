@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import subprocess
 import time
@@ -42,6 +43,9 @@ NORMALIZED_TELEMETRY_FIELDS = (
     "pitch_deg", "roll_deg", "vertical_speed_ms", "p_rad", "q_rad", "r_rad",
     "accel_long_g", "accel_norm_g", "accel_side_g", "wind_speed_ms",
     "wind_dir_from_deg", "runway_length_m", "runway_width_m",
+    "runway_profile_name", "runway_airport", "runway_designator",
+    "runway_threshold_lat", "runway_threshold_lon", "runway_end_lat",
+    "runway_end_lon", "runway_elevation_m",
     "lateral_deviation_m", "lateral_deviation_sign", "ils_valid",
     "main_gear_contact", "weight_on_wheels", "flight_phase", "agent_active",
     "faults", "weather",
@@ -204,6 +208,7 @@ def sample_values(telemetry, controller) -> dict[str, object]:
     state = controller.state
     approach_inputs = getattr(telemetry, "approach_inputs", None)
     approach_result = controller.approach_channel.result
+    runway_profile = getattr(telemetry, "runway_profile", None)
     lateral = getattr(getattr(controller, "lateral_channel", None), "last_diagnostics", None)
     longitudinal = getattr(
         getattr(controller, "longitudinal_channel", None), "last_diagnostics", None)
@@ -234,6 +239,14 @@ def sample_values(telemetry, controller) -> dict[str, object]:
         "wind_dir_from_deg": telemetry.wind_dir_from_deg,
         "runway_length_m": telemetry.runway_length_m,
         "runway_width_m": telemetry.runway_width_m,
+        "runway_profile_name": getattr(runway_profile, "name", None),
+        "runway_airport": getattr(runway_profile, "airport", None),
+        "runway_designator": getattr(runway_profile, "runway", None),
+        "runway_threshold_lat": getattr(runway_profile, "threshold_lat", None),
+        "runway_threshold_lon": getattr(runway_profile, "threshold_lon", None),
+        "runway_end_lat": getattr(runway_profile, "end_lat", None),
+        "runway_end_lon": getattr(runway_profile, "end_lon", None),
+        "runway_elevation_m": getattr(runway_profile, "elevation_m", None),
         "lateral_deviation_m": telemetry.lateral_deviation_m,
         "lateral_deviation_sign": telemetry.lateral_deviation_sign,
         "ils_valid": telemetry.ils_valid,
@@ -341,6 +354,7 @@ class RunRecorder:
         self._clock, self._started_monotonic = clock, clock()
         self._last_flush, self._flush_interval_s = self._started_monotonic, max(0.0, flush_interval_s)
         self._scenario, self._sequence, self._event_sequence = scenario, 0, 0
+        self._dashboard_sequence = 0
         self._raw_counts = {"rx": 0, "tx": 0}
         self._started = self._finished = False
         self._lock = RLock()
@@ -350,7 +364,13 @@ class RunRecorder:
         self._last_detected: dict[str, object] = {}
         self.recent_samples: deque[RunSample] = deque(maxlen=max(1, int(ring_size)))
         self.recent_events: deque[RunEvent] = deque(maxlen=max(64, min(2048, int(ring_size))))
+        # Те же immutable RunSample/RunEvent, без третьего сбора телеметрии. Общий cursor нужен,
+        # чтобы incremental API не терял события между соседними samples.
+        self.recent_updates: deque[tuple[int, RunSample | RunEvent]] = deque(
+            maxlen=max(65, int(ring_size) + min(2048, int(ring_size))))
         self.recording_failed, self.recording_error = False, None
+        effective_configs = _effective_configs(scenario, aircraft_profile)
+        matrix_rows = _matrix_rows(scenario)
         self.manifest = {
             "schema_version": SCHEMA_VERSION, "execution_id": self.execution_id,
             "started_at": now.isoformat(), "finished_at": None, "stop_reason": None,
@@ -360,8 +380,13 @@ class RunRecorder:
             "matrix_catalog_sha256": CATALOG_SHA256, "matrix_source_sha256": SOURCE_SHA256,
             "matrix_run_ids": {segment.value: run_id for segment, run_id in
                                getattr(scenario, "matrix_runs", {}).items()},
-            "matrix_rows": _matrix_rows(scenario),
-            "effective_configs": _effective_configs(scenario, aircraft_profile),
+            "matrix_rows": matrix_rows,
+            "matrix_row_hashes": {
+                segment: json_sha256(row) for segment, row in matrix_rows.items()},
+            "effective_configs": effective_configs,
+            "config_hashes": {
+                segment: json_sha256(value["control"])
+                for segment, value in effective_configs.items()},
             "start": start, "frequency_hz": 1.0 / DT, "units": _units_manifest(),
             "schema": {"sample": "RunSample/v2", "event": "RunEvent/v1",
                        "telemetry_columns": len(TELEMETRY_FIELDS)},
@@ -419,6 +444,7 @@ class RunRecorder:
         with self._lock:
             if self._finished:
                 raise RuntimeError("прогон уже завершён")
+            self._ensure_started()
             now = datetime.now(timezone.utc)
             segment = controller.segment.value
             sim = getattr(controller, "sim", None)
@@ -440,6 +466,7 @@ class RunRecorder:
             )
             self._sequence += 1
             self.recent_samples.append(sample)
+            self._publish(sample)
             if self._ensure_started():
                 try:
                     row = {name: _csv_value(sample.as_row().get(name)) for name in TELEMETRY_FIELDS}
@@ -468,6 +495,7 @@ class RunRecorder:
             dict(data or {}))
         self._event_sequence += 1
         self.recent_events.append(item)
+        self._publish(item)
         stream = self._streams.get("events")
         if stream is not None and not self.recording_failed:
             try:
@@ -475,7 +503,44 @@ class RunRecorder:
                     _jsonable(item.as_dict()), ensure_ascii=False, allow_nan=False) + "\n")
             except Exception as exc:
                 self._fail(exc)
+        elif self._finished and self.directory.is_dir() and not self.recording_failed:
+            # Dashboard остаётся доступным после completion; candidate_saved всё равно должен
+            # попасть в единственный журнал событий, а не жить только в HTTP-ответе.
+            try:
+                with (self.directory / "events.jsonl").open("a", encoding="utf-8") as tail:
+                    tail.write(json.dumps(
+                        _jsonable(item.as_dict()), ensure_ascii=False, allow_nan=False) + "\n")
+            except Exception as exc:
+                self._fail(exc)
         return item
+
+    def _publish(self, item: RunSample | RunEvent) -> None:
+        self.recent_updates.append((self._dashboard_sequence, item))
+        self._dashboard_sequence += 1
+
+    def dashboard_updates(
+        self, since_sequence: int = -1,
+    ) -> tuple[int, bool, tuple[tuple[int, RunSample | RunEvent], ...]]:
+        """Атомарный incremental slice для dashboard, без чтения controller."""
+        with self._lock:
+            last = self._dashboard_sequence - 1
+            if not self.recent_updates:
+                return last, False, ()
+            oldest = self.recent_updates[0][0]
+            reset = since_sequence >= 0 and since_sequence < oldest - 1
+            cursor = oldest - 1 if reset else since_sequence
+            updates = tuple(item for item in self.recent_updates if item[0] > cursor)
+            return last, reset, updates
+
+    @property
+    def latest_sample(self) -> RunSample | None:
+        with self._lock:
+            return self.recent_samples[-1] if self.recent_samples else None
+
+    @property
+    def finished(self) -> bool:
+        with self._lock:
+            return self._finished
 
     def _observe_packet(self, direction: str, packet: bytes, address) -> None:
         with self._lock:
@@ -509,10 +574,11 @@ class RunRecorder:
             "saturation": tuple(sorted(name for name in PID_NAMES
                                        if bool(sample.values.get(f"pid_{name}_saturated")))),
             "fallback": controller.go_around_reason or controller.abort_reason,
+            "flare": bool(sample.values.get("approach_flare_active")),
         }
         event_names = {"segment": "segment", "control_mode": "control_mode", "valid": "dropout",
                        "failures": "failures", "config_revision": "config_revision",
-                       "saturation": "saturation", "fallback": "fallback"}
+                       "saturation": "saturation", "fallback": "fallback", "flare": "flare"}
         for key, event in event_names.items():
             previous, value = self._last_detected.get(key), current[key]
             initial_state = key in {
@@ -563,6 +629,63 @@ class RunRecorder:
                 self._append_event_unlocked("candidate_exported", data={"path": str(path)})
             except Exception as exc:
                 self._fail(exc)
+            return path
+
+    def export_candidate(
+        self,
+        *,
+        segment: str,
+        config_revision: int,
+        effective_config: Mapping[str, object],
+        gains: Mapping[str, object],
+        label: str = "dashboard",
+    ) -> Path:
+        """Сохранить полный effective config; канонические config-файлы не затрагиваются."""
+        with self._lock:
+            self._ensure_started()
+            if segment not in self.manifest["effective_configs"]:
+                raise KeyError(segment)
+            matrix_run_id = self.manifest["matrix_run_ids"].get(segment)
+            payload = {
+                "schema_version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "execution_id": self.execution_id,
+                "backend": self.manifest["backend"],
+                "aircraft_profile": self.manifest["aircraft_profile"],
+                "scenario_id": self.manifest["scenario_id"],
+                "segment": segment,
+                "config_revision": int(config_revision),
+                "matrix_run_id": matrix_run_id,
+                "label": label,
+                "hashes": {
+                    "matrix_catalog_sha256": self.manifest["matrix_catalog_sha256"],
+                    "matrix_source_sha256": self.manifest["matrix_source_sha256"],
+                    "matrix_row_sha256": self.manifest["matrix_row_hashes"].get(segment),
+                    "base_config_sha256": self.manifest["config_hashes"][segment],
+                    "effective_config_sha256": json_sha256(effective_config),
+                },
+                "gains": dict(gains),
+                "effective_config": dict(effective_config),
+            }
+            path = self.directory / "candidates" / f"{segment}-{config_revision}.json"
+            encoded = json.dumps(
+                _jsonable(payload), ensure_ascii=False, indent=2, sort_keys=True,
+                allow_nan=False) + "\n"
+            if path.exists() and path.read_text(encoding="utf-8") != encoded:
+                raise FileExistsError(f"candidate уже существует: {path}")
+            try:
+                temporary = path.with_suffix(path.suffix + ".tmp")
+                temporary.write_text(encoded, encoding="utf-8")
+                temporary.replace(path)
+                self._append_event_unlocked("candidate_saved", data={
+                    "path": str(path), "segment": segment,
+                    "config_revision": int(config_revision),
+                    "matrix_run_id": matrix_run_id,
+                    "effective_config_sha256": payload["hashes"]["effective_config_sha256"],
+                }, segment=segment)
+            except Exception as exc:
+                self._fail(exc)
+                raise
             return path
 
     def finish(self, report: dict | object | None = None) -> None:
@@ -629,6 +752,13 @@ class RunRecorder:
             self.recording_failed = True
             self.recording_error = f"{type(exc).__name__}: {exc}"
             self.manifest.update(recording_failed=True, recording_error=self.recording_error)
+            item = RunEvent(
+                self._event_sequence, datetime.now(timezone.utc).isoformat(),
+                self._clock() - self._started_monotonic, None, None,
+                "recording_error", None, {"error": self.recording_error})
+            self._event_sequence += 1
+            self.recent_events.append(item)
+            self._publish(item)
         self._close_streams()
 
     def _write_json(self, name: str, payload) -> None:
@@ -699,6 +829,15 @@ def _csv_value(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
     return value
+
+
+def json_sha256(value: object) -> str:
+    """SHA-256 канонического JSON для matrix/config promotion gates."""
+    payload = json.dumps(
+        _jsonable(value), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _jsonable(value):

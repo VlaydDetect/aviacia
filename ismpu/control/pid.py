@@ -231,6 +231,29 @@ class PIDController:
             ),
         )
 
+    def set_gains_bumpless(self, *, kp: float, ki: float, kd: float) -> None:
+        """Сменить коэффициенты без сброса D-history и с компенсацией интегратором.
+
+        Текущий ограниченный выход используется как цель. Если новый ``ki`` равен нулю или
+        требуемый интеграл выходит за его физические пределы, сохраняется ближайшее достижимое
+        состояние — искусственный bias в классический PID не добавляется.
+        """
+        values = (float(kp), float(ki), float(kd))
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("PID gains must be finite")
+        target = self.last_output
+        self.kp, self.ki, self.kd = values
+        if abs(self.ki) > 1e-15:
+            self.integral = self._clip_integral(
+                (target - self.kp * self.last_error
+                 - self.kd * self.filtered_derivative) / self.ki)
+        self.last_p_term = self.kp * self.last_error
+        self.last_i_term = self.ki * self.integral
+        self.last_d_term = self.kd * self.filtered_derivative
+        self.last_unconstrained = (
+            self.last_p_term + self.last_i_term + self.last_d_term)
+        self.last_output = self.clamp(self.last_unconstrained)
+
     def reset(self) -> None:
         """Сброс внутренних состояний (используется при выключении системы)."""
         self.integral = 0.0

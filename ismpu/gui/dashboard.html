@@ -1,132 +1,116 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ИСМПУ PID Dashboard</title>
+  <title>ИСМПУ · PID Dashboard</title>
   <style>
-    :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d;
-      --text:#e6edf3; --muted:#8b949e; --blue:#58a6ff; --orange:#f0883e;
-      --green:#3fb950; --red:#f85149; --purple:#bc8cff; }
-    * { box-sizing:border-box } body { margin:0; background:var(--bg);
-      color:var(--text); font:14px/1.4 system-ui,sans-serif }
-    header { position:sticky; top:0; z-index:2; padding:12px 18px;
-      background:#010409; border-bottom:1px solid var(--line) }
-    #status { display:flex; flex-wrap:wrap; gap:8px 18px; color:var(--muted) }
-    #status strong { color:var(--text) }
-    nav { display:flex; gap:6px; overflow:auto; padding:10px 18px;
-      border-bottom:1px solid var(--line) }
-    button { color:var(--text); background:var(--panel); border:1px solid var(--line);
-      border-radius:6px; padding:7px 11px; cursor:pointer }
-    button.active { border-color:var(--blue); color:var(--blue) }
-    button:disabled { opacity:.45; cursor:not-allowed }
-    main { padding:16px 18px; display:grid; grid-template-columns:minmax(0,3fr) minmax(260px,1fr); gap:14px }
-    section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px }
-    canvas { width:100%; height:440px; display:block }
-    .metric-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px }
-    .metric { padding:8px; background:#0d1117; border-radius:6px }
-    .metric span { display:block; color:var(--muted); font-size:12px }
-    .metric b { font:600 17px ui-monospace,monospace }
-    form { margin-top:14px; display:grid; grid-template-columns:repeat(3,1fr); gap:8px }
-    label { color:var(--muted); font-size:12px } input { width:100%; margin-top:3px;
-      padding:7px; color:var(--text); background:#0d1117; border:1px solid var(--line); border-radius:5px }
-    .actions { grid-column:1/-1; display:flex; gap:8px }
-    #timeline { max-height:180px; overflow:auto; color:var(--muted); font:12px ui-monospace,monospace }
-    .legend { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:8px; color:var(--muted) }
-    .swatch { width:10px; height:10px; display:inline-block; border-radius:50%; margin-right:4px }
-    @media (max-width:850px) { main { grid-template-columns:1fr } canvas { height:330px } }
+    :root{color-scheme:dark;--bg:#0b0f14;--panel:#121923;--panel2:#0e141d;--line:#263242;
+      --text:#e6edf3;--muted:#8b99aa;--blue:#58a6ff;--orange:#f0883e;--green:#3fb950;
+      --red:#ff6b68;--purple:#bc8cff;--yellow:#d5b84b}*{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 system-ui,sans-serif}
+    header{position:sticky;top:0;z-index:4;padding:10px 16px;background:#070b10;border-bottom:1px solid var(--line)}
+    h1{margin:0 14px 7px 0;font-size:17px}.chips{display:flex;flex-wrap:wrap;gap:6px}
+    .chip{padding:3px 7px;border:1px solid var(--line);border-radius:5px;color:var(--muted)}.chip b{color:var(--text)}
+    #pidTabs,#panelTabs{display:flex;gap:5px;overflow:auto;padding:8px 16px;border-bottom:1px solid var(--line)}
+    button,select,input{font:inherit}button,select{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:6px 9px}
+    button{cursor:pointer}button.active{border-color:var(--blue);color:var(--blue)}button:disabled{opacity:.4;cursor:not-allowed}
+    .layout{display:grid;grid-template-columns:minmax(0,3fr) minmax(270px,1fr);gap:12px;padding:12px 16px}
+    .card{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:10px;min-width:0}
+    .charts{display:grid;gap:8px}.chart{height:185px;position:relative}.chart h3{position:absolute;z-index:1;margin:7px 9px;font-size:12px;color:var(--muted)}
+    canvas{width:100%;height:100%;display:block;background:var(--panel2);border-radius:5px}
+    .timeline{display:grid;grid-template-columns:auto minmax(100px,1fr) auto auto;gap:8px;align-items:center;margin-top:9px}
+    #timeline{width:100%}.side h2,.side h3{margin:3px 0 9px}.gain{margin:10px 0}.gain label{display:flex;justify-content:space-between;color:var(--muted)}
+    .gain output{font-family:ui-monospace,monospace;color:var(--text)}input[type=range]{width:100%;accent-color:var(--blue)}
+    .actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.notice{min-height:20px;margin-top:7px;color:var(--muted)}
+    .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px}.metric{padding:7px;background:var(--panel2);border-radius:5px;overflow-wrap:anywhere}
+    .metric span{display:block;color:var(--muted);font-size:11px}.metric b{font:600 13px ui-monospace,monospace}
+    .panel{display:none}.panel.active{display:block}#details{padding:0 16px 16px}.toolbar{display:flex;gap:8px;margin-bottom:9px}
+    input[type=search]{width:min(420px,100%);padding:7px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:5px}
+    details{border-top:1px solid var(--line);padding:7px 0}summary{cursor:pointer;color:var(--muted)}
+    table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:5px 7px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted)}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#c9d1d9;background:var(--panel2);padding:9px;border-radius:5px;max-height:440px;overflow:auto}
+    #events{max-height:460px;overflow:auto;font:12px ui-monospace,monospace}.event{padding:6px;border-bottom:1px solid var(--line)}
+    .ok{color:var(--green)}.bad{color:var(--red)}@media(max-width:900px){.layout{grid-template-columns:1fr}.chart{height:160px}.timeline{grid-template-columns:auto 1fr auto}.timeline select{grid-column:1/-1}}
   </style>
 </head>
 <body>
-  <header>
-    <div id="status">Loading…</div>
-  </header>
-  <nav id="tabs"></nav>
-  <main>
-    <section>
-      <div class="legend">
-        <span><i class="swatch" style="background:#58a6ff"></i>value</span>
-        <span><i class="swatch" style="background:#f0883e"></i>setpoint</span>
-        <span><i class="swatch" style="background:#3fb950"></i>output</span>
-        <span><i class="swatch" style="background:#bc8cff"></i>P/I/D</span>
+  <header><h1>ИСМПУ · PID Dashboard</h1><div id="status" class="chips"><span class="chip">Ожидание телеметрии</span></div></header>
+  <nav id="pidTabs"></nav>
+  <div class="layout">
+    <main class="card">
+      <div class="charts">
+        <div class="chart"><h3>Value / setpoint / error</h3><canvas id="chartSignal"></canvas></div>
+        <div class="chart"><h3>Requested / output / applied / feedback</h3><canvas id="chartCommand"></canvas></div>
+        <div class="chart"><h3>P / I / D / integral / saturation</h3><canvas id="chartTerms"></canvas></div>
       </div>
-      <canvas id="plot"></canvas>
-    </section>
-    <aside>
-      <section>
-        <h3 id="view-title">PID</h3>
-        <div class="metric-grid" id="metrics"></div>
-        <form id="gains">
-          <label>Kp<input name="kp" type="number" step="any"></label>
-          <label>Ki<input name="ki" type="number" step="any"></label>
-          <label>Kd<input name="kd" type="number" step="any"></label>
-          <div class="actions">
-            <button id="apply" type="submit">Apply gains</button>
-            <button id="export" type="button">Export snapshot</button>
-          </div>
-        </form>
-      </section>
-      <section style="margin-top:14px">
-        <h3>Timeline</h3>
-        <div id="timeline"></div>
-      </section>
+      <div class="timeline">
+        <button id="live" class="active">Live</button>
+        <input id="timeline" type="range" min="0" max="0" step="0.05" value="0" aria-label="Run timeline">
+        <span id="timeLabel">00:00 / 00:00</span>
+        <select id="window" aria-label="Visible time window">
+          <option value="30">30 sec</option><option value="60">60 sec</option>
+          <option value="120">120 sec</option><option value="all">Full run</option>
+        </select>
+      </div>
+    </main>
+    <aside class="side card">
+      <h2 id="viewTitle">PID</h2><div id="pidMetrics" class="metrics"></div>
+      <form id="gains"><div id="gainControls"></div>
+        <div class="actions"><button id="apply" type="submit">Apply</button><button id="revert" type="button">Revert segment</button><button id="candidate" type="button">Save candidate</button></div>
+      </form><div id="notice" class="notice"></div>
     </aside>
-  </main>
+  </div>
+  <nav id="panelTabs">
+    <button data-panel="air" class="active">Air overview</button><button data-panel="ground_lateral">Ground lateral</button>
+    <button data-panel="ground_longitudinal">Ground longitudinal</button><button data-panel="telemetry">Telemetry (99)</button>
+    <button data-panel="matrix">Matrix/config</button><button data-panel="gain_layers">Gain layers</button><button data-panel="events">Events</button>
+  </nav>
+  <section id="details" class="card">
+    <div id="panel-air" class="panel active metrics"></div><div id="panel-ground_lateral" class="panel metrics"></div>
+    <div id="panel-ground_longitudinal" class="panel metrics"></div>
+    <div id="panel-telemetry" class="panel"><div class="toolbar"><input id="telemetrySearch" type="search" placeholder="Поиск сигнала…"></div><div id="telemetryTable"></div></div>
+    <div id="panel-matrix" class="panel"><pre id="matrixConfig"></pre></div>
+    <div id="panel-gain_layers" class="panel"><pre id="gainLayers"></pre></div>
+    <div id="panel-events" class="panel"><div id="events"></div></div>
+  </section>
 <script>
-let state=null, active='roll';
-const colors={value:'#58a6ff',setpoint:'#f0883e',output:'#3fb950',p:'#bc8cff',i:'#d2a8ff',d:'#ff7b72'};
-const fmt=v => (v===null || v===undefined || Number.isNaN(Number(v))) ? '—' : Number(v).toFixed(4);
+const chartDefs={chartSignal:['value','setpoint','error'],chartCommand:['requested','output','applied','feedback'],chartTerms:['p','i','d','integral','saturated']};
+const colors={value:'#58a6ff',setpoint:'#f0883e',error:'#ff6b68',requested:'#bc8cff',output:'#58a6ff',applied:'#3fb950',feedback:'#d5b84b',p:'#58a6ff',i:'#f0883e',d:'#bc8cff',integral:'#3fb950',saturated:'#ff6b68'};
+let frames=[],events=[],metadata=null,latest=null,runId=null,lastSequence=-1,activeView='roll',atLive=true;
+const esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=v=>v===null||v===undefined||v===''?'—':typeof v==='number'?(Math.abs(v)>=1000?v.toFixed(1):v.toFixed(4)):typeof v==='object'?JSON.stringify(v):String(v);
+const formatTime=s=>`${String(Math.floor(Math.max(0,s||0)/60)).padStart(2,'0')}:${String(Math.round(Math.max(0,s||0))%60).padStart(2,'0')}`;
 async function refresh(){
-  state=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());
-  const h=state.header, replay=state.replay;
-  document.querySelector('#status').innerHTML=[
-    ['backend',h.backend],['aircraft',h.aircraft_profile],['scenario',h.scenario],
-    ['segment',h.segment],['ILS',h.ils_valid],['go-around',h.go_around||'no'],
-    ['mode',replay?'replay':(h.tune_enabled?'TUNING':'monitor-only')]
-  ].map(x=>`<span>${x[0]}: <strong>${x[1]??'—'}</strong></span>`).join('');
-  buildTabs(); render();
+  try{
+    const data=await fetch(`/api/state?since=${lastSequence}&run_id=${encodeURIComponent(runId??'')}`,{cache:'no-store'}).then(async r=>{if(!r.ok)throw new Error((await r.json()).error);return r.json()});
+    if((runId!==null&&runId!==data.run_id)||data.reset){frames=[];events=[];lastSequence=-1;atLive=true;document.querySelector('#live').classList.add('active')}
+    runId=data.run_id;if(data.metadata)metadata=data.metadata;if(data.frames.length)frames.push(...data.frames);if(data.events.length)events.push(...data.events);if(data.latest)latest=data.latest;lastSequence=data.last_sequence;
+    const end=frames.at(-1)?.t??0,timeline=document.querySelector('#timeline');if(frames.length){timeline.min=frames[0].t;timeline.max=end;if(atLive)timeline.value=end}
+    render();
+  }catch(error){document.querySelector('#notice').textContent=`Dashboard disconnected: ${error.message}`}
+  finally{setTimeout(refresh,500)}
 }
-function buildTabs(){
-  const tabs=document.querySelector('#tabs');
-  tabs.innerHTML=state.views.map(v=>`<button data-key="${v.key}" class="${v.key===active?'active':''}">${v.label}</button>`).join('');
-  tabs.querySelectorAll('button').forEach(b=>b.onclick=()=>{active=b.dataset.key;buildTabs();render()});
-}
-function render(){
-  const view=state.views.find(v=>v.key===active), p=view.latest||{};
-  document.querySelector('#view-title').textContent=`${view.label} · ${p.segment||'—'}`;
-  document.querySelector('#metrics').innerHTML=['value','setpoint','error','output','p','i','d','saturated']
-    .map(k=>`<div class="metric"><span>${k}</span><b>${k==='saturated'?(p[k]?'YES':'no'):fmt(p[k])}</b></div>`).join('');
-  ['kp','ki','kd'].forEach(k=>document.querySelector(`[name=${k}]`).value=p[k]??'');
-  document.querySelector('#apply').disabled=view.locked;
-  document.querySelector('#gains').dataset.pid=view.pid_key;
-  document.querySelector('#timeline').innerHTML=state.timeline.slice().reverse()
-    .map(e=>`<div>${fmt(e.time_s)}s · ${e.event}: ${JSON.stringify(e.value)}</div>`).join('')||'No events';
-  draw(view.points);
-}
-function draw(points){
-  const c=document.querySelector('#plot'), dpr=devicePixelRatio||1, box=c.getBoundingClientRect();
-  c.width=Math.max(1,box.width*dpr); c.height=Math.max(1,box.height*dpr);
-  const x=c.getContext('2d'); x.scale(dpr,dpr); x.clearRect(0,0,box.width,box.height);
-  x.strokeStyle='#30363d'; x.lineWidth=1;
-  for(let i=0;i<=5;i++){let y=20+i*(box.height-40)/5;x.beginPath();x.moveTo(45,y);x.lineTo(box.width-10,y);x.stroke()}
-  const keys=['value','setpoint','output','p','i','d'], vals=[];
-  points.forEach(p=>keys.forEach(k=>{if(Number.isFinite(Number(p[k]))) vals.push(Number(p[k]))}));
-  if(!vals.length)return; let lo=Math.min(...vals),hi=Math.max(...vals); if(lo===hi){lo-=1;hi+=1}
-  const t0=Number(points[0].time_s)||0,t1=Number(points.at(-1).time_s)||t0+1;
-  keys.forEach(k=>{x.strokeStyle=colors[k];x.lineWidth=k==='value'||k==='setpoint'?2:1;x.beginPath();let begun=false;
-    points.forEach(p=>{let v=Number(p[k]);if(!Number.isFinite(v))return;let px=45+(Number(p.time_s)-t0)/(t1-t0||1)*(box.width-55),py=20+(hi-v)/(hi-lo)*(box.height-40);
-      begun?x.lineTo(px,py):(x.moveTo(px,py),begun=true)});x.stroke()});
-}
-document.querySelector('#gains').onsubmit=async e=>{
-  e.preventDefault();const payload=Object.fromEntries(new FormData(e.target).entries());
-  const r=await fetch('/api/gains/'+e.target.dataset.pid,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  if(!r.ok)alert((await r.json()).error);await refresh();
-};
-document.querySelector('#export').onclick=async()=>{
-  const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"label":"dashboard"}'});
-  const body=await r.json();alert(r.ok?'Saved: '+body.path:body.error);
-};
-addEventListener('resize',()=>state&&render());setInterval(refresh,500);refresh();
+function currentFrame(){if(!frames.length)return null;const end=atLive?frames.at(-1).t:Number(document.querySelector('#timeline').value);return frames.reduce((best,p)=>Math.abs(p.t-end)<Math.abs(best.t-end)?p:best,frames[0])}
+function currentPoint(){const selected=currentFrame();if(!selected)return null;if(selected.views[activeView])return selected.views[activeView];for(let i=frames.indexOf(selected);i>=0;i--)if(frames[i].views[activeView])return frames[i].views[activeView];return null}
+function render(){renderHeader();renderTabs();renderPid();renderPanels();drawAll()}
+function renderHeader(){const h=latest?.header||metadata?.header||{};document.querySelector('#status').innerHTML=[['backend',h.backend],['execution',h.execution_id],['matrix',JSON.stringify(h.matrix_run_ids||{})],['aircraft',h.aircraft_profile],['segment',h.segment],['mode',h.control_mode_name??h.control_policy],['mask',h.control_valid_mask],['config rev',h.config_revision],['Hz',h.frequency_hz],['age s',h.telemetry_age_s],['Agent',h.agent_active],['recorder',h.recorder_status]].map(([k,v])=>`<span class="chip">${esc(k)}: <b>${esc(fmt(v))}</b></span>`).join('')}
+function renderTabs(){if(!metadata)return;const root=document.querySelector('#pidTabs');root.innerHTML=metadata.views.map(v=>`<button data-view="${esc(v.key)}" class="${v.key===activeView?'active':''}">${esc(v.label)}</button>`).join('');root.querySelectorAll('button').forEach(b=>b.onclick=()=>{activeView=b.dataset.view;render()})}
+function renderPid(){const view=metadata?.views.find(v=>v.key===activeView),point=currentPoint(),frame=currentFrame();document.querySelector('#viewTitle').textContent=`${view?.label||activeView} · ${frame?.segment||'—'}`;document.querySelector('#pidMetrics').innerHTML=['value','setpoint','error','requested','output','applied','feedback','p','i','d','integral','saturated'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(k==='saturated'?(point?.[k]?'YES':'no'):fmt(point?.[k]))}</b></div>`).join('');buildGains(view,point)}
+function buildGains(view,point){const root=document.querySelector('#gainControls');if(!view){root.innerHTML='';return}root.innerHTML=['kp','ki','kd'].map(k=>{const r=view.ranges[k],v=point?.[k]??0;return `<div class="gain"><label><span>${k.toUpperCase()}</span><output data-out="${k}">${esc(fmt(v))}</output></label><input name="${k}" type="range" min="${r.min}" max="${r.max}" step="${r.step}" value="${v}" ${view.locked?'disabled':''}></div>`}).join('');root.querySelectorAll('input').forEach(i=>i.oninput=()=>root.querySelector(`[data-out=${i.name}]`).textContent=fmt(Number(i.value)));document.querySelector('#apply').disabled=view.locked;document.querySelector('#revert').disabled=view.locked;document.querySelector('#candidate').disabled=!latest||latest.header.recorder_status==='error'}
+function visiblePoints(){const end=atLive?(frames.at(-1)?.t??0):Number(document.querySelector('#timeline').value),windowValue=document.querySelector('#window').value,start=windowValue==='all'?(frames[0]?.t??0):Math.max(frames[0]?.t??0,end-Number(windowValue));return frames.filter(f=>f.t>=start&&f.t<=end&&f.views[activeView]).map(f=>({t:f.t,...f.views[activeView]}))}
+function drawAll(){const selected=currentFrame(),end=atLive?(frames.at(-1)?.t??0):Number(document.querySelector('#timeline').value);document.querySelector('#timeLabel').textContent=`${formatTime(end)} / ${formatTime(frames.at(-1)?.t??0)}`;for(const [id,keys] of Object.entries(chartDefs))draw(document.querySelector('#'+id),visiblePoints(),keys);if(selected&&!selected.views[activeView]&&activeView==='flare')document.querySelector('#notice').textContent='Flare view is inactive outside the flare phase'}
+function draw(canvas,points,keys){const rect=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=Math.max(1,Math.round(rect.width*dpr));canvas.height=Math.max(1,Math.round(rect.height*dpr));const x=canvas.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,rect.width,rect.height);const pad={l:52,r:12,t:25,b:22},vals=[];points.forEach(p=>keys.forEach(k=>{const v=k==='saturated'?(p[k]?1:0):Number(p[k]);if(Number.isFinite(v))vals.push(v)}));if(!vals.length)return;let lo=Math.min(...vals),hi=Math.max(...vals);if(hi-lo<1e-9){lo-=.5;hi+=.5}const margin=(hi-lo)*.08;lo-=margin;hi+=margin;x.font='11px system-ui';x.strokeStyle='#263242';x.fillStyle='#8b99aa';for(let i=0;i<=4;i++){const y=pad.t+(rect.height-pad.t-pad.b)*i/4;x.beginPath();x.moveTo(pad.l,y);x.lineTo(rect.width-pad.r,y);x.stroke();x.fillText((hi-(hi-lo)*i/4).toFixed(3),4,y+3)}const t0=points[0]?.t??0,t1=points.at(-1)?.t??t0,span=Math.max(t1-t0,.05);keys.forEach(k=>{x.beginPath();x.strokeStyle=colors[k];x.lineWidth=k==='saturated'?1:1.7;let begun=false;points.forEach(p=>{const v=k==='saturated'?(p[k]?1:0):Number(p[k]);if(!Number.isFinite(v))return;const px=pad.l+(rect.width-pad.l-pad.r)*(p.t-t0)/span,py=pad.t+(rect.height-pad.t-pad.b)*(hi-v)/(hi-lo);begun?x.lineTo(px,py):(x.moveTo(px,py),begun=true)});x.stroke();x.fillStyle=colors[k];x.fillText(k,pad.l+keys.indexOf(k)*82,rect.height-5)})}
+function flatMetrics(root,obj){root.innerHTML=Object.entries(obj||{}).flatMap(([k,v])=>v&&typeof v==='object'&&!Array.isArray(v)?Object.entries(v).map(([sk,sv])=>[`${k}.${sk}`,sv]):[[k,v]]).map(([k,v])=>`<div class="metric"><span>${esc(k)}</span><b>${esc(fmt(v))}</b></div>`).join('')}
+function renderPanels(){flatMetrics(document.querySelector('#panel-air'),latest?.air);flatMetrics(document.querySelector('#panel-ground_lateral'),latest?.ground_lateral);flatMetrics(document.querySelector('#panel-ground_longitudinal'),latest?.ground_longitudinal);document.querySelector('#matrixConfig').textContent=JSON.stringify({...metadata?.matrix_config,actual_conditions:latest?.actual_conditions},null,2);document.querySelector('#gainLayers').textContent=JSON.stringify(latest?.gain_layers??{},null,2);document.querySelector('#events').innerHTML=events.slice().reverse().map(e=>`<div class="event">${esc(fmt(e.time_s))}s · <b>${esc(e.event)}</b> [${esc(e.segment)}] ${esc(JSON.stringify(e.data))}</div>`).join('')||'Нет событий';renderTelemetry()}
+function renderTelemetry(){const query=document.querySelector('#telemetrySearch').value.toLowerCase(),defs=metadata?.telemetry_fields||[],values=latest?.telemetry?.known||{},groups={};for(const d of defs){if(query&&!d.name.toLowerCase().includes(query))continue;(groups[d.group]??=[]).push(d)}document.querySelector('#telemetryTable').innerHTML=Object.entries(groups).map(([group,items])=>`<details open><summary>${esc(group)} (${items.length})</summary><table><thead><tr><th>Signal</th><th>Value</th><th>Unit</th><th>Valid</th></tr></thead><tbody>${items.map(d=>`<tr><td>${esc(d.name)}</td><td>${esc(fmt(values[d.name]?.value))}</td><td>${esc(d.unit)}</td><td class="${values[d.name]?.valid?'ok':'bad'}">${esc(fmt(values[d.name]?.valid))}</td></tr>`).join('')}</tbody></table></details>`).join('')+`<details><summary>Unknown raw</summary><pre>${esc(JSON.stringify(latest?.telemetry?.unknown_raw??{},null,2))}</pre></details>`}
+document.querySelector('#timeline').oninput=()=>{atLive=false;document.querySelector('#live').classList.remove('active');render()};document.querySelector('#live').onclick=()=>{atLive=true;document.querySelector('#live').classList.add('active');render()};document.querySelector('#window').onchange=render;document.querySelector('#telemetrySearch').oninput=renderTelemetry;
+document.querySelector('#panelTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{document.querySelectorAll('#panelTabs button').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.panel').forEach(x=>x.classList.toggle('active',x.id===`panel-${b.dataset.panel}`))});
+async function post(path,payload){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.error);return body}
+document.querySelector('#gains').onsubmit=async e=>{e.preventDefault();const view=metadata.views.find(v=>v.key===activeView),payload=Object.fromEntries([...new FormData(e.target)].map(([k,v])=>[k,Number(v)]));Object.assign(payload,{revision:latest.header.config_revision,segment:latest.header.segment});try{const body=await post('/api/gains/'+view.pid_key,payload);document.querySelector('#notice').textContent=`Pending #${body.request_id} for revision ${body.old_revision}`}catch(error){document.querySelector('#notice').textContent=error.message}};
+document.querySelector('#revert').onclick=async()=>{try{const body=await post('/api/revert',{revision:latest.header.config_revision,segment:latest.header.segment});document.querySelector('#notice').textContent=`Revert pending #${body.request_id}`}catch(error){document.querySelector('#notice').textContent=error.message}};
+document.querySelector('#candidate').onclick=async()=>{try{const body=await post('/api/candidate',{segment:latest.header.segment,label:'dashboard'});document.querySelector('#notice').textContent=`Saved ${body.path}`}catch(error){document.querySelector('#notice').textContent=error.message}};
+addEventListener('resize',drawAll);refresh();
 </script>
 </body>
 </html>

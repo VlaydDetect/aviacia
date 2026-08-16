@@ -25,10 +25,11 @@ from ismpu.envs.splits import (
 from ismpu.io.xplane_connector import XPlaneConnector
 from ismpu.envs.xplane_sim import XPlaneSim
 from ismpu.gui.dashboard import DashboardState
+from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.agent.shield import base_gains_from_pids
 from ismpu.envs.action import preset_action
 
-from tests.fakes import FakeConnector, static_sim
+from tests.fakes import FakeConnector, static_sim, telemetry
 from tests.test_xplane_backend import MockXPlaneConnector
 
 
@@ -270,15 +271,22 @@ def test_dashboard_http_queue_applies_only_at_tick_boundary(tmp_path):
     controller = ControllingSystem()
     scenario = Scenario.from_preset("default")
     scenario.apply_control(controller, "mc21")
+    sample = telemetry(groundspeed_ms=75.0)
+    controller.control_step(0.05, sample, send=False)
+    recorder = RunRecorder(
+        root=tmp_path, backend="xplane", aircraft_profile="mc21",
+        scenario=scenario)
+    recorder.record(sample, controller, elapsed_s=0.05)
     state = DashboardState(
-        controller, scenario=scenario, tune_enabled=True, export_root=tmp_path)
-    old = controller.approach_channel.roll_pid.kp
-    pending = state.enqueue_gain_update("roll", {"kp": old + 1.0})
+        controller, scenario=scenario, recorder=recorder, tune_enabled=True)
+    old = controller.pids["pid_brake_l"].kp
+    pending = state.enqueue_gain_update("brake_l", {"kp": old * 1.1})
     assert pending["status"] == "pending"
-    assert controller.approach_channel.roll_pid.kp == old
+    assert controller.pids["pid_brake_l"].kp == old
     applied = state.apply_pending_gain_updates()
     assert applied[0]["status"] == "applied"
-    assert controller.approach_channel.roll_pid.kp == old + 1.0
+    assert controller.pids["pid_brake_l"].kp == pytest.approx(old * 1.1)
+    recorder.finish()
 
 
 def test_signature_holdout_is_stable_and_not_failure_family_based():

@@ -61,8 +61,6 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
         sim.warm_up()
         controller.last_telemetry = sim.read_telemetry()
         run_started = time.monotonic()
-        if dashboard_state is not None:
-            dashboard_state.capture(elapsed_s=0.0)
 
         print("Управление включено.")
         last_time = time.monotonic()
@@ -82,9 +80,6 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                         elapsed_s=time.monotonic() - run_started,
                         dt=dt,
                     )
-                if dashboard_state is not None:
-                    dashboard_state.capture(
-                        elapsed_s=time.monotonic() - run_started)
                 if finished:
                     if controller.segment is FlightSegment.ROLLOUT:
                         rule = controller.longitudinal_channel.trajectory.completion_rule
@@ -147,6 +142,8 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                 backend=getattr(sim, "backend_name", "unknown"),
                 errors=(f"shutdown: {type(exc).__name__}: {exc}",),
             )
+        if dashboard_state is not None:
+            dashboard_state.cancel_pending_gain_updates()
         if recorder is not None:
             try:
                 recorder.finish({
@@ -159,6 +156,11 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                 })
             except Exception:
                 logger.exception("Ошибка завершения журнала прогона")
+        if dashboard_state is not None:
+            try:
+                dashboard_state.complete()
+            except Exception:
+                logger.exception("Ошибка перевода dashboard в completed replay")
     return RunResult(reason=reason, shutdown=shutdown_report, details=details)
 
 
@@ -192,6 +194,7 @@ def main(
     run_id: str | None = None,
     dashboard: bool = False,
     dashboard_tune: bool = False,
+    dashboard_hold_seconds: float = 300.0,
 ):
     """Точка входа: подключиться к стенду, выбрать пресет и провести полёт.
 
@@ -209,6 +212,8 @@ def main(
     """
     if run_id is not None and preset is not None:
         raise ValueError("задайте либо preset, либо run_id")
+    if dashboard_hold_seconds < 0.0:
+        raise ValueError("dashboard_hold_seconds must be non-negative")
     selected = (
         scenario_for_matrix_run(run_id) if run_id is not None
         else preset if isinstance(preset, Scenario)
@@ -301,7 +306,7 @@ def main(
             f"{dashboard_server.address[1]} ({mode})"
         )
     try:
-        run(
+        result = run(
             controller,
             sim,
             scenario,
@@ -309,6 +314,19 @@ def main(
             recorder=recorder,
             dashboard_state=dashboard_state,
         )
+        if (
+            dashboard_server is not None
+            and result.reason is not RunStopReason.INTERRUPTED
+            and dashboard_hold_seconds > 0.0
+        ):
+            print(
+                f"Dashboard доступен ещё {dashboard_hold_seconds:g} с; "
+                "Ctrl+C — закрыть"
+            )
+            try:
+                time.sleep(dashboard_hold_seconds)
+            except KeyboardInterrupt:
+                pass
     finally:
         if dashboard_server is not None:
             dashboard_server.stop()
@@ -329,6 +347,7 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--dashboard", action="store_true")
     parser.add_argument("--dashboard-tune", action="store_true")
+    parser.add_argument("--dashboard-hold-seconds", type=float, default=300.0)
     args = parser.parse_args(argv)
     if args.backend == "ics" and args.aircraft_profile is None:
         parser.error("для ICS требуется --aircraft-profile (например, mc21)")

@@ -264,3 +264,23 @@ def test_exact_leak_converges_to_the_plain_increment_for_small_dt():
     exact.compute(error, dt)
     plain.compute(error, dt)
     assert exact.integral == pytest.approx(plain.integral, rel=1e-4)
+
+
+def test_bumpless_gain_change_preserves_output_and_derivative_history():
+    pid = PIDController(
+        kp=0.2, ki=0.1, kd=0.05, min_out=-10.0, max_out=10.0,
+        anti_windup=100.0)
+    pid.compute(1.0, 0.1)
+    pid.compute(0.8, 0.1)
+    output = pid.last_output
+    previous_error = pid.prev_error
+    previous_input = pid._prev_deriv_input
+    derivative = pid.filtered_derivative
+
+    pid.set_gains_bumpless(kp=0.25, ki=0.2, kd=0.04)
+
+    assert pid.last_output == pytest.approx(output)
+    assert pid.prev_error == previous_error
+    assert pid._prev_deriv_input == previous_input
+    assert pid.filtered_derivative == derivative
+    assert pid.integral_min <= pid.integral <= pid.integral_max
