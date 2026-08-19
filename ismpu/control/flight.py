@@ -21,7 +21,7 @@ from ismpu.config.ics import (
 )
 from ismpu.config.segments import FlightSegment
 from ismpu.config.requirements import (
-    GO_AROUND_DECISION_HEIGHT_FT, GO_AROUND_LATERAL_GATE_BAND_FT,
+    GO_AROUND_DECISION_HEIGHT_FT, GO_AROUND_LATERAL_GATE_BAND_FT, GO_AROUND_DECISION_VELOCITY_KTS,
 )
 from ismpu.envs.ics_sim import Telemetry
 
@@ -89,10 +89,11 @@ def approach_blocker(telemetry: "Telemetry | None") -> "str | None":
     """
     if telemetry is None or not telemetry.airborne_data_available:
         return "нет воздушных сигналов backend"
-    phase = telemetry.flight_phase
-    if phase is not None and int(phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES:
-        return (f"FlightPhase={FlightPhase(int(phase)).name} несовместим с заходом: "
-                "стенд сохранил взлётную/наборную фазу")
+    # TODO: ICS can send incorrect flight phase
+    # phase = telemetry.flight_phase
+    # if phase is not None and int(phase) in AIRBORNE_APPROACH_BLOCKING_FLIGHT_PHASES:
+    #     return (f"FlightPhase={FlightPhase(int(phase)).name} несовместим с заходом: "
+    #             "стенд сохранил взлётную/наборную фазу")
     invalid = telemetry.invalid_approach_signals
     if invalid:
         return "невалидны обязательные воздушные сигналы: " + ", ".join(invalid)
@@ -115,6 +116,15 @@ def in_terminal_window(telemetry: "Telemetry | None", *, limit_ft: float = TERMI
         return True
     ra = telemetry.radio_altitude_ft
     return ra is not None and ra <= limit_ft
+
+
+def above_decision_velocity(telemetry: "Telemetry | None", *, limit_kts = GO_AROUND_DECISION_VELOCITY_KTS) -> bool:
+    if telemetry is None or not telemetry.airborne_data_available:
+        return False
+    if telemetry.main_gear_contact:
+        return False
+    vel = telemetry.groundspeed_ms
+    return vel is not None and vel <= limit_kts
 
 
 def above_decision_height(telemetry: "Telemetry | None", *, limit_ft: float = GO_AROUND_DECISION_HEIGHT_FT) -> bool:

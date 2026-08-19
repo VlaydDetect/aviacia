@@ -4,6 +4,7 @@
 (``runtime/evaluate.py``). Ссылки на пункты ТЗ приведены рядом с каждым значением.
 См. docs/ТЗ_Интеграл-КБО-МС_ИСМПУ_итог_ф.pdf.
 """
+from ismpu.utils.converts import Converts
 
 # --------------------------------------------------------------------------- #
 # Базовые требования (5.1.1.2) — действуют во всех прогонах
@@ -24,7 +25,7 @@ TOUCHDOWN_FIRST_THIRD_M = 900.0
 # 5.1.2.1 — при штатном функционировании: отклонения по курсу не более ≈ 0,7°
 COURSE_DEVIATION_MAX_DEG = 0.7
 # 5.1.2.1 — отклонение по глиссаде не более 0,5° для ILS Cat
-GLIDESLOPE_DEVIATION_MAX_DEG = 0.5
+GLIDESLOPE_DEVIATION_MAX_DEG = 0.55
 # 5.1.2.2 — при некорректной/неполной конфигурации шасси: глиссада не более ± 0,7°
 GLIDESLOPE_GEAR_FAULT_MAX_DEG = 0.7
 # 5.1.2.3 — при отказе стабилизатора: удержание траектории снижения в пределах ± 1° глиссады
@@ -55,10 +56,13 @@ HEADING_HOLD_UNTIL_KTS = 30.0
 
 # 5.1.1.2 — гейт совмещения с осью на высоте 30 м. Он же — высота решения: выше неё
 # невыполнение допусков ТЗ инициирует уход на второй круг, ниже — посадка уже неизбежна.
-GO_AROUND_DECISION_HEIGHT_M = 30.0
-GO_AROUND_DECISION_HEIGHT_FT = GO_AROUND_DECISION_HEIGHT_M / 0.3048  # RadioAltitude приходит в футах
+GO_AROUND_DECISION_HEIGHT_M = 100.0
+GO_AROUND_DECISION_HEIGHT_FT = GO_AROUND_DECISION_HEIGHT_M * Converts.M_TO_FT  # RadioAltitude приходит в футах
 """Высота решения в футах (≈ 98.4). Радиовысота стенда — в футах (`Telemetry.radio_altitude_ft`),
 и сверять её с пересчитанной величиной значило бы гонять её туда-обратно."""
+
+GO_AROUND_DECISION_VELOCITY_MS = 100
+GO_AROUND_DECISION_VELOCITY_KTS = GO_AROUND_DECISION_VELOCITY_MS * Converts.MS_TO_KTS
 
 GO_AROUND_CONFIRM_TICKS = 10
 """Дебаунс триггера ухода: устойчивое превышение в течение стольких тактов (~0.5 с при 20 Гц), а

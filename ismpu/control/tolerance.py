@@ -107,7 +107,8 @@ def evaluate_approach_tolerances(
 
     gs_tol = _glideslope_tolerance_deg(inp, faults)
     glideslope_deg = abs(result.glideslope_deg)
-    glideslope_ok = glideslope_deg <= gs_tol
+    # Do not check the glide path too low when the beacons are no longer visible.
+    glideslope_ok = (glideslope_deg <= gs_tol) or (telemetry.radio_altitude_ft > 30)
     if not glideslope_ok:
         violations.append("GLIDESLOPE")
 

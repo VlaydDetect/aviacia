@@ -27,7 +27,7 @@ from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerance
 from ismpu.control.failures import FailureManager
 from ismpu.control.flight import (
     FlightSegment, ApproachRefused, initial_segment, segment_is_decidable, touched_down,
-    approach_blocker, ils_blocker, above_decision_height, at_lateral_alignment_gate,
+    approach_blocker, ils_blocker, above_decision_height, at_lateral_alignment_gate, above_decision_velocity,
 )
 from ismpu.config.approach import ApproachConfig
 from ismpu.config.constants import TARGET_SPEED_KTS
@@ -472,6 +472,9 @@ class ControllingSystem:
             self._violation_ticks = 0
             return None
         if not above_decision_height(telemetry):
+            self._violation_ticks = 0
+            return None
+        if not above_decision_velocity(telemetry):
             self._violation_ticks = 0
             return None
         if not self._reverse_stowed():

@@ -10,6 +10,7 @@ class Converts:
     MS_TO_KTS: ClassVar[float] = 1.94384449244
 
     FT_TO_M: ClassVar[float] = 0.3048
+    M_TO_FT: ClassVar[float] = 3.28
 
     FTM_TO_MS: ClassVar[float] = FT_TO_M / 60.0  # VerticalSpeed: фут/мин → м/с
     KTS_TO_FTM: ClassVar[float] = 101.2686
