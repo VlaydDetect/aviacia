@@ -147,16 +147,16 @@ _RIGHT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     lookahead_min=10.0, lookahead_gain=1.6, xte_gain=2.0, steering_brake_gain=0.4,
 )
 
-# right wind (90 deg) 20 kts
+# right wind (90 deg) with speed: 5, 10,20, 30 kts
 _RIGHT_WIND_SPEC = _GroundPresetSpec(
     name="right_wind",
     weather=WeatherState.from_crosswind(20.0, 0.0),
-    runway_center=dict(kp=0.1, ki=0.1, kd=0.3, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+    runway_center=dict(kp=0.12, ki=0.07, kd=0.26, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
     rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.7, xte_gain=1.3, steering_brake_gain=0.35, steering_rev_gain=0.53
+    lookahead_min=10.0, lookahead_gain=1.2, xte_gain=1.6, steering_brake_gain=0.5, steering_rev_gain=0.5
 )
 
 _WET_RWY_SPEC = _GroundPresetSpec(

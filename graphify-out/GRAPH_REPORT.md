@@ -1,16 +1,16 @@
 # Graph Report - GOSNIIASProject  (2026-08-20)
 
 ## Corpus Check
-- 141 files · ~142,681 words
+- 141 files · ~142,578 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 2561 nodes · 5355 edges · 249 communities (130 shown, 119 thin omitted)
-- Extraction: 95% EXTRACTED · 5% INFERRED · 0% AMBIGUOUS · INFERRED: 292 edges (avg confidence: 0.6)
+- 2561 nodes · 5350 edges · 247 communities (129 shown, 118 thin omitted)
+- Extraction: 95% EXTRACTED · 5% INFERRED · 0% AMBIGUOUS · INFERRED: 287 edges (avg confidence: 0.6)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `66753da5`
+- Built from commit: `75765ea4`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,23 +19,23 @@
 - GainMap
 - ndarray
 - test_evaluate.py
-- ICSBenchConnector
+- rollout_bridge.py
 - json_config.py
 - SimInterface
-- ControlsState
+- airborne_inputs
 - Scenario
 - GainKey
 - Telemetry
-- test_default_config_carries_the_tuned_bench_gains
+- xplane_sim.py
 - float32
 - test_sft_regressors.py
-- test_ics_connector.py
+- ics_connector.py
 - test_run_matrix.py
 - AircraftProfile
-- airborne_inputs
+- .from_ics
 - control/approach.py
 - DashboardServer
-- test_icd_units.py
+- weather.py
 - XPlaneSim
 - Any
 - PIDController
@@ -47,7 +47,7 @@
 - IcsEngagement
 - ground_allocator.py
 - ._fail
-- Telemetry
+- ._approach_step
 - Graphify Pipeline
 - XPlaneConnector
 - ControllingSystem
@@ -69,10 +69,10 @@
 - Hybrid Neural PID Controller
 - test_approach_criteria.py
 - run_artifacts.py
-- sim_interface.py
+- RomanLogImporter
 - RunwayTracker
 - ICSSim
-- ICSInputs
+- working_ics/approach_criteria.py
 - test_dashboard.py
 - pretrain.py
 - ._apply
@@ -106,7 +106,7 @@
 - import_workbook
 - FlightSegment
 - LateralChannel
-- RunReader
+- .reset
 - initial_segment
 - .read_telemetry
 - ApproachConfig
@@ -130,10 +130,10 @@
 - Q: Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md).
 - config/approach.py
 - ndarray
-- .neutralize_airborne
+- ControlsState
 - Q: Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md).
 - evaluate.py
-- ._approach_step
+- MatrixCase
 - ControlModeState
 - ICSInputs
 - ICSOutputs
@@ -152,9 +152,9 @@
 - WeatherState
 - Q: Приступай к выполнению этапа 2 плана docs/plan.md
 - ControlsState
-- ClearWeatherILSController
+- DashboardState
 - TypedDict
-- xplane_sim.py
+- FrictionProfile
 - FailureMode
 - RunwayProfile
 - pid_controller.py
@@ -162,13 +162,13 @@
 - ApproachChannel
 - Scenario
 - WeatherState
-- .from_dict
+- .begin_flight
 - StartMode
 - Enum
 - PidMap
 - GuidanceState
 - PidMap
-- weather.py
+- protocol.py
 - Normalization
 - .__init__
 - Scenario
@@ -178,22 +178,20 @@
 - RewardWeights
 - TypedDict
 - failures.py
-- .reset
+- sim_interface.py
 - RunSample
 - RegulatorKey
 - test_refactoring_contracts.py
 - Q: Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md).
 - ApproachLimits
-- VlaydRolloutBridge
+- ShutdownReport
 - ICSInputs
 - PidMap
 - ApproachTelemetry
 - Any
 - ArrayLike
 - float32
-- LongitudinalChannel
 - NDArray
-- ShutdownReport
 - Tensor
 - ApproachLimits
 - Q: Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md).
@@ -267,9 +265,9 @@
 
 ## God Nodes (most connected - your core abstractions)
 1. `ControllingSystem` - 128 edges
-2. `Telemetry` - 83 edges
+2. `Telemetry` - 77 edges
 3. `ICSSim` - 72 edges
-4. `ControlsState` - 57 edges
+4. `ControlsState` - 56 edges
 5. `XPlaneSim` - 54 edges
 6. `airborne_inputs()` - 51 edges
 7. `RunRecorder` - 46 edges
@@ -280,14 +278,14 @@
 ## Surprising Connections (you probably didn't know these)
 - `Autonomous Landing Controller` --semantically_similar_to--> `Autonomous Landing Controller`  [INFERRED] [semantically similar]
   CLAUDE.md → AGENTS.md
-- `test_preset_apply_control_matches_direct_config_apply()` --calls--> `ControllingSystem`  [EXTRACTED]
-  tests/test_ics_sim.py → ismpu/control/system.py
-- `DatagramSocket` --uses--> `ControllingSystem`  [INFERRED]
-  tests/test_refactoring_contracts.py → ismpu/control/system.py
-- `test_applying_each_b42_segment_rebuilds_the_relevant_pids()` --calls--> `ControllingSystem`  [EXTRACTED]
-  tests/test_run_matrix.py → ismpu/control/system.py
-- `test_approach_setup_rebuilds_regulators()` --calls--> `ControllingSystem`  [EXTRACTED]
-  tests/test_run_matrix.py → ismpu/control/system.py
+- `DatagramSocket` --uses--> `ControlsState`  [INFERRED]
+  tests/test_xplane_backend.py → ismpu/control/channels.py
+- `MockXPlaneConnector` --uses--> `ControlsState`  [INFERRED]
+  tests/test_xplane_backend.py → ismpu/control/channels.py
+- `ScriptedXPlaneConnector` --uses--> `ControlsState`  [INFERRED]
+  tests/test_xplane_backend.py → ismpu/control/channels.py
+- `_record_ground_run()` --calls--> `RunRecorder`  [INFERRED]
+  tests/test_run_reader.py → ismpu/runtime/run_artifacts.py
 
 ## Import Cycles
 - 3-file cycle: `ismpu/control/channels.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/control/channels.py`
@@ -296,20 +294,20 @@
 - 3-file cycle: `ismpu/config/aircraft_profiles.py -> ismpu/control/channels.py -> ismpu/envs/ics_sim.py -> ismpu/config/aircraft_profiles.py`
 - 4-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/approach.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
 - 4-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
-- 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/approach.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
 - 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/tolerance.py -> ismpu/control/approach.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
-- 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/approach_criteria.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
+- 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/approach.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
+- 5-file cycle: `ismpu/config/aircraft_profiles.py -> ismpu/control/channels.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py -> ismpu/config/aircraft_profiles.py`
 - 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/channels.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
 - 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/flight.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
+- 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/approach_criteria.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
 - 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/ground_allocator.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
 - 5-file cycle: `ismpu/config/scenarios.py -> ismpu/control/system.py -> ismpu/control/tolerance.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py`
-- 5-file cycle: `ismpu/config/aircraft_profiles.py -> ismpu/control/channels.py -> ismpu/envs/ics_sim.py -> ismpu/envs/sim_interface.py -> ismpu/config/scenarios.py -> ismpu/config/aircraft_profiles.py`
 
 ## Hyperedges (group relationships)
 - **Graphify Extraction and Build Flow** — _codex_skills_graphify_skill_structural_extraction, _codex_skills_graphify_skill_semantic_extraction, _codex_skills_graphify_references_extraction_spec_semantic_extraction_contract, _codex_skills_graphify_references_update_build_merge [EXTRACTED 1.00]
 - **PID Dashboard Ecosystem** — docs_xplane_dashboard_pid_dashboard, ismpu_gui_dashboard_pid_dashboard, ismpu_working_ics_ics_dashboard_ics_pid_monitor [INFERRED 0.85]
 
-## Communities (249 total, 119 thin omitted)
+## Communities (247 total, 118 thin omitted)
 
 ### Community 0 - "RunRecorder"
 Cohesion: 0.15
@@ -319,9 +317,9 @@ Nodes (16): Скопировать канонический preset и замен
 Cohesion: 0.26
 Nodes (21): evaluate_tz(), Преобразовать наземные метрики запуска в вердикты раздела 5 ТЗ., Вернуть ``FAIL``, если провален хотя бы один применимый критерий., verdict_of(), _by_name(), _diagnostics(), Регрессии чистых вердиктов ТЗ: пределы, применимость и отсутствие данных., Вернуть полный штатный набор метрик с запасом до каждого допуска. (+13 more)
 
-### Community 4 - "ICSBenchConnector"
+### Community 4 - "rollout_bridge.py"
 Cohesion: 0.11
-Nodes (11): ICSBenchConnector, Отправка best-effort со счётчиком ошибок и разрежённым логом. Windows отдаёт…, → True если отправлено. Исключение наружу не выпускается., Мост к стенду: JSON поверх UDP, адрес стенда определяется из входящего пакета., Приём телеметрии стенда. Адрес отправителя определяется автоматически., Дождаться кадра и отбросить накопившийся UDP backlog, оставив самый свежий.…, Зафиксировать и разобрать один уже принятый UDP payload., Отправка управления на стенд. → отправлено ли (исключение наружу не… (+3 more)
+Nodes (14): ICSBenchConnector, Мост к стенду: JSON поверх UDP, адрес стенда определяется из входящего пакета., Приём телеметрии стенда. Адрес отправителя определяется автоматически., Дождаться кадра и отбросить накопившийся UDP backlog, оставив самый свежий.…, Зафиксировать и разобрать один уже принятый UDP payload., Отправка управления на стенд. → отправлено ли (исключение наружу не…, Число последовательных best-effort ошибок текущего sender., Освободить единственный UDP-сокет коннектора. (+6 more)
 
 ### Community 5 - "json_config.py"
 Cohesion: 0.12
@@ -331,25 +329,29 @@ Nodes (38): approach_control_from_dict(), approach_control_to_dict(), _copy_appr
 Cohesion: 0.10
 Nodes (5): BaseException, StartMode, Минимальный lifecycle, одинаковый для стенда и X-Plane., SimInterface, Protocol
 
-### Community 7 - "ControlsState"
+### Community 7 - "airborne_inputs"
 Cohesion: 0.09
-Nodes (47): angle_error_deg(), Разность курсов, приведённая к (-180, 180]., ControlsState, Разделяемая по тактам структура команд — и наземных, и воздушных. Аннотации…, _colleague_controller(), _descent_frames(), _our_channel(), Воздушный канал: заход по ILS, выравнивание, скоростной канал. Главный тест… (+39 more)
+Nodes (47): angle_error_deg(), Разность курсов, приведённая к (-180, 180]., airborne_inputs(), Кадр «ВС на глиссаде»: стойки не обжаты, ILS валиден, скорость и высота…, _colleague_controller(), _descent_frames(), _our_channel(), Воздушный канал: заход по ILS, выравнивание, скоростной канал. Главный тест… (+39 more)
 
 ### Community 8 - "Scenario"
 Cohesion: 0.11
-Nodes (27): AircraftProfile, FailureMode, FlightSegment, _profile_name(), Оценить близость telemetry к preset; несовпадение отказа доминирует над погодой., Выбрать ближайший нематричный preset, не допуская draft без явного флага., Подобрать нематричный preset по валидной telemetry или безопасным defaults., Полный профильный сценарий APPROACH → ROLLOUT → TAXI. (+19 more)
+Nodes (27): AircraftProfile, FailureMode, FlightSegment, _profile_name(), Выбрать ближайший нематричный preset, не допуская draft без явного флага., Подобрать нематричный preset по валидной telemetry или безопасным defaults., Полный профильный сценарий APPROACH → ROLLOUT → TAXI., Вернуть effective control с override конкретного ``matrix_run_id``. (+19 more)
 
 ### Community 10 - "Telemetry"
 Cohesion: 0.09
 Nodes (14): Телеметрия стенда, приведённая к **СИ**. Проверять надо `valid` **до** полей:…, Невалидные ICS-сигналы, которые воздушный закон читает безусловно., Приборная скорость (kt → м/с). Отсечки реверса заданы по ней, а не по путевой., Радиовысота **в футах** — единицы стенда. Порог воздушного включения (400…, Объявлены ли валидными **оба** канала ILS (курсовой и глиссадный). `None` —…, Посадочная конфигурация механизации; `None` — положение не посадочное. `None`…, Боковое отклонение от оси, измеренное стендом. Позволяет не считать геодезию…, Обжатие ВСЕХ стоек. Диагностический сигнал; условие включения проверяет сам… (+6 more)
 
+### Community 11 - "xplane_sim.py"
+Cohesion: 0.16
+Nodes (10): Профили преобразования команд ИСМПУ в органы управления X-Plane., Расширение реестра будущим профилем МС-21 без правки XPlaneSim., Проводка и масштабы конкретного планера X-Plane., register_aircraft_profile(), XPlaneAircraftBinding, Глобальные константы контура управления (перенесены из main.ipynb)., Каналы управления и общий вектор команд. `ControlsState` — разделяемая по…, Слежение за осью ВПП: геодезия, cross-track error, guidance с look-ahead.… (+2 more)
+
 ### Community 13 - "test_sft_regressors.py"
 Cohesion: 0.12
 Nodes (19): feature_schema_hash(), GainGuard, Минимальная SFT-модель абсолютных коэффициентов PID и общий runtime guard., Стабильный hash порядка признаков; перестановка является сменой контракта., Проверяет prediction и ограничивает скорость изменения до записи в PID., Проверить prediction и ограничить его относительно accepted preset/предыдущего…, checkpoint_metadata(), Path (+11 more)
 
-### Community 14 - "test_ics_connector.py"
-Cohesion: 0.09
-Nodes (25): GearState, IntEnum, Разбор телеметрии стенда с совместимостью вперёд. Асимметрия намеренная (JSON-…, Дискретное положение стойки в кодировке ICSInputs., Состояние створок реверса; величину задаёт отрицательный throttle rate., ReverseEngineType, _connector(), _FakeSocket (+17 more)
+### Community 14 - "ics_connector.py"
+Cohesion: 0.07
+Nodes (34): ControlModeState, GearState, ICSOutputs, IntEnum, UDP-мост к стенду заказчика (порт 3030) — транспорт пути поставки. `ICSInputs`…, Разбор телеметрии стенда с совместимостью вперёд. Асимметрия намеренная (JSON-…, Команды и mode flags, сериализуемые ровно в ожидаемый стендом JSON., Сериализовать enums и 14 reserved zeros в точные UTF‑8 bytes wire contract. (+26 more)
 
 ### Community 15 - "test_run_matrix.py"
 Cohesion: 0.10
@@ -359,9 +361,9 @@ Nodes (21): compose_matrix_scenario(), _install_through_scenarios(), Сцена�
 Cohesion: 0.12
 Nodes (6): AircraftProfile, clamp(), Преобразовать воздушные команды ICD в нормированные DataRef X-Plane., Преобразовать нормированные команды пробега в DataRef X-Plane., Общая идентичность ЛА и необязательная привязка к X-Plane. Профиль нужен и…, Command refs retained under the historical public name.
 
-### Community 17 - "airborne_inputs"
-Cohesion: 0.12
-Nodes (22): `ICSInputs` → `Telemetry`: поля в СИ + «сырой» пакет для property. Стенд отдаёт…, airborne_inputs(), Кадр «ВС на глиссаде»: стойки не обжаты, ILS валиден, скорость и высота…, Носовая стойка обжимается позже основных — ждать её значит пропустить начало…, «Козление» после касания снимает обжатие на секунду — назад в заход…, В такте касания команда обязана быть уже наземной, а не последней командой…, Таблицы захода МС-21 к чистому крылу неприменимы — вести по ним нельзя.…, Координаты захода не делают безопасным кадр с оставшимся INIT_CLIMB и взлётным… (+14 more)
+### Community 17 - ".from_ics"
+Cohesion: 0.09
+Nodes (26): `ICSInputs` → `Telemetry`: поля в СИ + «сырой» пакет для property. Стенд отдаёт…, RunwayProfile, engaged_inputs(), Кадр стенда, который уже принял управление: `AgentIsActive = 1`, идёт пробег., test_authority_safety_gate_uses_finite_airborne_telemetry(), Носовая стойка обжимается позже основных — ждать её значит пропустить начало…, «Козление» после касания снимает обжатие на секунду — назад в заход…, В такте касания команда обязана быть уже наземной, а не последней командой… (+18 more)
 
 ### Community 18 - "control/approach.py"
 Cohesion: 0.06
@@ -371,9 +373,9 @@ Nodes (51): ApproachLimits, ApproachTelemetry, alpha_prot_deg(), approach_limits
 Cohesion: 0.24
 Nodes (5): DashboardServer, Loopback-only HTTP lifecycle вокруг одного ``DashboardState``., Фактически привязанные host/port, включая ephemeral port 0 в тестах., Идемпотентно запустить daemon HTTP thread., Отклонить pending tuning, остановить thread и закрыть listening socket.
 
-### Community 20 - "test_icd_units.py"
-Cohesion: 0.10
-Nodes (19): Сверка каждого сигнала стенда с документами Заказчика. Два независимых…, Стенд шлёт узлы, футы, фут/мин и град/с — граница пересчёта в СИ проходит в…, 1 фут/мин = 0.3048/60 м/с. Приближение здесь копится на всём заходе., Нумерация фаз из doc-комментария `FlightPhase` в ICSInterface.cs., −26.5…55.0° — фактическое положение РУД во входной телеметрии, не команда., Наши константы обязаны совпадать с таблицей управляющих сигналов Заказчика., Тиллер задаётся ходом в миллиметрах. Отдельным тестом, потому что ошибка была…, 0–45 мм командует, 0–36.73 мм отчитывается. Подмена недодаёт ~18 % хода. (+11 more)
+### Community 20 - "weather.py"
+Cohesion: 0.08
+Nodes (27): Enum, Погодные условия эпизода: описание, шкала сцепления и разбор ветра. Модуль **не…, Состояние ВПП как **монотонная шкала скользкости** 0…15 (0 — сухо, 15 — лёд со…, Код состояния ВПП со стенда → наша шкала. Неизвестный код трактуется как `ICY`,…, runway_condition_from_bench(), RunwayCondition, Сверка каждого сигнала стенда с документами Заказчика. Два независимых…, Стенд шлёт узлы, футы, фут/мин и град/с — граница пересчёта в СИ проходит в… (+19 more)
 
 ### Community 21 - "XPlaneSim"
 Cohesion: 0.14
@@ -393,7 +395,7 @@ Nodes (14): MockXPlaneConnector, ScriptedXPlaneConnector, test_commands_failures
 
 ### Community 27 - "test_ics_sim.py"
 Cohesion: 0.06
-Nodes (38): engaged_sim(), (sim, connector) с завершённым рукопожатием: стенд подтвердил `AgentIsActive =…, _cold_sim(), Тесты стенда (`ICSSim`) и подбора сценария — без реального стенда., Разделение органов из таблицы Заказчика: тиллер — на рулении, педальный пост —…, Заявить канал, который не формируешь, — взять ответственность за неуправляемый…, 31 — единственная маска, с которой заход реально прошёл на стенде. Проверяется…, Один бит на одно командное поле `ICSOutputs` — иначе заявка попадает не в тот… (+30 more)
+Nodes (35): engaged_sim(), (sim, connector) с завершённым рукопожатием: стенд подтвердил `AgentIsActive =…, Регресс: расширение структуры не должно протащить руль высоты в маску пробега., test_ground_frame_still_declares_only_the_ground_channels(), Тесты стенда (`ICSSim`) и подбора сценария — без реального стенда., Разделение органов из таблицы Заказчика: тиллер — на рулении, педальный пост —…, Заявить канал, который не формируешь, — взять ответственность за неуправляемый…, 31 — единственная маска, с которой заход реально прошёл на стенде. Проверяется… (+27 more)
 
 ### Community 29 - "IcsEngagement"
 Cohesion: 0.05
@@ -404,12 +406,12 @@ Cohesion: 0.19
 Nodes (15): LateralDiagnostics, LongitudinalDiagnostics, FailureState, Эффективности исполнительных органов. Аннотации типов обязательны: без них…, ActuatorFeedback, ActuatorVector, AllocationDiagnostics, _clamp() (+7 more)
 
 ### Community 31 - "._fail"
-Cohesion: 0.25
+Cohesion: 0.23
 Nodes (4): Exception, Поставить запись без блокировки control thread; переполнение инвалидирует run., Сохранить полный effective config; канонические config-файлы не затрагиваются., RunEvent
 
-### Community 32 - "Telemetry"
+### Community 32 - "._approach_step"
 Cohesion: 0.11
-Nodes (17): approach_blocker(), ApproachRefused, Воздушный участок начинать нельзя — с названной причиной. Отдельное исключение,…, Можно ли вообще судить об участке по этому кадру. Кадр без пакета стенда…, Почему нельзя вести заход по этому кадру. `None` — можно. Пока проверка одна,…, segment_is_decidable(), FlightSegment, Telemetry (+9 more)
+Nodes (14): approach_blocker(), Почему нельзя вести заход по этому кадру. `None` — можно. Пока проверка одна,…, Telemetry, Привести модель отказов к тому, что сообщает борт (`ICSInputs.Fault*`). Отказы…, Досчитать отложенное решение об участке на первом пригодном кадре., Такт управления. → True, если управление окончено (или телеметрия невалидна).…, Такт воздушного участка. → True, если управлять больше нечем. Касание…, Зафиксировать `Approach → Landing` на 25 ft без смены воздушного закона. (+6 more)
 
 ### Community 33 - "Graphify Pipeline"
 Cohesion: 0.08
@@ -421,51 +423,51 @@ Nodes (23): DataRefSample, Неблокирующий UDP-клиент нати�
 
 ### Community 35 - "ControllingSystem"
 Cohesion: 0.07
-Nodes (37): ControllingSystem, Связать сценарий с контуром; PID активируются после определения участка., Разорвать D-history после пропуска устаревшей UDP-очереди, не трогая интегралы., Оркестратор классического контура поверх стенда (`envs.ics_sim.ICSSim`).…, Аварийная остановка: обнулить органы и **снять заявку каналов**. Именно…, decode_outputs(), Готовый кадр `Telemetry` для прямых вызовов `control_step(dt, telemetry,…, Отправленные команды в нормированном виде — для сравнения траекторий.… (+29 more)
+Nodes (36): ControllingSystem, Связать сценарий с контуром; PID активируются после определения участка., Разорвать D-history после пропуска устаревшей UDP-очереди, не трогая интегралы., Оркестратор классического контура поверх стенда (`envs.ics_sim.ICSSim`).…, Аварийная остановка: обнулить органы и **снять заявку каналов**. Именно…, decode_outputs(), Готовый кадр `Telemetry` для прямых вызовов `control_step(dt, telemetry,…, Отправленные команды в нормированном виде — для сравнения траекторий.… (+28 more)
 
 ### Community 36 - "test_ground_controller.py"
 Cohesion: 0.11
-Nodes (26): _lost_engagement(), SimInterface, Снял ли стенд активность посреди прогона. → пора останавливаться. Без этой…, Компактные перцентили миллисекунд без зависимости в критическом пути., Прогоняет один полёт на уже настроенном контуре., run(), _timing_summary(), parametrize (+18 more)
+Nodes (27): _lost_engagement(), SimInterface, Снял ли стенд активность посреди прогона. → пора останавливаться. Без этой…, Компактные перцентили миллисекунд без зависимости в критическом пути., Прогоняет один полёт на уже настроенном контуре., run(), _timing_summary(), parametrize (+19 more)
 
 ### Community 37 - "test_ics_engagement.py"
 Cohesion: 0.10
 Nodes (49): _Clock, _engine(), _pump(), Автомат включения управления на стенде. Два раздельных предмета проверки: *…, По ICD стенд должен два секунды ПОЛУЧАТЬ ModeAIReady=1. Если считать одно лишь…, Обратная защита: 30 кадров можно выпалить за 0.1 с — время тоже обязано пройти., Срыв предусловия обнуляет и время, и счётчик кадров., Требование ICD — непрерывность: пропуск готовности рвёт серию. (+41 more)
 
 ### Community 38 - "run_reader.py"
-Cohesion: 0.12
-Nodes (19): _apply_recorded_gains(), _bool_or_none(), _equal(), main(), _number(), _parse_cell(), ControllingSystem, Единое потоковое чтение run-directory, replay и прежних CSV. (+11 more)
+Cohesion: 0.09
+Nodes (23): _apply_recorded_gains(), _bool_or_none(), _equal(), main(), _number(), _parse_cell(), ControllingSystem, Path (+15 more)
 
 ### Community 39 - "sft.py"
 Cohesion: 0.13
 Nodes (23): GuardResult, Фактически разрешённые gains и причина ограничений/fallback., apply_gain_vector(), controller_gain_vector(), _feature_value(), feature_vector(), gain_vector_from_row(), _number() (+15 more)
 
 ### Community 40 - "test_diagnostic_tools.py"
-Cohesion: 0.20
-Nodes (19): build_altitude_sweep(), command_for_pulse(), Безопасные elevator/altitude authority sweep без дублирования ICS runner., Чистое преобразование, пригодное и для dry-run, и для ICSSim., safety_reason(), SweepLimits, SweepPulse, validate_pulse() (+11 more)
+Cohesion: 0.21
+Nodes (18): build_altitude_sweep(), command_for_pulse(), Безопасные elevator/altitude authority sweep без дублирования ICS runner., Чистое преобразование, пригодное и для dry-run, и для ICSSim., safety_reason(), SweepLimits, SweepPulse, validate_pulse() (+10 more)
 
 ### Community 41 - "fakes.py"
 Cohesion: 0.08
-Nodes (23): IntEnum, FlightPhase, Фаза полёта, сообщаемая стендом (`ICSInputs.FlightPhase`)., ControlModeState, Режим управления/индикации, передаваемый в каждом ICSOutputs., decode_airborne(), flight_sim(), _integrate_throttle() (+15 more)
+Nodes (23): IntEnum, FlightPhase, Фаза полёта, сообщаемая стендом (`ICSInputs.FlightPhase`)., decode_airborne(), flight_sim(), _integrate_throttle(), kinematic_sim(), KinematicBench (+15 more)
 
 ### Community 43 - "ICSInputs"
-Cohesion: 0.16
-Nodes (22): ControlResult, ICSInputs, ICSOutputs, UDP-мост к стенду заказчика (порт 3030) — транспорт пути поставки. `ICSInputs`…, Неизвестные поля исходного JSON; они доступны аудиту, но не закону управления., Команды и mode flags, сериализуемые ровно в ожидаемый стендом JSON., Сериализовать enums и 14 reserved zeros в точные UTF‑8 bytes wire contract., Полная известная входная схема стенда; единицы определены в ``ICSInterface.cs``. (+14 more)
+Cohesion: 0.14
+Nodes (24): ControlResult, ICSInputs, Неизвестные поля исходного JSON; они доступны аудиту, но не закону управления., Полная известная входная схема стенда; единицы определены в ``ICSInterface.cs``., airborne_control_mode(), airborne_flare_mode(), deactivate(), live_main() (+16 more)
 
 ### Community 45 - "3. Этапы реализации"
 Cohesion: 0.09
 Nodes (21): 1. Подтверждённые проблемы и целевое состояние, 2. Ключевые интерфейсы, 3. Этапы реализации, 4. Тестирование и критерии готовности, 5. Зафиксированные допущения, 6.1. Один dashboard вместо двух, 6.2. Единый источник данных, 6.3. Представления (+13 more)
 
 ### Community 46 - "FakeConnector"
-Cohesion: 0.10
-Nodes (21): FakeConnector, make_ics_inputs(), Статический стенд: всегда один и тот же кадр, отправленное — в `sent_outputs`., Полный пакет стенда: нули по умолчанию + заданные поля., Неизвестный код — не повод предполагать сухую полосу., Погоду задаёт Заказчик; наш `WeatherState` — это прочитанный кадр, а не задание., До рукопожатия заявлять каналы нельзя: стенд ещё не разрешил нам ими управлять., Стенд отдаёт узлы, футы, футы/мин и градусы/с — граница пересчёта проходит… (+13 more)
+Cohesion: 0.11
+Nodes (19): FakeConnector, make_ics_inputs(), Статический стенд: всегда один и тот же кадр, отправленное — в `sent_outputs`., Полный пакет стенда: нули по умолчанию + заданные поля., Неизвестный код — не повод предполагать сухую полосу., Погоду задаёт Заказчик; наш `WeatherState` — это прочитанный кадр, а не задание., До рукопожатия заявлять каналы нельзя: стенд ещё не разрешил нам ими управлять., Стенд отдаёт узлы, футы, футы/мин и градусы/с — граница пересчёта проходит… (+11 more)
 
 ### Community 47 - "test_profiled_scenarios.py"
-Cohesion: 0.28
-Nodes (6): compose_scenario(), Собрать сценарий из независимых источников участков., Contracts of the unified aircraft-profiled scenario model., test_automatic_selection_never_falls_back_to_a_draft_profile_branch(), test_composition_keeps_repeated_failures_as_one_set_member(), test_composition_selects_each_phase_and_preserves_provenance()
+Cohesion: 0.14
+Nodes (11): Any, compose_scenario(), Serialize only the canonical profile- and matrix-aware schema v3., Прочитать schema v3 либо явно мигрируемую v1/v2 конфигурацию., Собрать сценарий из независимых источников участков., Contracts of the unified aircraft-profiled scenario model., test_automatic_selection_never_falls_back_to_a_draft_profile_branch(), test_composition_keeps_repeated_failures_as_one_set_member() (+3 more)
 
 ### Community 49 - "test_full_flight.py"
-Cohesion: 0.09
-Nodes (36): IntFlag, ControlValid, Биты `ControlValidMask`: какие каналы несёт команда. **Один бит на одно…, _air(), _Clock, _engaged_airborne_sim(), _pump(), parametrize (+28 more)
+Cohesion: 0.10
+Nodes (32): IntFlag, ControlValid, Биты `ControlValidMask`: какие каналы несёт команда. **Один бит на одно…, _air(), _Clock, _engaged_airborne_sim(), _pump(), parametrize (+24 more)
 
 ### Community 50 - "test_go_around.py"
 Cohesion: 0.14
@@ -480,12 +482,12 @@ Cohesion: 0.18
 Nodes (12): angular_error_deg(), ApproachCriteriaConfig, ApproachCriteriaMonitor, ApproachCriteriaSample, ApproachCriteriaVerdict, Отдельный монитор критерия А.1.1 (не участвует в go-around)., Захватывает А.1.1 после входа в допуск и завершает оценку на 300 ft., frame() (+4 more)
 
 ### Community 53 - "run_artifacts.py"
-Cohesion: 0.19
-Nodes (17): controller_pids(), _csv_value(), default_runs_root(), _effective_configs(), gains_snapshot(), _git_state(), _jsonable(), _matrix_rows() (+9 more)
+Cohesion: 0.17
+Nodes (18): controller_pids(), _csv_value(), default_runs_root(), _effective_configs(), gains_snapshot(), _git_state(), _jsonable(), _matrix_rows() (+10 more)
 
-### Community 54 - "sim_interface.py"
-Cohesion: 0.25
-Nodes (8): ControlDiagnostics, Enum, Общий контракт симулятора и воздушных сигналов. ICS и X-Plane различаются…, Исчерпывающие причины штатного/аварийного завершения единого runtime loop., Причина остановки вместе с best-effort результатом освобождения backend., Backend-neutral диагностические значения текущего управляющего такта., RunResult, RunStopReason
+### Community 54 - "RomanLogImporter"
+Cohesion: 0.19
+Nodes (10): _number(), Path, Импорт и проверка внешних CSV-прогонов roman_aviacia_ics., Потоково нормализует основной и authority CSV Романа., RomanLogImporter, verify_manifest(), fixture, roman_csv() (+2 more)
 
 ### Community 55 - "RunwayTracker"
 Cohesion: 0.12
@@ -495,9 +497,9 @@ Nodes (13): CompletionRule, Решить прямую геодезическую
 Cohesion: 0.09
 Nodes (12): ICSSim, FailureMode, SimInterface, Обмен со стендом заказчика: телеметрия внутрь, команды наружу. Управление…, Принимает ли стенд наши команды. До включения любой `step` уходит вхолостую., Сколько устаревших UDP-кадров сброшено при последнем чтении., Войти в пробег самостоятельно (`ControlMode 0 → 3`)., Перейти `Approach → Landing`; сессия и воздушные каналы сохраняются. (+4 more)
 
-### Community 57 - "ICSInputs"
-Cohesion: 0.13
-Nodes (14): angular_error_deg(), ApproachCriteriaConfig, ApproachCriteriaMonitor, ApproachCriteriaSample, ApproachCriteriaVerdict, ICSInputs, Evaluate the A.1.1 approach segment and stop at a radio-altitude floor., ControlModeState (+6 more)
+### Community 57 - "working_ics/approach_criteria.py"
+Cohesion: 0.21
+Nodes (7): angular_error_deg(), ApproachCriteriaConfig, ApproachCriteriaMonitor, ApproachCriteriaSample, ApproachCriteriaVerdict, ICSInputs, Evaluate the A.1.1 approach segment and stop at a radio-altitude floor.
 
 ### Community 58 - "test_dashboard.py"
 Cohesion: 0.20
@@ -548,16 +550,16 @@ Cohesion: 0.25
 Nodes (9): Nine-View PID Dashboard, Run Recording Artifacts, buildTabs, draw, Gain Tuning and Snapshot Export, Interactive PID Dashboard, refresh, render (+1 more)
 
 ### Community 73 - "MatrixRun"
-Cohesion: 0.05
-Nodes (15): MatrixCase, MatrixCondition, MatrixRun, _number(), Any, FailureMode, FlightSegment, WeatherState (+7 more)
+Cohesion: 0.12
+Nodes (5): MatrixRun, FailureMode, FlightSegment, Одна из 280 строк: задание оператору и критерии конкретного прогона., _segment_for_code()
 
 ### Community 74 - "test_weather.py"
-Cohesion: 0.18
-Nodes (13): compose_wind(), decompose_wind(), (скорость, откуда) → (crosswind, headwind) относительно курса ВПП. crosswind >…, (crosswind, headwind) → (скорость, откуда, °). Обратна `decompose_wind`., Тесты погоды: разбор ветра, шкала скользкости и чтение условий из пакета стенда., Для пробега существенна боковая составляющая, а не «скорость ветра» сама по…, Все семь кодов из фактических пакетов закрыты явно., test_crosswind_from_right_is_perpendicular() (+5 more)
+Cohesion: 0.13
+Nodes (17): compose_wind(), decompose_wind(), (скорость, откуда) → (crosswind, headwind) относительно курса ВПП. crosswind >…, (crosswind, headwind) → (скорость, откуда, °). Обратна `decompose_wind`., Тесты погоды: разбор ветра, шкала скользкости и чтение условий из пакета стенда., Для пробега существенна боковая составляющая, а не «скорость ветра» сама по…, Коды стенда не упорядочены по скользкости: WET RUBBER=14 близок к WET=2. Подать…, Все семь кодов из фактических пакетов закрыты явно. (+9 more)
 
 ### Community 75 - "ics_sim.py"
-Cohesion: 0.10
-Nodes (20): Приёмочные пороги из ТЗ (раздел 5). Единый источник истины для runtime…, Геометрия целевой ВПП и высоты установки ЛА. Смена целевой полосы = правка…, Оркестратор классического контура управления — на всём интервале полёта.…, GroundToleranceReport, Мониторы допусков захода, пробега и прямого руления. Отдельно от…, Допуски наземного движения на одном такте без вмешательства в управление., Стенд заказчика как источник телеметрии и приёмник команд. Единственный…, _number() (+12 more)
+Cohesion: 0.19
+Nodes (10): Приёмочные пороги из ТЗ (раздел 5). Единый источник истины для runtime…, Геометрия целевой ВПП и высоты установки ЛА. Смена целевой полосы = правка…, Оркестратор классического контура управления — на всём интервале полёта.…, GroundToleranceReport, Мониторы допусков захода, пробега и прямого руления. Отдельно от…, Допуски наземного движения на одном такте без вмешательства в управление., Стенд заказчика как источник телеметрии и приёмник команд. Единственный…, Converts (+2 more)
 
 ### Community 76 - "ICSInterface.cs"
 Cohesion: 0.36
@@ -600,8 +602,8 @@ Cohesion: 0.33
 Nodes (15): _gain_patch(), main(), promote_candidate(), PromotionError, Path, Проверяемое продвижение dashboard candidate в sparse scenario override., Пересчитать matrix/config hashes, а не доверять двум согласованно изменённым…, Проверить run и записать новый scenario JSON; registry исходников не меняется. (+7 more)
 
 ### Community 87 - "scenarios.py"
-Cohesion: 0.09
-Nodes (27): ConditionMatch, ControlProfile, _copy_approach(), _copy_ground(), _ground_matrix_drafts(), _ground_segments_for_spec(), _GroundPresetSpec, _install_approach_scenarios() (+19 more)
+Cohesion: 0.08
+Nodes (31): ApproachConfig, ConditionMatch, ControlProfile, _copy_approach(), _copy_ground(), _ground_matrix_drafts(), _ground_segments_for_spec(), _GroundPresetSpec (+23 more)
 
 ### Community 88 - "import_workbook"
 Cohesion: 0.33
@@ -612,16 +614,16 @@ Cohesion: 0.50
 Nodes (4): FlightSegment, Enum, str, Участок, для которого выбираются закон управления и условия сценария.
 
 ### Community 90 - "LateralChannel"
-Cohesion: 0.27
-Nodes (6): GuidanceState, LateralChannel, Блок 2: runway guidance → единый нормированный yaw-запрос., Путевой угол на пробеге, курс фюзеляжа на малой скорости. При стремящейся к…, Guidance по тому, что даёт стенд. → словарь guidance или None, если данных нет.…, Вернуть тот же ``GuidanceState``, который использует управляющий такт и…
+Cohesion: 0.13
+Nodes (12): GuidanceState, LateralChannel, LongitudinalChannel, Блок 1: скорость → симметричная база тормозов и реверса., Сбросить PID и привязать начало профиля к фактической скорости касания/старта., Блок 2: runway guidance → единый нормированный yaw-запрос., Путевой угол на пробеге, курс фюзеляжа на малой скорости. При стремящейся к…, Guidance по тому, что даёт стенд. → словарь guidance или None, если данных нет.… (+4 more)
 
-### Community 91 - "RunReader"
+### Community 91 - ".reset"
 Cohesion: 0.16
-Nodes (11): Path, Run-directory и любой поддержанный CSV через один streaming API., RunReader, engaged_inputs(), Кадр стенда, который уже принял управление: `AgentIsActive = 1`, идёт пробег., _frame(), _record_ground_run(), test_legacy_adapter_does_not_invent_missing_pid_terms() (+3 more)
+Nodes (6): ApproachSetup, _destination(), Типизированные backend-расширения общего SI-кадра., TelemetryExtensions, StartMode, TouchdownSetup
 
 ### Community 92 - "initial_segment"
-Cohesion: 0.15
-Nodes (14): initial_segment(), is_airborne(), FlightSegment, Сообщает ли стенд, что ВС в воздухе и достаточно высоко для приёма захода.…, С какого участка начинать. Пробег — ответ по умолчанию (см. модуль)., Кадр «связи со стендом нет». Нули, а не None: контур проверяет `valid` первым., Стенд при обрыве связи отдаёт НУЛИ с valid=False, а не None. Проверка «поле is…, test_control_step_stops_on_invalid_frame_even_with_numeric_fields() (+6 more)
+Cohesion: 0.13
+Nodes (16): initial_segment(), is_airborne(), FlightSegment, Сообщает ли стенд, что ВС в воздухе и достаточно высоко для приёма захода.…, С какого участка начинать. Пробег — ответ по умолчанию (см. модуль)., Кадр «связи со стендом нет». Нули, а не None: контур проверяет `valid` первым., Стенд при обрыве связи отдаёт НУЛИ с valid=False, а не None. Проверка «поле is…, test_control_step_stops_on_invalid_frame_even_with_numeric_fields() (+8 more)
 
 ### Community 93 - ".read_telemetry"
 Cohesion: 0.10
@@ -651,9 +653,9 @@ Nodes (4): Answer, Outcome, Q: Приступай к выполнению эта
 Cohesion: 0.22
 Nodes (8): ApproachConfig, _pid_from_colleague(), Настройки воздушного участка: заход по ILS, выравнивание, управление скоростью.…, Загрузка настроек из JSON коллеги (`config/ics_clear_weather_pid.json`). Секции…, `PIDConfig` коллеги → аргументы нашего `PIDController`. Предел интегратора у…, Параметры воздушного контура. Значения по умолчанию — настроенные на стенде.…, Наши умолчания и его файл — одно и то же. Разойдутся — расхождение должно быть…, test_config_from_the_colleague_json_matches_our_defaults()
 
-### Community 115 - ".neutralize_airborne"
-Cohesion: 0.19
-Nodes (5): Обнуляет все органы управления. Отправку делает вызывающий через `ICSSim.step`.…, Совместимое имя старого API; колёсные органы оно больше не обозначает., Сброс к нейтральным командам — новый эпизод начинается с чистого состояния.…, Обнулить только воздушные команды. Нужно, когда воздушный канал не может…, setter
+### Community 115 - "ControlsState"
+Cohesion: 0.18
+Nodes (9): ControlsState, Обнуляет все органы управления. Отправку делает вызывающий через `ICSSim.step`.…, Совместимое имя старого API; колёсные органы оно больше не обозначает., Разделяемая по тактам структура команд — и наземных, и воздушных. Аннотации…, Сброс к нейтральным командам — новый эпизод начинается с чистого состояния.…, Обнулить только воздушные команды. Нужно, когда воздушный канал не может…, setter, Размерный закон по нулям выдал бы правдоподобное отклонение по несуществующим… (+1 more)
 
 ### Community 116 - "Q: Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
 Cohesion: 0.40
@@ -663,13 +665,13 @@ Nodes (4): Answer, Outcome, Q: Приступай к выполнению эта
 Cohesion: 0.18
 Nodes (13): _check(), Criterion, evaluate_matrix_run(), _range_check(), Чистые функции приёмки телеметрии по ТЗ и строкам матрицы. Каждый критерий…, Оценить выбранную строку матрицы, не смешивая требования соседних фаз., Один пункт ТЗ: предел, измеренное значение, вердикт и его причина., Вернуть сериализуемую строку отчёта без отдельной DTO-схемы. (+5 more)
 
-### Community 118 - "._approach_step"
+### Community 118 - "MatrixCase"
 Cohesion: 0.14
-Nodes (7): Такт воздушного участка. → True, если управлять больше нечем. Касание…, Зафиксировать `Approach → Landing` на 25 ft без смены воздушного закона., Прервать заход с названной причиной. → True (управлять больше нечем)., Начать уход: зафиксировать состояние манёвра и высоту входа., Три блока: speed controller → guidance → allocator., Передать управление с посадки на пробег (`ControlMode 2 → 3`). Момент — первое…, Back-calculation по итоговым командам. No-op, пока у PID не задан…
+Nodes (4): MatrixCase, MatrixCondition, Условия одной конкретной строки каталога., Производная группировка строк одного шифра; исходные тексты живут в каталоге.
 
 ### Community 124 - "flight.py"
-Cohesion: 0.11
-Nodes (17): above_decision_height(), above_decision_velocity(), at_lateral_alignment_gate(), ils_blocker(), in_terminal_window(), Участки полёта и переходы между ними. Управление ведётся на всём интервале — от…, Последние футы перед касанием, где прерывать заход опаснее, чем доработать.…, ВС выше высоты решения ухода на второй круг (30 м по ТЗ 5.1.1.2). → уход… (+9 more)
+Cohesion: 0.09
+Nodes (20): above_decision_height(), above_decision_velocity(), ApproachRefused, at_lateral_alignment_gate(), ils_blocker(), in_terminal_window(), Участки полёта и переходы между ними. Управление ведётся на всём интервале — от…, Последние футы перед касанием, где прерывать заход опаснее, чем доработать.… (+12 more)
 
 ### Community 126 - ".compute"
 Cohesion: 0.18
@@ -703,29 +705,29 @@ Nodes (7): Any, Погодные условия. Поля — ровно то, �
 Cohesion: 0.40
 Nodes (4): Answer, Outcome, Q: Приступай к выполнению этапа 2 плана docs/plan.md, Source Nodes
 
-### Community 137 - "ClearWeatherILSController"
-Cohesion: 0.15
-Nodes (7): DashboardServer, DashboardState, Any, ICSInputs, ClearWeatherILSController, test_roundout_commands_a_material_pitch_increase_before_touchdown(), test_terminal_pitch_hold_starts_before_last_five_feet_guidance_cutoff()
+### Community 137 - "DashboardState"
+Cohesion: 0.21
+Nodes (4): DashboardServer, DashboardState, Any, ICSInputs
 
-### Community 139 - "xplane_sim.py"
-Cohesion: 0.09
-Nodes (15): Профили преобразования команд ИСМПУ в органы управления X-Plane., Расширение реестра будущим профилем МС-21 без правки XPlaneSim., Проводка и масштабы конкретного планера X-Plane., register_aircraft_profile(), XPlaneAircraftBinding, Глобальные константы контура управления (перенесены из main.ipynb)., Каналы управления и общий вектор команд. `ControlsState` — разделяемая по…, Слежение за осью ВПП: геодезия, cross-track error, guidance с look-ahead.… (+7 more)
+### Community 139 - "FrictionProfile"
+Cohesion: 0.20
+Nodes (6): _number(), Any, WeatherState, _weather(), FrictionProfile, Ступенчатый профиль сцепления по дистанции пробега.
 
 ### Community 142 - "pid_controller.py"
-Cohesion: 0.13
-Nodes (22): alpha_prot_deg(), approach_limits(), ApproachLimits, _ceiling_weight_index(), detect_landing_flaps(), LandingFlapConfiguration, _linear_interpolate(), measured_landing_flaps() (+14 more)
+Cohesion: 0.12
+Nodes (26): alpha_prot_deg(), approach_limits(), ApproachLimits, _ceiling_weight_index(), detect_landing_flaps(), LandingFlapConfiguration, _linear_interpolate(), measured_landing_flaps() (+18 more)
 
-### Community 147 - ".from_dict"
-Cohesion: 0.15
-Nodes (9): Any, ApproachConfig, _materialize_override(), Применить одноуровневый sparse patch и вернуть полный неизменяемый config., Материализовать базовую ветку и sparse override выбранной строки., Serialize only the canonical profile- and matrix-aware schema v3., Прочитать schema v3 либо явно мигрируемую v1/v2 конфигурацию., test_external_profile_controls_survive_scenario_v2_roundtrip() (+1 more)
+### Community 147 - ".begin_flight"
+Cohesion: 0.20
+Nodes (7): Можно ли вообще судить об участке по этому кадру. Кадр без пакета стенда…, segment_is_decidable(), FlightSegment, Пересобрать stateful PID и уведомить backend до первого такта участка., Определить стартовый участок по кадру стенда. → выбранный участок. Вызывается в…, Передать управление с посадки на пробег (`ControlMode 2 → 3`). Момент — первое…, Передать управление в руление (`ControlMode 3 → 4`) — пробег окончен.…
 
 ### Community 151 - "GuidanceState"
 Cohesion: 0.29
 Nodes (3): GuidanceState, Совместимость с прежним атрибутом; новый термин явно указывает ось., Совместимость со старым словарным API.
 
-### Community 153 - "weather.py"
-Cohesion: 0.18
-Nodes (12): Enum, Погодные условия эпизода: описание, шкала сцепления и разбор ветра. Модуль **не…, Состояние ВПП как **монотонная шкала скользкости** 0…15 (0 — сухо, 15 — лёд со…, Код состояния ВПП со стенда → наша шкала. Неизвестный код трактуется как `ICY`,…, runway_condition_from_bench(), RunwayCondition, Коды из фактических пакетов переводятся в свою шкалу скользкости., test_runway_condition_codes_are_remapped_not_passed_through() (+4 more)
+### Community 153 - "protocol.py"
+Cohesion: 0.25
+Nodes (6): ControlModeState, GearState, ICSOutputs, Any, IntEnum, ReverseEngineType
 
 ### Community 154 - "Normalization"
 Cohesion: 0.10
@@ -747,13 +749,13 @@ Nodes (9): find_earth_nav_dat(), ILSStation, parse_ils_station(), Path, Проф
 Cohesion: 0.25
 Nodes (6): FailureManager, FailureMode, Enum, Модель отказов бортового оборудования. `FailureState` хранит мультипликативные…, Проецирует набор дискретных отказов в эффективности исполнительных органов., Привести состояние ровно к набору `modes` (то, что сообщил стенд). Пересборка с…
 
-### Community 163 - ".reset"
-Cohesion: 0.16
-Nodes (6): ApproachSetup, _destination(), Типизированные backend-расширения общего SI-кадра., TelemetryExtensions, StartMode, TouchdownSetup
+### Community 163 - "sim_interface.py"
+Cohesion: 0.25
+Nodes (8): ControlDiagnostics, Enum, Общий контракт симулятора и воздушных сигналов. ICS и X-Plane различаются…, Исчерпывающие причины штатного/аварийного завершения единого runtime loop., Причина остановки вместе с best-effort результатом освобождения backend., Backend-neutral диагностические значения текущего управляющего такта., RunResult, RunStopReason
 
 ### Community 164 - "RunSample"
-Cohesion: 0.25
-Nodes (4): _mode_for(), Один такт: вход, команда и диагностика имеют общий ``tick_id``., Атомарный incremental slice для dashboard, без чтения controller., RunSample
+Cohesion: 0.33
+Nodes (3): Один такт: вход, команда и диагностика имеют общий ``tick_id``., Атомарный incremental slice для dashboard, без чтения controller., RunSample
 
 ### Community 166 - "test_refactoring_contracts.py"
 Cohesion: 0.18
@@ -762,14 +764,6 @@ Nodes (12): cli(), main(), Управляющий цикл 20 Гц против 
 ### Community 167 - "Q: Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)."
 Cohesion: 0.40
 Nodes (4): Answer, Outcome, Q: Приступай к выполнению этапа 8 плана [plan.md](docs/plan.md)., Source Nodes
-
-### Community 169 - "VlaydRolloutBridge"
-Cohesion: 0.25
-Nodes (7): ICSInputs, socket, Hand the validated airborne session to Vlayd's existing rollout loop. The…, Keep Vlayd's engagement latch synchronized during the approach., Run Vlayd's rollout until taxi speed, then send its taxi handoff., VlaydRolloutBridge, test_rollout_bridge_preserves_engagement_and_switches_without_off()
-
-### Community 176 - "LongitudinalChannel"
-Cohesion: 0.22
-Nodes (6): LongitudinalChannel, Блок 1: скорость → симметричная база тормозов и реверса., Сбросить PID и привязать начало профиля к фактической скорости касания/старта., PIDController, ReferenceTrajectory, RunwayTracker
 
 ### Community 181 - "Q: Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md)."
 Cohesion: 0.40
@@ -788,8 +782,8 @@ Cohesion: 0.40
 Nodes (4): ICSInputs, _faults_from_inputs(), Отказы, о которых сообщает борт — **единственный** источник истины об отказах.…, Сигналы отказов со стенда → наши `FailureMode`. Отказы шасси…
 
 ### Community 209 - "HandshakeBench"
-Cohesion: 0.22
-Nodes (6): HandshakeBench, Стенд, включающий управление только после корректного рукопожатия. Ждёт…, Стенд включается по полученной готовности, а не по нашему представлению о ней., Не ждать десять секунд и не принимать управление уже набирающим самолётом., test_airborne_handshake_stops_before_approach_if_takeoff_phase_appears(), test_the_airborne_handshake_is_actually_transmitted_before_approach()
+Cohesion: 0.12
+Nodes (13): HandshakeBench, Стенд, включающий управление только после корректного рукопожатия. Ждёт…, Стенд включается по полученной готовности, а не по нашему представлению о ней., Не ждать десять секунд и не принимать управление уже набирающим самолётом., test_airborne_handshake_stops_before_approach_if_takeoff_phase_appears(), test_the_airborne_handshake_is_actually_transmitted_before_approach(), _cold_sim(), Сквозной прогрев: маска нулевая, пока стенд не подтвердил `AgentIsActive = 1`. (+5 more)
 
 ### Community 212 - "backend_factory.py"
 Cohesion: 0.21
@@ -838,19 +832,19 @@ Nodes (4): Answer, Outcome, Q: Проанализировать run 20260816T213
   CLAUDE.md · relation: conceptually_related_to
 
 ## Knowledge Gaps
-- **114 isolated node(s):** `Answer`, `Outcome`, `Source Nodes`, `ismpu`, `Answer` (+109 more)
+- **114 isolated node(s):** `ismpu`, `Answer`, `Outcome`, `Source Nodes`, `Answer` (+109 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **119 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **118 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Work-memory lessons
 
 **Preferred sources** — corroborated by past sessions; start here.
-- `MatrixRun` (3× useful, score=2.745737607)
-- `XPlaneSim` (3× useful, score=2.733234673)
-- `PidGainRegressor` (2× useful, score=1.832435148)
-- `rollout_bridge.py` (2× useful, score=1.832435148)
-- `loop.py` (2× useful, score=1.812863387) _(code changed — re-verify)_
-- `LateralChannel` (2× useful, score=1.778734041)
+- `LateralChannel` (3× useful, score=2.76527313) _(code changed — re-verify)_
+- `MatrixRun` (3× useful, score=2.732070498)
+- `XPlaneSim` (3× useful, score=2.719629798)
+- `PidGainRegressor` (2× useful, score=1.823314069)
+- `rollout_bridge.py` (2× useful, score=1.823314069)
+- `loop.py` (2× useful, score=1.803839728) _(code changed — re-verify)_
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
@@ -859,13 +853,13 @@ _Questions this graph is uniquely positioned to answer:_
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
 - **What is the exact relationship between `Dual-Backend SimInterface` and `ICS-Only Backend Guidance`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **Why does `Telemetry` connect `Telemetry` to `.from_ics`, `ControlsState`, `xplane_sim.py`, `airborne_inputs`, `control/approach.py`, `test_icd_units.py`, `XPlaneSim`, `test_ics_sim.py`, `ground_allocator.py`, `Telemetry`, `.reset`, `ControllingSystem`, `test_diagnostic_tools.py`, `VlaydRolloutBridge`, `fakes.py`, `ICSInputs`, `FakeConnector`, `LongitudinalChannel`, `test_full_flight.py`, `test_go_around.py`, `test_approach_criteria.py`, `sim_interface.py`, `test_control_parity.py`, `ics_sim.py`, `_faults_from_inputs`, `HandshakeBench`, `test_working_ics_golden.py`, `LateralChannel`, `.enter_segment`, `initial_segment`, `.read_telemetry`, `RunReader`, `.enter_segment`, `flight.py`?**
-  _High betweenness centrality (0.096) - this node is a cross-community bridge._
-- **Why does `ControllingSystem` connect `ControllingSystem` to `RunRecorder`, `pid.py`, `test_sft_regressors.py`, `test_run_matrix.py`, `airborne_inputs`, `test_xplane_backend.py`, `test_ics_sim.py`, `Telemetry`, `XPlaneConnector`, `test_ground_controller.py`, `test_refactoring_contracts.py`, `sft.py`, `VlaydRolloutBridge`, `fakes.py`, `ICSInputs`, `FakeConnector`, `test_full_flight.py`, `test_go_around.py`, `test_approach_criteria.py`, `RunwayTracker`, `test_dashboard.py`, `test_control_parity.py`, `on_ground`, `test_campaign.py`, `ics_sim.py`, `DatagramSocket`, `.__init__`, `RunReader`, `initial_segment`, `._approach_step`, `flight.py`?**
-  _High betweenness centrality (0.085) - this node is a cross-community bridge._
-- **Why does `ICSSim` connect `ICSSim` to `on_ground`, `XPlaneConnector`, `test_refactoring_contracts.py`, `test_ics_sim.py`, `VlaydRolloutBridge`, `fakes.py`, `ICSInputs`, `ics_sim.py`, `test_sft_regressors.py`, `FakeConnector`, `HandshakeBench`, `test_full_flight.py`, `test_go_around.py`, `backend_factory.py`, `test_working_ics_golden.py`, `.enter_segment`, `.read_telemetry`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Why does `ControllingSystem` connect `ControllingSystem` to `RunRecorder`, `pid.py`, `rollout_bridge.py`, `test_sft_regressors.py`, `test_run_matrix.py`, `.from_ics`, `.begin_flight`, `test_xplane_backend.py`, `test_ics_sim.py`, `._approach_step`, `XPlaneConnector`, `test_ground_controller.py`, `test_refactoring_contracts.py`, `sft.py`, `fakes.py`, `FakeConnector`, `test_full_flight.py`, `test_go_around.py`, `test_approach_criteria.py`, `RunwayTracker`, `test_dashboard.py`, `test_control_parity.py`, `on_ground`, `test_campaign.py`, `ics_sim.py`, `DatagramSocket`, `.__init__`, `initial_segment`, `flight.py`?**
+  _High betweenness centrality (0.074) - this node is a cross-community bridge._
+- **Why does `Telemetry` connect `Telemetry` to `.from_ics`, `rollout_bridge.py`, `airborne_inputs`, `xplane_sim.py`, `.from_ics`, `control/approach.py`, `weather.py`, `XPlaneSim`, `test_ics_sim.py`, `ground_allocator.py`, `sim_interface.py`, `ControllingSystem`, `test_diagnostic_tools.py`, `fakes.py`, `FakeConnector`, `test_full_flight.py`, `test_go_around.py`, `test_approach_criteria.py`, `test_control_parity.py`, `ics_sim.py`, `_faults_from_inputs`, `HandshakeBench`, `test_working_ics_golden.py`, `.reset`, `initial_segment`, `.enter_segment`, `.read_telemetry`, `.enter_segment`, `ControlsState`, `flight.py`?**
+  _High betweenness centrality (0.056) - this node is a cross-community bridge._
+- **Why does `ICSInputs` connect `ICSInputs` to `dashboard_core.py`, `on_ground`, `rollout_bridge.py`, `test_working_ics_dashboard.py`, `WeatherState`, `airborne_inputs`, `fakes.py`, `FrictionProfile`, `ics_connector.py`, `FakeConnector`, `.from_ics`, `control/approach.py`, `DashboardServer`, `weather.py`, `HandshakeBench`, `DashboardState`, `._apply`?**
+  _High betweenness centrality (0.045) - this node is a cross-community bridge._
 - **Are the 7 inferred relationships involving `ControllingSystem` (e.g. with `GroundToleranceReport` and `ToleranceReport`) actually correct?**
   _`ControllingSystem` has 7 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 28 inferred relationships involving `Telemetry` (e.g. with `ApproachController` and `ApproachResult`) actually correct?**
-  _`Telemetry` has 28 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 23 inferred relationships involving `Telemetry` (e.g. with `ApproachController` and `ApproachResult`) actually correct?**
+  _`Telemetry` has 23 INFERRED edges - model-reasoned connections that need verification._
