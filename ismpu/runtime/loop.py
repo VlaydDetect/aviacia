@@ -30,7 +30,7 @@ from ismpu.runtime.run_recorder import RunRecorder
 from ismpu.config.run_matrix import CASE_BY_CODE, SOURCE_SHA256
 from ismpu.config.scenarios import (
     SCENARIOS, ProfileStatus, Scenario, rebind_matrix_run, resolve_scenario,
-    scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario, DEFAULT,
+    scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario, compose_scenario,
 )
 from ismpu.config.json_config import load_scenario
 
@@ -491,7 +491,14 @@ if __name__ == "__main__":
     # raise SystemExit(cli())
 
     main(
-        preset=DEFAULT,
+        # preset=compose_matrix_scenario(
+        #     scenario_id="A",
+        #     approach_run="А.1.2/1",
+        #     rollout_run="Б.2.3/12"
+        # ),
+        preset=SCENARIOS['right_wind'],
+        # run_id="Б.4.1/1",
+        start="approach",
         backend="ics",
         aircraft_profile="mc21",
         runway_profile="uuee-06r",
