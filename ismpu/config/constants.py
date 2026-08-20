@@ -7,3 +7,4 @@ FREQ = int(1.0 / DT)  # Частота контура/подписки на DREF
 
 INITIAL_SPEED_KTS = 140.0  # Только начальное условие X-Plane; профиль берёт фактическую скорость
 TARGET_SPEED_KTS = 7.5    # Нематричный переход Rollout → Taxi
+REVERSE_ALLOWED_SPEED_KTS = 30

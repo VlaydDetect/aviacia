@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ismpu.config.constants import REVERSE_ALLOWED_SPEED_KTS
 from ismpu.utils.converts import Converts
 from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import CompletionRule, ReferenceTrajectory
@@ -198,7 +199,7 @@ class LongitudinalChannel:
         brake_left = self.pid_brake_l.compute(error, dt, measurement=speed)
         brake_right = self.pid_brake_r.compute(error, dt, measurement=speed)
         speed_kts = speed * Converts.MS_TO_KTS
-        reverse_allowed = speed_kts > 60.0
+        reverse_allowed = speed_kts > REVERSE_ALLOWED_SPEED_KTS
         if reverse_allowed:
             # Реверс имеет диапазон [-1, 0], поэтому его ошибка должна быть отрицательной,
             # когда ВС быстрее профиля. Прежний положительный знак всегда зажимал выход в 0.
