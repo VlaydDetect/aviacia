@@ -170,28 +170,6 @@ _WET_RWY_SPEC = _GroundPresetSpec(
     lookahead_min=10.0, lookahead_gain=1.7, xte_gain=1.9, steering_brake_gain=0.0,
 )
 
-_PUDDLY_RWY_SPEC = _GroundPresetSpec(
-    name="puddly_rwy",
-    weather=WEATHER_PRESETS["puddly"],
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
-    brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
-    brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
-    rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
-    rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
-)
-
-_ICY_RWY_SPEC = _GroundPresetSpec(
-    name="icy_rwy",
-    weather=WEATHER_PRESETS["icy"],
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
-    brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
-    brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
-    rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
-    rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
-)
-
 def _matrix_draft(
     base: _GroundPresetSpec,
     name: str,
@@ -655,8 +633,7 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
 
 _SPECS = (
     _DEFAULT_SPEC, _LEFT_REVERSE_FAIL_SPEC, _RIGHT_REVERSE_FAIL_SPEC,
-    _RIGHT_WIND_SPEC, _WET_RWY_SPEC, _PUDDLY_RWY_SPEC, _ICY_RWY_SPEC,
-    *GROUND_MATRIX_DRAFTS,
+    _RIGHT_WIND_SPEC, _WET_RWY_SPEC, *GROUND_MATRIX_DRAFTS,
 )
 
 SCENARIOS: dict[str, Scenario] = {
