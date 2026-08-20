@@ -24,7 +24,7 @@ from ismpu.envs.sim_interface import ApproachData
 from ismpu.io.ics_connector import ICSInputs, ICSOutputs
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PID_NAMES = (
     "roll", "pitch", "air_speed", "steer",
     "brake_l", "brake_r", "reverse_l", "reverse_r",
@@ -67,6 +67,7 @@ GROUND_DIAGNOSTIC_FIELDS = (
     "lateral_pid_saturated", "allocator_steering_applied",
     "allocator_failure_compensation", "allocator_saturated",
 )
+GROUND_TOLERANCE_FIELDS = ("ground_tolerances",)
 ACTUATOR_NAMES = (
     "rudder", "pedal", "tiller", "brake_left", "brake_right", "reverse_left", "reverse_right",
 )
@@ -114,7 +115,7 @@ RUNTIME_DIAGNOSTIC_FIELDS = (
 )
 TELEMETRY_FIELDS = (
     SAMPLE_ID_FIELDS + NORMALIZED_TELEMETRY_FIELDS + COMMAND_FIELDS
-    + GROUND_DIAGNOSTIC_FIELDS + ALLOCATOR_TELEMETRY_FIELDS
+    + GROUND_DIAGNOSTIC_FIELDS + GROUND_TOLERANCE_FIELDS + ALLOCATOR_TELEMETRY_FIELDS
     + ACTUATOR_FEEDBACK_FIELDS + APPROACH_TELEMETRY_FIELDS
     + ("ics_raw_json",) + ICS_TELEMETRY_FIELDS + ICS_COMMAND_FIELDS + PID_FIELDS + SFT_FIELDS
     + RUNTIME_DIAGNOSTIC_FIELDS
@@ -298,6 +299,7 @@ def sample_values(telemetry, controller) -> dict[str, object]:
         "allocator_steering_applied": getattr(allocation, "steering_applied", None),
         "allocator_failure_compensation": getattr(allocation, "failure_compensation", None),
         "allocator_saturated": list(allocation.saturated) if allocation is not None else None,
+        "ground_tolerances": controller.ground_tolerance_report,
         "approach_tolerances": controller.tolerance_report,
         "approach_criteria_a11": controller.approach_criteria.verdict(),
         "go_around_reason": controller.go_around_reason, "abort_reason": controller.abort_reason,

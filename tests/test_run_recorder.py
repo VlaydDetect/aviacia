@@ -74,7 +74,7 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert metadata["matrix_run_ids"] == {}
     assert set(metadata["scenario"]["conditions"]) == {"approach", "rollout", "taxi"}
     assert metadata["frequency_hz"] == 20.0
-    assert metadata["schema_version"] == 3
+    assert metadata["schema_version"] == 4
     assert metadata["samples"] == 1
     assert metadata["git"].keys() == {"revision", "dirty"}
 
@@ -95,6 +95,9 @@ def test_run_recorder_writes_replayable_run_and_non_destructive_gain_export(tmp_
     assert rows[0]["config_revision"] == "0"
     assert rows[0]["runtime_rx_s"] == "0.01"
     assert rows[0]["runtime_tx_s"] == "0.012"
+    ground_tolerances = json.loads(rows[0]["ground_tolerances"])
+    assert ground_tolerances["segment"] == "rollout"
+    assert ground_tolerances["xte_limit_m"] == 3.0
 
     with (recorder.directory / "ground.csv").open(encoding="utf-8", newline="") as stream:
         assert len(list(csv.DictReader(stream))) == 1

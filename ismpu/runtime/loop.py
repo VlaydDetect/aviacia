@@ -228,6 +228,7 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
             try:
                 recorder.finish({
                     "tolerances": controller.tolerance_report,
+                    "ground_tolerances": controller.ground_tolerance_report,
                     "approach_criteria_a11": controller.approach_criteria.verdict(),
                     "stop_reason": reason.value,
                     "conditions_valid": getattr(sim, "conditions_valid", True),

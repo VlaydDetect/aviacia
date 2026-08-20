@@ -23,7 +23,10 @@ from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralCh
 from ismpu.control.ground_allocator import GroundControlAllocator
 from ismpu.control.approach import ApproachController
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
-from ismpu.control.tolerance import ToleranceReport, evaluate_approach_tolerances
+from ismpu.control.tolerance import (
+    GroundToleranceReport, ToleranceReport,
+    evaluate_approach_tolerances, evaluate_ground_tolerances,
+)
 from ismpu.control.failures import FailureManager
 from ismpu.control.flight import (
     FlightSegment, ApproachRefused, initial_segment, segment_is_decidable, touched_down,
@@ -107,9 +110,10 @@ class ControllingSystem:
         # Уход на второй круг (fallback в воздухе). `go_around` активен → заход не ведётся.
         self.go_around: Optional[GoAroundManeuver] = None
         self.go_around_reason: Optional[str] = None
+        # Последние структурные вердикты нужны recorder/dashboard; сами мониторы команд не меняют.
         self.tolerance_report: ToleranceReport | None = None
+        self.ground_tolerance_report: GroundToleranceReport | None = None
         self.approach_criteria: ApproachCriteriaMonitor = ApproachCriteriaMonitor()
-        """Отчёт монитора допусков за последний такт захода (диагностика/логи)."""
         self._violation_ticks: int = 0
         """Дебаунс триггера ухода: сколько тактов подряд допуски не выполняются."""
         self.scenario: Scenario | None = None
@@ -184,6 +188,7 @@ class ControllingSystem:
         self.go_around_reason = None
         self.landing_committed = False
         self.tolerance_report = None
+        self.ground_tolerance_report = None
         self.approach_criteria = ApproachCriteriaMonitor()
         self._violation_ticks = 0
 
@@ -270,6 +275,7 @@ class ControllingSystem:
         self.last_step_dt = 0.0
         self.last_step_send_attempted = False
         self.last_step_sent = False
+        self.ground_tolerance_report = None
         if requested_segment not in (None, FlightSegment.TAXI):
             raise ValueError("явно начинать разрешено только с TAXI")
         self._segment_decided = (
@@ -542,6 +548,16 @@ class ControllingSystem:
         telemetry = self.last_telemetry
         longitudinal = self.longitudinal_channel.compute(dt, telemetry)
         lateral = self.lateral_channel.compute(dt, telemetry)
+        # Монитор читает ровно те XTE/heading/speed, по которым посчитана команда этого такта.
+        # Он не размыкает контур: после касания безопасное действие — продолжать коррекцию.
+        self.ground_tolerance_report = evaluate_ground_tolerances(
+            telemetry,
+            self.segment,
+            xte_m=lateral.xte,
+            heading_error_deg=lateral.heading_error,
+            speed_error_ms=longitudinal.error,
+            failures=self.failures.state,
+        )
         allocation = self.ground_allocator.allocate(
             self.segment,
             longitudinal,

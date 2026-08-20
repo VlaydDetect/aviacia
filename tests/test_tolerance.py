@@ -13,11 +13,13 @@ from ismpu.config.criticality import (
     WHEEL_TRACK_M, RUNWAY_WIDTH_M,
 )
 from ismpu.config.envelope import approach_limits, LandingFlapConfiguration
+from ismpu.config.segments import FlightSegment
 from ismpu.control.approach import ApproachResult
-from ismpu.control.tolerance import evaluate_approach_tolerances
+from ismpu.control.failures import FailureState
+from ismpu.control.tolerance import evaluate_approach_tolerances, evaluate_ground_tolerances
 from ismpu.envs.ics_sim import Telemetry
 
-from fakes import airborne_inputs
+from fakes import airborne_inputs, engaged_inputs
 
 
 # --------------------------------------------------------------------------- #
@@ -149,3 +151,55 @@ def test_speed_outside_envelope_blocks_landing():
     fast = _telemetry(IndicatedAirspeed=200.0)                # выше VFE (183)
     rep = evaluate_approach_tolerances(fast, _result(), LIMITS, fast.faults, at_decision_gate=False)
     assert not rep.landing_allowed and "SPEED" in rep.violations
+
+
+def _ground_telemetry(speed_kts: float) -> Telemetry:
+    return Telemetry.from_ics(engaged_inputs(GroundSpeed=speed_kts, RunwayWidth=60.0))
+
+
+def test_ground_xte_limits_follow_segment_and_nws_authority():
+    telemetry = _ground_telemetry(80.0)
+    nominal = evaluate_ground_tolerances(
+        telemetry, FlightSegment.ROLLOUT, xte_m=4.0, heading_error_deg=0.0,
+        speed_error_ms=0.0, failures=FailureState())
+    nws = evaluate_ground_tolerances(
+        telemetry, FlightSegment.ROLLOUT, xte_m=4.0, heading_error_deg=0.0,
+        speed_error_ms=0.0, failures=FailureState(steering_eff=0.0))
+    taxi = evaluate_ground_tolerances(
+        telemetry, FlightSegment.TAXI, xte_m=1.1, heading_error_deg=0.0,
+        speed_error_ms=0.0, failures=FailureState())
+    taxi_nws = evaluate_ground_tolerances(
+        telemetry, FlightSegment.TAXI, xte_m=4.0, heading_error_deg=0.0,
+        speed_error_ms=0.0, failures=FailureState(steering_eff=0.0))
+
+    assert nominal.xte_limit_m == 3.0 and nominal.violations == ("XTE",)
+    assert nws.xte_limit_m == 5.0 and nws.within_tolerance
+    assert taxi.xte_limit_m == 1.0 and taxi.violations == ("XTE",)
+    assert taxi_nws.xte_limit_m == 5.0 and taxi_nws.within_tolerance
+
+
+def test_ground_monitor_classifies_runway_excursion_and_failure_heading():
+    failure = FailureState(reverse_left_eff=0.0)
+    fast = evaluate_ground_tolerances(
+        _ground_telemetry(80.0), FlightSegment.ROLLOUT,
+        xte_m=26.0, heading_error_deg=6.0, speed_error_ms=1.0, failures=failure)
+    slow = evaluate_ground_tolerances(
+        _ground_telemetry(29.0), FlightSegment.ROLLOUT,
+        xte_m=0.0, heading_error_deg=6.0, speed_error_ms=0.0, failures=failure)
+
+    assert fast.runway_limit_m == pytest.approx(25.7)
+    assert fast.runway_contained is False
+    assert fast.situation is SpecialSituation.HAZARDOUS
+    assert fast.heading_limit_deg == 5.0 and fast.heading_ok is False
+    assert fast.violations == ("XTE", "RUNWAY_BOUNDARY", "HEADING")
+    assert slow.heading_limit_deg is None and slow.heading_ok is None
+    assert slow.within_tolerance
+
+
+def test_ground_monitor_rejects_missing_guidance_and_speed_data():
+    report = evaluate_ground_tolerances(
+        None, FlightSegment.ROLLOUT, xte_m=None, heading_error_deg=None,
+        speed_error_ms=None, failures=FailureState(thrust_left_eff=0.0))
+
+    assert report.violations == ("XTE_DATA", "SPEED_DATA", "HEADING_DATA")
+    assert not report.within_tolerance

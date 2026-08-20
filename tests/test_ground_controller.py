@@ -11,6 +11,7 @@ from ismpu.config.scenarios import SCENARIOS, scenario_for_matrix_run
 from ismpu.config.segments import FlightSegment
 from ismpu.control.channels import LateralDiagnostics, LongitudinalDiagnostics
 from ismpu.control.failures import FailureMode
+from ismpu.control.tolerance import GroundToleranceReport
 from ismpu.control.flight import initial_segment
 from ismpu.control.ground_allocator import AllocationDiagnostics
 from ismpu.control.pid import PIDController
@@ -163,6 +164,9 @@ def test_ground_step_returns_three_typed_diagnostics_and_rate_limits_handover():
     assert isinstance(longitudinal, LongitudinalDiagnostics) and is_dataclass(longitudinal)
     assert isinstance(lateral, LateralDiagnostics) and is_dataclass(lateral)
     assert isinstance(allocation, AllocationDiagnostics) and is_dataclass(allocation)
+    assert isinstance(controller.ground_tolerance_report, GroundToleranceReport)
+    assert controller.ground_tolerance_report.violations == ("XTE",)
+    assert not controller.ground_tolerance_report.within_tolerance
     assert abs(controller.state.cmd_rudder) <= DT * controller.ground_allocator.steering_rate_per_s
     assert controller.state.cmd_brake_l <= DT * controller.ground_allocator.brake_rate_per_s
     assert controller.state.cmd_brake_r <= DT * controller.ground_allocator.brake_rate_per_s

@@ -95,8 +95,8 @@
     "semantic_hash": ""
   },
   "ismpu/config/scenarios.py": {
-    "mtime": 1787173813.4525425,
-    "ast_hash": "cb73057ddf654aeeb8854cc8db8a8041",
+    "mtime": 1787173394.2697299,
+    "ast_hash": "1fb4fe78e91984b47d4764c30396fce1",
     "semantic_hash": ""
   },
   "ismpu/config/segments.py": {
@@ -145,13 +145,13 @@
     "semantic_hash": ""
   },
   "ismpu/control/system.py": {
-    "mtime": 1787225751.3549194,
-    "ast_hash": "9a0551f99b99bdb784649e0add8c20fa",
+    "mtime": 1787162847.934021,
+    "ast_hash": "2f55545e25b628fad566fbee78a3538f",
     "semantic_hash": ""
   },
   "ismpu/control/tolerance.py": {
-    "mtime": 1787225674.3011484,
-    "ast_hash": "51889cab8b6f90ed02215aa380e63da5",
+    "mtime": 1787162952.957489,
+    "ast_hash": "513597743faf0a6e4248aadecabb2582",
     "semantic_hash": ""
   },
   "ismpu/control/trajectory.py": {
@@ -245,8 +245,8 @@
     "semantic_hash": ""
   },
   "ismpu/runtime/loop.py": {
-    "mtime": 1787225086.0334065,
-    "ast_hash": "9c773badc114ccdfcba6af8f9d19dcd7",
+    "mtime": 1787162258.2519236,
+    "ast_hash": "f866238793601e417e1097038efc17f2",
     "semantic_hash": ""
   },
   "ismpu/runtime/pretrain.py": {
@@ -260,8 +260,8 @@
     "semantic_hash": "98c7eceab38e0bb4397995f0d61f7d30"
   },
   "ismpu/runtime/run_recorder.py": {
-    "mtime": 1787225731.5392926,
-    "ast_hash": "7e03ae9b91b1fc9c7e0af0fb5416cd4e",
+    "mtime": 1786915062.0584705,
+    "ast_hash": "d7236551d39e4fc7b689c164fd83a909",
     "semantic_hash": ""
   },
   "ismpu/tools/__init__.py": {
@@ -430,14 +430,14 @@
     "semantic_hash": ""
   },
   "tests/test_run_recorder.py": {
-    "mtime": 1787225142.5531158,
-    "ast_hash": "7ebf5aea4e5d5e0fc7a3a7448c279092",
+    "mtime": 1786915269.6533988,
+    "ast_hash": "d12053b9b08ec2f7dc5497780b2ca75d",
     "semantic_hash": ""
   },
   "tests/test_tolerance.py": {
-    "mtime": 1787225674.862907,
-    "ast_hash": "763fa99cb4ff86727f9b0edbbc838cdf",
-    "semantic_hash": ""
+    "mtime": 1784851045.1215975,
+    "ast_hash": "62e82605b22d86896593149ab2fc1df8",
+    "semantic_hash": "62e82605b22d86896593149ab2fc1df8"
   },
   "tests/test_weather.py": {
     "mtime": 1786746433.6969872,
@@ -560,8 +560,8 @@
     "semantic_hash": ""
   },
   "tests/test_ground_controller.py": {
-    "mtime": 1787225087.119189,
-    "ast_hash": "d6f34178ab0ab8f3217c82895a685b0a",
+    "mtime": 1786920071.4758077,
+    "ast_hash": "23a9cc3c53522e69a41b4ae8be1692fa",
     "semantic_hash": ""
   },
   "graphify-out/memory/query_20260815_193939_\u043f\u0440\u0438\u0441\u0442\u0443\u043f\u0430\u0439_\u043a_\u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044e_\u044d\u0442\u0430\u043f\u0430_2_\u043f\u043b\u0430\u043d\u0430_docs_plan_md.md": {
@@ -590,8 +590,8 @@
     "semantic_hash": ""
   },
   "ismpu/runtime/run_artifacts.py": {
-    "mtime": 1787225085.4790301,
-    "ast_hash": "2a29f718b8c80f9f316401b2e79aca60",
+    "mtime": 1786915076.8976758,
+    "ast_hash": "7d129ab2a47d2371c11e1b2fba293d0a",
     "semantic_hash": ""
   },
   "ismpu/runtime/run_reader.py": {
@@ -712,11 +712,6 @@
   "docs/xplane.md": {
     "mtime": 1787163101.253579,
     "ast_hash": "454a00712618ba191d56b8e9b1461b1a",
-    "semantic_hash": ""
-  },
-  "graphify-out/memory/query_20260820_113614_\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c_runtime_\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438_\u043d\u0430\u0437\u0435\u043c\u043d\u044b\u0445_\u0434\u043e\u043f\u0443\u0441\u043a\u043e\u0432_\u0442\u0437_\u0432.md": {
-    "mtime": 1787225774.9428768,
-    "ast_hash": "27e24bd41158c50dccc21e602e8b9dfd",
     "semantic_hash": ""
   }
 }

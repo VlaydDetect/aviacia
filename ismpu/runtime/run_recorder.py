@@ -1,6 +1,6 @@
 """Совместимый импорт потокового журнала прогонов.
 
-Реализация и schema v3 находятся в :mod:`ismpu.runtime.run_artifacts`; этот модуль сохраняет
+Реализация и schema v4 находятся в :mod:`ismpu.runtime.run_artifacts`; этот модуль сохраняет
 устоявшийся публичный import path для runtime, dashboard и пользовательских notebook.
 """
 
