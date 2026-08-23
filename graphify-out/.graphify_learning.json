@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-20T23:03:46.017417+00:00",
+  "generated_at": "2026-08-23T18:21:38.030029+00:00",
   "nodes": {
     "approachchannel": {
       "code_fingerprint": "",
@@ -12,7 +12,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.889844041,
+      "score": 0.8340208,
       "source_file": "",
       "status": "tentative",
       "uses": 1
@@ -33,7 +33,7 @@
           "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 1.811657668,
+      "score": 1.698005613,
       "source_file": "ismpu/agent/pid_gain_regressor.py",
       "status": "preferred",
       "uses": 2
@@ -49,7 +49,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.890585605,
+      "score": 0.834715843,
       "source_file": "ismpu/config/json_config.py",
       "status": "tentative",
       "uses": 1
@@ -65,7 +65,7 @@
           "q": "Добавить runtime-проверки наземных допусков ТЗ в _ground_step"
         }
       ],
-      "score": 0.989029346,
+      "score": 0.926983839,
       "source_file": "ismpu/config/requirements.py",
       "status": "tentative",
       "uses": 1
@@ -81,7 +81,7 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.890585605,
+      "score": 0.834715843,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "tentative",
       "uses": 1
@@ -107,13 +107,13 @@
           "q": "Приступай к выполнению этапа 7 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 2.71460444,
+      "score": 2.54430716,
       "source_file": "ismpu/config/run_matrix.py",
       "status": "preferred",
       "uses": 3
     },
     "ismpu_config_scenarios_segmentconditions": {
-      "code_fingerprint": "10aa391b0726807d8a02b8cf1d1d8085cdedc04ac12f5f532b210900d1cc8d0c",
+      "code_fingerprint": "b036249e928c224aa73dc5625e0c11d773e745a81dbc0bc08ef975cf044ab8d8",
       "label": "SegmentConditions",
       "last": "2026-08-15T22:41:51.524233+00:00",
       "provenance": [
@@ -123,13 +123,13 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 0.890585605,
+      "score": 0.834715843,
       "source_file": "ismpu/config/scenarios.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_control_channels_lateralchannel": {
-      "code_fingerprint": "9407e5499df1ec126055b4112acb564035aaaf5881b4848766c135407c77217a",
+      "code_fingerprint": "671e10d83431e6b48c102ebbc0895e4ee5dd51f29269671fc177f926ccd6bec5",
       "label": "LateralChannel",
       "last": "2026-08-20T11:36:14.943241+00:00",
       "provenance": [
@@ -149,13 +149,13 @@
           "q": "Приступай к выполнению этапа 1 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 2.747594809,
+      "score": 2.57522792,
       "source_file": "ismpu/control/channels.py",
       "status": "preferred",
       "uses": 3
     },
     "ismpu_control_channels_longitudinalchannel": {
-      "code_fingerprint": "9407e5499df1ec126055b4112acb564035aaaf5881b4848766c135407c77217a",
+      "code_fingerprint": "671e10d83431e6b48c102ebbc0895e4ee5dd51f29269671fc177f926ccd6bec5",
       "label": "LongitudinalChannel",
       "last": "2026-08-15T19:39:39.514520+00:00",
       "provenance": [
@@ -165,13 +165,13 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.887985856,
+      "score": 0.832279185,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_control_channels_longitudinaldiagnostics": {
-      "code_fingerprint": "9407e5499df1ec126055b4112acb564035aaaf5881b4848766c135407c77217a",
+      "code_fingerprint": "671e10d83431e6b48c102ebbc0895e4ee5dd51f29269671fc177f926ccd6bec5",
       "label": "LongitudinalDiagnostics",
       "last": "2026-08-20T11:36:14.943241+00:00",
       "provenance": [
@@ -181,7 +181,7 @@
           "q": "Добавить runtime-проверки наземных допусков ТЗ в _ground_step"
         }
       ],
-      "score": 0.989029346,
+      "score": 0.926983839,
       "source_file": "ismpu/control/channels.py",
       "status": "tentative",
       "uses": 1
@@ -197,7 +197,7 @@
           "q": "Реализовать этап 0: baseline, golden replay и dashboard characterization"
         }
       ],
-      "score": 0.870162958,
+      "score": 0.815574384,
       "source_file": "ismpu/control/flight.py",
       "status": "tentative",
       "uses": 1
@@ -213,13 +213,13 @@
           "q": "Приступай к выполнению этапа 2 плана docs/plan.md"
         }
       ],
-      "score": 0.887985856,
+      "score": 0.832279185,
       "source_file": "ismpu/control/ground_allocator.py",
       "status": "tentative",
       "uses": 1
     },
     "ismpu_envs_ics_sim_icssim": {
-      "code_fingerprint": "dba510f13cf86ccaefa5b17a72f919284f9e4aca833dd8e4d5bc3158a173da5a",
+      "code_fingerprint": "2551a2f3e9e311e0cc02ed206d7c3dec8aae69b552bb28b4c4753d13cdde33f3",
       "label": "ICSSim",
       "last": "2026-08-16T22:00:35.695308+00:00",
       "neg": 1,
@@ -250,7 +250,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 3.596051213,
+      "score": 3.370457483,
       "source_file": "ismpu/envs/ics_sim.py",
       "status": "contested",
       "uses": 5,
@@ -277,13 +277,13 @@
           "q": "Приступай к выполнению этапа 4 плана docs/plan.md"
         }
       ],
-      "score": 2.702243274,
+      "score": 2.532721456,
       "source_file": "ismpu/envs/xplane_sim.py",
       "status": "preferred",
       "uses": 3
     },
     "ismpu_runtime_loop": {
-      "code_fingerprint": "df32f552182e61ec51db3ca6f0273a9dbd5c31d03b6785a2fe78d4f29feba758",
+      "code_fingerprint": "d0159b0744d4e8a2ff633f859599d6cabf186e3b3833a68035ee39bdf281733e",
       "label": "loop.py",
       "last": "2026-08-16T12:27:36.943921+00:00",
       "provenance": [
@@ -298,7 +298,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 1.792307826,
+      "score": 1.679869659,
       "source_file": "ismpu/runtime/loop.py",
       "status": "preferred",
       "uses": 2
@@ -319,7 +319,7 @@
           "q": "Приступай к выполнению этапа 9 плана [plan.md](docs/plan.md). В процессе старайся упрощать код, удалять лишний и неиспользуемый код, а также максимально покрывать его комментариями."
         }
       ],
-      "score": 1.811657668,
+      "score": 1.698005613,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "preferred",
       "uses": 2
@@ -335,7 +335,7 @@
           "q": "Приступай к выполнению этапа 3 плана [plan.md](docs/plan.md)."
         }
       ],
-      "score": 0.889844041,
+      "score": 0.8340208,
       "source_file": "ismpu/working_ics/rollout_bridge.py",
       "status": "tentative",
       "uses": 1
@@ -351,7 +351,7 @@
           "q": "Проанализировать run 20260816T213847.114116Z, сравнить управление с working_ics и исправить уход по GLIDESLOPE и неисполняемый go-around."
         }
       ],
-      "score": 0.910798835,
+      "score": 0.853661021,
       "source_file": "tests/fakes.py",
       "status": "tentative",
       "uses": 1
