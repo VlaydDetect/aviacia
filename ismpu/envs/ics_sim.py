@@ -918,10 +918,11 @@ class ICSSim(SimInterface):
         angle_r = self._throttle_angle(left=False)
         out.ThrottleLeftRate = _throttle_rate(command.cmd_rev_l, angle_l)
         out.ThrottleRightRate = _throttle_rate(command.cmd_rev_r, angle_r)
-        out.ReverseLeftCmd = (ReverseEngineType.Deploy if command.cmd_rev_l < 0
-                              else ReverseEngineType.Off)
-        out.ReverseRightCmd = (ReverseEngineType.Deploy if command.cmd_rev_r < 0
-                               else ReverseEngineType.Off)
+        # out.ReverseLeftCmd = (ReverseEngineType.Deploy if command.cmd_rev_l < 0
+        #                       else ReverseEngineType.Off)
+        # out.ReverseRightCmd = (ReverseEngineType.Deploy if command.cmd_rev_r < 0
+        #                        else ReverseEngineType.Off)
+        out.ReverseLeftCmd = out.ReverseRightCmd = ReverseEngineType.Deploy
 
     def _throttle_angle(self, *, left: bool) -> float:
         """Фактический угол РУД из последнего кадра стенда; 0 при отсутствии кадра.

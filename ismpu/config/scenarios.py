@@ -117,56 +117,59 @@ class _GroundPresetSpec:
 
 _DEFAULT_SPEC = _GroundPresetSpec(
     name="default",
-    runway_center=dict(kp=0.0015, ki=0.0001, kd=0.065, min_out=-1, max_out=1, name="Runway_Center"),
+    runway_center=dict(kp=0.1, ki=0.0, kd=0.075, min_out=-1, max_out=1, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
     rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.8, xte_gain=2.0, steering_brake_gain=0.4,
+    lookahead_min=10.0, lookahead_gain=1.7, xte_gain=1.8, steering_brake_gain=0,
 )
 
 _LEFT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
     name="left_reverse_fail",
     failures=frozenset({FailureMode.REVERSE_LEFT_FAIL}),
-    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
-    brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
+    # 90 deg wind 30 kts
+    # runway_center=dict(kp=0.12, ki=0.07, kd=0.26, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+    # 90 deg wind 20 kts
+    runway_center=dict(kp=0.1, ki=0.031, kd=0.24, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+    brake_l=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_R"),
     brake_r=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_L"),
-    rev_r=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.6, xte_gain=2.0, steering_brake_gain=0.4,
+    rev_r=dict(kp=0.00, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_R"),
+    lookahead_min=10.0, lookahead_gain=1.2, xte_gain=1.5,
 )
 
-_RIGHT_REVERSE_FAIL_SPEC = _GroundPresetSpec(
-    name="right_reverse_fail",
-    failures=frozenset({FailureMode.REVERSE_RIGHT_FAIL}),
-    runway_center=dict(kp=0.0004, ki=0.0006, kd=0.07, min_out=-1, max_out=1, name="Runway_Center"),
-    brake_l=dict(kp=0.08, ki=0.015, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_L"),
-    brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
-    rev_l=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_L"),
-    rev_r=dict(kp=0.03, ki=0.0025, kd=0.02, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.6, xte_gain=2.0, steering_brake_gain=0.4,
-)
-
-# right wind (90 deg) with speed: 5, 10,20, 30 kts
+# right wind (90 deg) 30 kts (15 mps)
+# _RIGHT_WIND_SPEC = _GroundPresetSpec(
+#     name="right_wind",
+#     weather=WeatherState.from_crosswind(20.0, 0.0),
+#     runway_center=dict(kp=0.12, ki=0.07, kd=0.26, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+#     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
+#     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
+#     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
+#     rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
+#     lookahead_min=10.0, lookahead_gain=1.2, xte_gain=1.6, steering_brake_gain=0.5-v1, steering_rev_gain=0.5-v1
+# )
+# right wind (90 deg) 20 kts (10 mps)
 _RIGHT_WIND_SPEC = _GroundPresetSpec(
     name="right_wind",
     weather=WeatherState.from_crosswind(20.0, 0.0),
-    runway_center=dict(kp=0.12, ki=0.07, kd=0.26, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
-    brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
-    brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
+    runway_center=dict(kp=0.1, ki=0.031, kd=0.24, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+    brake_l=dict(kp=0.1, ki=0.01, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_L"),
+    brake_r=dict(kp=0.1, ki=0.01, kd=0.06, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
     rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
-    lookahead_min=10.0, lookahead_gain=1.2, xte_gain=1.6, steering_brake_gain=0.5, steering_rev_gain=0.5
+    lookahead_min=10.0, lookahead_gain=1.2, xte_gain=1.5,
 )
 
 _WET_RWY_SPEC = _GroundPresetSpec(
     name="wet_rwy",
     weather=WEATHER_PRESETS["wet"],
-    runway_center=dict(kp=0.12, ki=0.006, kd=0.08, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
+    runway_center=dict(kp=0.12, ki=0.01, kd=0.1, min_out=-1, max_out=1, anti_windup=10, der_filter_tf=0.2, name="Runway_Center"),
     brake_l=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_L"),
     brake_r=dict(kp=0.1, ki=0.01, kd=0.05, min_out=0.0, max_out=1.0, name="Brake_R"),
     rev_l=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_L"),
-    rev_r=dict(kp=0.03, ki=0.002, kd=0.01, min_out=-1.0, max_out=0.0, name="Rev_R"),
+    rev_r=dict(kp=0.00, ki=0.000, kd=0.0, min_out=-1.0, max_out=0.0, name="Rev_R"),
     lookahead_min=10.0, lookahead_gain=1.7, xte_gain=1.9, steering_brake_gain=0.0,
 )
 
@@ -632,7 +635,7 @@ def _scenario_from_ground_spec(spec: _GroundPresetSpec) -> Scenario:
 
 
 _SPECS = (
-    _DEFAULT_SPEC, _LEFT_REVERSE_FAIL_SPEC, _RIGHT_REVERSE_FAIL_SPEC,
+    _DEFAULT_SPEC, _LEFT_REVERSE_FAIL_SPEC,
     _RIGHT_WIND_SPEC, _WET_RWY_SPEC, *GROUND_MATRIX_DRAFTS,
 )
 
@@ -683,7 +686,6 @@ _install_approach_scenarios()
 
 DEFAULT = SCENARIOS["default"]
 LEFT_REVERSE_FAIL = SCENARIOS["left_reverse_fail"]
-RIGHT_REVERSE_FAIL = SCENARIOS["right_reverse_fail"]
 
 
 def resolve_scenario(key: str) -> Scenario:

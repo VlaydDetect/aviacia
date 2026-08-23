@@ -33,6 +33,7 @@ from ismpu.config.scenarios import (
     scenario_for_matrix_run, select_for_telemetry, compose_matrix_scenario, compose_scenario,
 )
 from ismpu.config.json_config import load_scenario
+from ismpu.working_ics.runner import live_main
 
 logger = logging.getLogger(__name__)
 
@@ -491,13 +492,18 @@ def cli(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # raise SystemExit(cli())
 
+    # raise SystemExit(live_main())
+
     main(
         # preset=compose_matrix_scenario(
         #     scenario_id="A",
         #     approach_run="А.1.2/1",
-        #     rollout_run="Б.2.3/12"
+        #     rollout_run="Б.1.1/1"
         # ),
-        preset=SCENARIOS['right_wind'],
+        # preset=SCENARIOS['right_wind'],
+        # preset=SCENARIOS['wet_rwy'],
+        preset=SCENARIOS['default'],
+        # preset=SCENARIOS['left_reverse_fail'],
         # run_id="Б.4.1/1",
         start="approach",
         backend="ics",
