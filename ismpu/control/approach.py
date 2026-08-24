@@ -135,6 +135,7 @@ class ApproachController:
         self._flare_entry_pitch_target_deg: float | None
         self._throttle_norm: float | None
         self._target_ias_kt: float | None
+        self._rudder_deg: float
         self.reset()
 
     @property
@@ -156,6 +157,7 @@ class ApproachController:
         self._flare_entry_pitch_target_deg = None
         self._throttle_norm = None
         self._target_ias_kt = None
+        self._rudder_deg = 0.0
         self.result = ApproachResult()
 
     # ------------------------------------------------------------------ #
@@ -327,11 +329,7 @@ class ApproachController:
     def _lateral(self, inp: ApproachTelemetry, cfg: ApproachConfig,
                  dt: float, res: ApproachResult,
                  terminal_guidance_cutoff: bool = False) -> None:
-        """Курсовой маяк → угол доворота → уставка крена → элероны.
-
-        Руль направления на заходе остаётся нулевым: снос парируется креном, а рыскание рулём
-        на глиссаде рассогласовало бы контур с автопилотом стенда.
-        """
+        """Курсовой маяк → крен, затем плавный de-crab перед касанием."""
         res.loc_dots = inp.LocDeviation / cfg.loc_full_scale_ddm
         intercept = clamp(cfg.localizer_sign * cfg.localizer_intercept_deg_per_dot * res.loc_dots,
                           -cfg.max_intercept_angle_deg, cfg.max_intercept_angle_deg)
@@ -352,7 +350,37 @@ class ApproachController:
                                         -res.roll_limit_deg, res.roll_limit_deg)
         roll_error = res.target_roll_deg - inp.RollAngle
         res.aileron_deg = self.roll_pid.compute(roll_error, dt, measurement=inp.RollAngle)
-        res.rudder_deg = 0.0
+        decrab_available = bool(
+            inp.RadioAltitudeValid
+            and inp.MagneticHeadingValid
+            and inp.RunwayHeadingValid
+            and inp.RadioAltitude <= cfg.decrab_start_radio_altitude_ft
+        )
+        if decrab_available:
+            span = max(
+                cfg.decrab_start_radio_altitude_ft - cfg.decrab_full_radio_altitude_ft,
+                1.0,
+            )
+            progress = clamp(
+                (cfg.decrab_start_radio_altitude_ft - inp.RadioAltitude) / span,
+                0.0,
+                1.0,
+            )
+            heading_error = angle_error_deg(inp.RunwayHeading, inp.MagneticHeading)
+            rudder_target = progress * clamp(
+                cfg.decrab_heading_gain * heading_error,
+                -cfg.decrab_max_rudder_deg,
+                cfg.decrab_max_rudder_deg,
+            )
+        else:
+            rudder_target = 0.0
+        rudder_step = cfg.decrab_rudder_rate_deg_per_s * dt
+        self._rudder_deg += clamp(
+            rudder_target - self._rudder_deg,
+            -rudder_step,
+            rudder_step,
+        )
+        res.rudder_deg = self._rudder_deg
 
     def _vertical_target(self, inp: ApproachTelemetry, cfg: ApproachConfig,
                          res: ApproachResult) -> float:

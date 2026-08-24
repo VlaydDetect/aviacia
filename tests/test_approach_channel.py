@@ -249,7 +249,7 @@ def test_flare_latches_and_does_not_release_on_a_balloon():
     """Триггер выравнивания залипающий: подскок высоты не должен возвращать заход на глиссаду."""
     ours = _our_channel()
     state = ControlsState()
-    ours.calc_commands(0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=140.0)))
+    ours.calc_commands(0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=100.0)))
     assert ours.result.flare_active is True
     res = ours.calc_commands(0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=300.0)))
     assert res.flare_active is True
@@ -268,7 +268,7 @@ def test_flare_keeps_the_same_pitch_regulator_and_its_integral():
     before = ours.pitch_pid.integral
     assert before != 0.0
 
-    ours.calc_commands(0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=140.0)))
+    ours.calc_commands(0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=100.0)))
     assert ours.result.flare_active is True
     # Интеграл продолжился с прежнего значения, а не начался заново.
     assert ours.pitch_pid.integral != 0.0
@@ -280,7 +280,7 @@ def test_flare_entry_reference_is_fixed_not_the_measured_sink_rate():
     ours = _our_channel()
     state = ControlsState()
     res = ours.calc_commands(
-        0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=140.0, VerticalSpeed=-1200.0)))
+        0.05, state, _telemetry(airborne_inputs(radio_altitude_ft=100.0, VerticalSpeed=-1200.0)))
     assert res.flare_active is True
     assert res.flare_entry_vertical_speed_fpm == pytest.approx(
         ours.config.flare_initial_vs_fpm)
@@ -295,13 +295,41 @@ def test_elevator_stays_inside_the_load_factor_limits_through_the_whole_descent(
         assert -0.5 <= res.elevator_g <= 0.5
 
 
-def test_rudder_is_untouched_in_the_air():
-    """Контура парирования сноса нет — наземный контур обязан принимать ВС со сносом."""
+def test_rudder_is_untouched_above_decrab_height():
+    """На глиссаде выше начала de-crab руль направления остаётся нейтральным."""
     ours = _our_channel()
     state = ControlsState()
     for inp in _descent_frames(n=40):
         ours.calc_commands(0.05, state, _telemetry(inp))
         assert state.rudder_cmd == 0.0
+
+
+def test_decrab_rudder_turns_the_nose_toward_runway_heading():
+    ours = _our_channel()
+    state = ControlsState()
+
+    above = ours.calc_commands(
+        0.5,
+        state,
+        _telemetry(airborne_inputs(
+            radio_altitude_ft=50.1,
+            MagneticHeading=71.0,
+            TrkAngleMagnetic=75.079,
+        )),
+    )
+    below = ours.calc_commands(
+        0.5,
+        state,
+        _telemetry(airborne_inputs(
+            radio_altitude_ft=10.0,
+            MagneticHeading=71.0,
+            TrkAngleMagnetic=75.079,
+        )),
+    )
+
+    assert above.rudder_deg == 0.0
+    assert 0.0 < below.rudder_deg <= ours.config.decrab_max_rudder_deg
+    assert state.rudder_cmd == pytest.approx(below.rudder_deg / 30.0)
 
 
 # --------------------------------------------------------------------------- #

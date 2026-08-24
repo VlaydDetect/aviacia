@@ -129,10 +129,16 @@ def test_validated_controller_config_is_packaged():
     assert config.flare_vs_to_pitch_gain_deg_per_fpm == 0.0080
     assert config.flare_pitch_base_deg == 2.35
     assert config.flare_pitch_attitude_damping_gain == 0.10
+    assert config.flare_pitch_rate_damping_gain == 0.20
+    assert config.flare_start_radio_altitude_ft == runner.FLARE_MODE_RADIO_ALTITUDE_FT == 100.0
+    assert config.flare_max_start_radio_altitude_ft == 100.0
     assert config.flare_max_pitch_target_deg == 6.5
     assert config.terminal_hold_radio_altitude_ft == 10.0
     assert config.terminal_guidance_cutoff_radio_altitude_ft == 5.0
     assert config.terminal_hold_pitch_target_deg == 6.3
+    assert config.decrab_start_radio_altitude_ft == 50.0
+    assert config.decrab_full_radio_altitude_ft == 10.0
+    assert config.decrab_max_rudder_deg == 3.0
 
 
 def test_future_go_around_pitch_envelope_does_not_expand_landing_flare():
@@ -143,7 +149,50 @@ def test_future_go_around_pitch_envelope_does_not_expand_landing_flare():
     assert config.flare_max_pitch_target_deg < config.max_pitch_target_deg
 
 
-def test_roundout_commands_a_material_pitch_increase_before_touchdown():
+def test_decrab_rudder_aligns_heading_only_below_fifty_feet():
+    def inputs(**overrides):
+        return ICSInputs(*[
+            overrides.get(field.name, 0) for field in fields(ICSInputs)
+        ])
+
+    common = {
+        "AgentIsActive": 1,
+        "RadioAltitudeValid": 1,
+        "GroundSpeedValid": 1,
+        "GroundSpeed": 140.0,
+        "VerticalSpeedValid": 1,
+        "VerticalSpeed": -600.0,
+        "IndicatedAirspeedValid": 1,
+        "IndicatedAirspeed": 140.0,
+        "PitchAngleValid": 1,
+        "PitchAngle": 5.0,
+        "BodyPitchRateValid": 1,
+        "BodyPitchRate": 0.0,
+        "RollAngleValid": 1,
+        "RollAngle": 0.0,
+        "TrkAngleMagneticValid": 1,
+        "TrkAngleMagnetic": 64.0,
+        "MagneticHeadingValid": 1,
+        "RunwayHeadingValid": 1,
+        "RunwayHeading": 64.0,
+        "FlapsAngle": 27.0,
+    }
+
+    controller = ClearWeatherILSController(ControllerConfig.from_json(runner.DEFAULT_CONFIG))
+    above = controller.update(inputs(**common, RadioAltitude=50.1, MagneticHeading=60.0), 0.5)
+    entering = controller.update(inputs(**common, RadioAltitude=30.0, MagneticHeading=60.0), 0.5)
+    full = controller.update(inputs(**common, RadioAltitude=10.0, MagneticHeading=60.0), 0.5)
+
+    assert above.rudder == 0.0
+    assert 0.0 < entering.rudder < full.rudder
+    assert full.rudder <= controller.config.decrab_max_rudder_deg
+
+    opposite = ClearWeatherILSController(ControllerConfig.from_json(runner.DEFAULT_CONFIG))
+    result = opposite.update(inputs(**common, RadioAltitude=10.0, MagneticHeading=68.0), 0.5)
+    assert result.rudder < 0.0
+
+
+def test_roundout_starts_with_mode_flare_and_commands_pitch_increase():
     def inputs(**overrides):
         return ICSInputs(*[
             overrides.get(field.name, 0) for field in fields(ICSInputs)
@@ -162,18 +211,22 @@ def test_roundout_commands_a_material_pitch_increase_before_touchdown():
         "BodyPitchRateValid": 1,
         "FlapsAngle": 27.0,
     }
-    entry = controller.update(inputs(
+    above_flare = controller.update(inputs(
         **common,
         RadioAltitude=185.0,
         VerticalSpeed=-742.0,
         PitchAngle=3.88,
         BodyPitchRate=0.0,
     ), 0.05)
+    assert not above_flare.flare_active
+
     roundout = None
     for radio_altitude, vertical_speed, pitch, pitch_rate in (
         (120.0, -735.0, 3.98, 0.12),
         (100.0, -725.0, 4.08, 0.11),
         (80.0, -714.0, 4.14, 0.09),
+        (60.0, -680.0, 4.60, 0.12),
+        (40.0, -620.0, 5.10, 0.08),
     ):
         roundout = controller.update(inputs(
             **common,
@@ -183,10 +236,13 @@ def test_roundout_commands_a_material_pitch_increase_before_touchdown():
             BodyPitchRate=pitch_rate,
         ), 0.5)
 
-    assert entry.flare_active
+        if radio_altitude > runner.FLARE_MODE_RADIO_ALTITUDE_FT:
+            assert not roundout.flare_active
+        else:
+            assert roundout.flare_active
     assert roundout is not None
-    assert roundout.target_pitch_deg >= 5.2
-    assert roundout.target_pitch_deg > entry.target_pitch_deg + 1.0
+    assert roundout.target_pitch_deg >= 5.0
+    assert roundout.target_pitch_deg > above_flare.target_pitch_deg + 1.0
 
 
 def test_terminal_pitch_hold_starts_before_last_five_feet_guidance_cutoff():

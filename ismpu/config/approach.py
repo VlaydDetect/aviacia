@@ -128,8 +128,8 @@ class ApproachConfig:
 
     # --- выравнивание --- #
     flare_arm_radio_altitude_ft: float = 400.0
-    flare_start_radio_altitude_ft: float = 150.0
-    flare_max_start_radio_altitude_ft: float = 200.0
+    flare_start_radio_altitude_ft: float = 100.0
+    flare_max_start_radio_altitude_ft: float = 100.0
     flare_time_to_ground_s: float = 15.0
     flare_end_radio_altitude_ft: float = 5.0
     flare_initial_vs_fpm: float = -472.44
@@ -139,13 +139,20 @@ class ApproachConfig:
     flare_vs_to_pitch_gain_deg_per_fpm: float = 0.0080
     flare_pitch_base_deg: float = 2.35
     flare_pitch_attitude_damping_gain: float = 0.10
-    flare_pitch_rate_damping_gain: float = 0.08
+    flare_pitch_rate_damping_gain: float = 0.20
     flare_min_pitch_target_deg: float = 0.5
     flare_pitch_target_rate_deg_per_s: float = 4.0
     flare_max_pitch_target_deg: float = 6.5
     terminal_hold_radio_altitude_ft: float = 10.0
     terminal_guidance_cutoff_radio_altitude_ft: float = 5.0
     terminal_hold_pitch_target_deg: float = 6.3
+
+    # --- выравнивание фюзеляжа по оси ВПП перед касанием --- #
+    decrab_start_radio_altitude_ft: float = 50.0
+    decrab_full_radio_altitude_ft: float = 10.0
+    decrab_heading_gain: float = 0.70
+    decrab_max_rudder_deg: float = 3.0
+    decrab_rudder_rate_deg_per_s: float = 3.0
 
     # --- продольная тяга --- #
     elevator_command_sign: float = 1.0

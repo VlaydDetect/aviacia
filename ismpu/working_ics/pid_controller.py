@@ -128,8 +128,12 @@ class ControllerConfig:
     landing_weight_kg: float = 69277.0
     landing_flap_fallback: str = "FLAPS_3"
     flare_arm_radio_altitude_ft: float = 400.0
-    flare_start_radio_altitude_ft: float = 150.0
-    flare_max_start_radio_altitude_ft: float = 200.0
+    # Keep the internal roundout law aligned with the ModeFlare window sent
+    # to the ICS bench.  Starting the pitch law earlier makes the aircraft
+    # leave the glideslope while the bench still considers it to be in the
+    # normal approach phase.
+    flare_start_radio_altitude_ft: float = 100.0
+    flare_max_start_radio_altitude_ft: float = 100.0
     flare_time_to_ground_s: float = 15.0
     flare_end_radio_altitude_ft: float = 5.0
     flare_initial_vs_fpm: float = -472.44
@@ -137,13 +141,18 @@ class ControllerConfig:
     flare_vs_to_pitch_gain_deg_per_fpm: float = 0.0080
     flare_pitch_base_deg: float = 2.35
     flare_pitch_attitude_damping_gain: float = 0.10
-    flare_pitch_rate_damping_gain: float = 0.08
+    flare_pitch_rate_damping_gain: float = 0.20
     flare_min_pitch_target_deg: float = 0.5
     flare_pitch_target_rate_deg_per_s: float = 4.0
     flare_max_pitch_target_deg: float = 6.5
     terminal_hold_radio_altitude_ft: float = 10.0
     terminal_guidance_cutoff_radio_altitude_ft: float = 5.0
     terminal_hold_pitch_target_deg: float = 6.3
+    decrab_start_radio_altitude_ft: float = 50.0
+    decrab_full_radio_altitude_ft: float = 10.0
+    decrab_heading_gain: float = 0.70
+    decrab_max_rudder_deg: float = 3.0
+    decrab_rudder_rate_deg_per_s: float = 3.0
     elevator_command_sign: float = 1.0
     throttle_forward_max_deg: float = 55.7
     throttle_rate_max_deg_per_s: float = 8.0
@@ -245,6 +254,7 @@ class ClearWeatherILSController:
         self._flare_entry_pitch_target_deg: float | None = None
         self._throttle_norm: float | None = None
         self._target_ias_kt: float | None = None
+        self._rudder_deg = 0.0
 
     def reset(self) -> None:
         self.roll_pid.reset()
@@ -258,6 +268,7 @@ class ClearWeatherILSController:
         self._flare_entry_pitch_target_deg = None
         self._throttle_norm = None
         self._target_ias_kt = None
+        self._rudder_deg = 0.0
 
     def update(self, state: ICSInputs, dt_s: float) -> ControlResult:
         cfg = self.config
@@ -588,7 +599,47 @@ class ClearWeatherILSController:
         throttle_left_hold_norm = self._throttle_norm
         throttle_right_hold_norm = self._throttle_norm
 
-        rudder = 0.0
+        decrab_available = bool(
+            state.RadioAltitudeValid
+            and state.MagneticHeadingValid
+            and state.RunwayHeadingValid
+            and state.RadioAltitude <= cfg.decrab_start_radio_altitude_ft
+        )
+        if decrab_available:
+            decrab_span = max(
+                cfg.decrab_start_radio_altitude_ft
+                - cfg.decrab_full_radio_altitude_ft,
+                1.0,
+            )
+            decrab_progress = clamp(
+                (
+                    cfg.decrab_start_radio_altitude_ft
+                    - state.RadioAltitude
+                ) / decrab_span,
+                0.0,
+                1.0,
+            )
+            runway_heading_error = angle_error_deg(
+                state.RunwayHeading,
+                state.MagneticHeading,
+            )
+            rudder_target = decrab_progress * clamp(
+                cfg.decrab_heading_gain * runway_heading_error,
+                -cfg.decrab_max_rudder_deg,
+                cfg.decrab_max_rudder_deg,
+            )
+        else:
+            rudder_target = 0.0
+        rudder_step = (
+            cfg.decrab_rudder_rate_deg_per_s
+            * clamp(dt_s, 0.001, 0.25)
+        )
+        self._rudder_deg += clamp(
+            rudder_target - self._rudder_deg,
+            -rudder_step,
+            rudder_step,
+        )
+        rudder = self._rudder_deg
         warnings: list[str] = []
         if state.IndicatedAirspeed >= limits.vfe_kt:
             warnings.append("VFE")
