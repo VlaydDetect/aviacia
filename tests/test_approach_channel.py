@@ -275,6 +275,38 @@ def test_flare_keeps_the_same_pitch_regulator_and_its_integral():
     assert abs(ours.pitch_pid.integral - before) < abs(before)
 
 
+def test_terminal_hold_converges_to_three_degree_touchdown_attitude():
+    """Последние десять футов убирают прежнюю уставку 6.3°, вызвавшую высокий нос."""
+    ours = _our_channel()
+    state = ControlsState()
+    ours.calc_commands(
+        0.05,
+        state,
+        _telemetry(airborne_inputs(
+            radio_altitude_ft=100.0,
+            PitchAngle=5.8,
+            VerticalSpeed=-600.0,
+        )),
+    )
+
+    result = None
+    for _ in range(20):
+        result = ours.calc_commands(
+            0.05,
+            state,
+            _telemetry(airborne_inputs(
+                radio_altitude_ft=9.0,
+                PitchAngle=5.8,
+                VerticalSpeed=-600.0,
+            )),
+        )
+
+    assert result is not None
+    assert result.terminal_hold_active
+    assert result.target_pitch_deg == pytest.approx(3.0)
+    assert result.elevator_g < 0.0
+
+
 def test_flare_entry_reference_is_fixed_not_the_measured_sink_rate():
     """Профиль начинается от настроенной опорной скорости, иначе одинаковые заходы расходятся."""
     ours = _our_channel()

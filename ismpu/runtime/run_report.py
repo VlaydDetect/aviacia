@@ -12,6 +12,7 @@ from ismpu.config.criticality import (
     lateral_load_situation, normal_load_situation, sink_situation,
     touchdown_speed_situation,
 )
+from ismpu.config.ics import BRAKE_CMD_MAX_MM
 from ismpu.config.run_matrix import COLUMNS, RESULT_COLUMNS, resolve_matrix_run
 from ismpu.config.requirements import CENTERLINE_ALIGN_HEIGHT_M
 from ismpu.config.runway_profiles import RunwayProfile
@@ -133,6 +134,8 @@ def _metrics(reader: RunReader) -> dict:
     segment_samples: dict[str, int] = {}
     applied_gains: dict[str, dict] = {}
     feedback_samples: dict[str, int] = {}
+    brake_commanded_samples = brake_feedback_response_samples = 0
+    max_brake_command_norm = max_brake_feedback_mm = 0.0
     previous_segment = None
     handover = None
     saturation_by_channel: dict[str, int] = {}
@@ -263,6 +266,20 @@ def _metrics(reader: RunReader) -> dict:
                         go_vs_max, vertical_speed)
         else:
             ground_samples += 1
+            brake_command = max(
+                abs(_optional(row.get("cmd_brake_l")) or 0.0),
+                abs(_optional(row.get("cmd_brake_r")) or 0.0),
+            )
+            brake_feedback = max(
+                abs(_optional(row.get("feedback_brake_left_mm")) or 0.0),
+                abs(_optional(row.get("feedback_brake_right_mm")) or 0.0),
+            )
+            max_brake_command_norm = max(max_brake_command_norm, brake_command)
+            max_brake_feedback_mm = max(max_brake_feedback_mm, brake_feedback)
+            if brake_command >= 0.05:
+                brake_commanded_samples += 1
+                if brake_feedback >= 0.1:
+                    brake_feedback_response_samples += 1
             xte = row.get("guidance_xte_m")
             if segment == FlightSegment.TAXI.value:
                 xte_taxi = _max_abs(xte_taxi, xte)
@@ -405,6 +422,18 @@ def _metrics(reader: RunReader) -> dict:
         },
         "applied_gains": applied_gains,
         "feedback_samples": feedback_samples,
+        "brake_feedback_response": {
+            "status": (
+                "NOT_COMMANDED" if brake_commanded_samples == 0
+                else "RESPONSIVE" if brake_feedback_response_samples > 0
+                else "UNRESPONSIVE"
+            ),
+            "commanded_samples": brake_commanded_samples,
+            "response_samples": brake_feedback_response_samples,
+            "max_command_norm": max_brake_command_norm,
+            "max_command_mm": max_brake_command_norm * BRAKE_CMD_MAX_MM,
+            "max_feedback_mm": max_brake_feedback_mm,
+        },
         "segment_samples": segment_samples,
         "handover": handover,
         "environment": last_weather,

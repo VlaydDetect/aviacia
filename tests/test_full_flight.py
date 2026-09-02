@@ -213,10 +213,44 @@ def test_the_segment_machine_only_moves_forward():
     controller.control_step(DT, touchdown, send=False)
     assert controller.segment is FlightSegment.ROLLOUT
 
+
+def test_rollout_withholds_brakes_and_reverse_until_main_gear_contact_is_stable():
+    """Краткий отскок после первого WOW не должен включать наземные продольные органы."""
+    controller = ControllingSystem()
+    controller.bind_scenario(SCENARIOS["default"], "mc21")
+    controller.begin_flight(Telemetry.from_ics(airborne_inputs(radio_altitude_ft=1200.0)))
+
+    touchdown = Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=0.0,
+        GroundSpeed=140.0,
+        FlightPhase=int(FlightPhase.LAND_RUN),
+        LeftGearWeightOnWheels=1,
+        RightGearWeightOnWheels=1,
+    ))
+    controller.control_step(DT, touchdown, send=False)
+    assert controller.segment is FlightSegment.ROLLOUT
+
     # Кадр «снова в воздухе» участок не возвращает.
     controller.control_step(DT, Telemetry.from_ics(airborne_inputs(radio_altitude_ft=60.0)),
                             send=False)
     assert controller.segment is FlightSegment.ROLLOUT
+    assert controller._rollout_contact_guard_active
+    assert controller.state.cmd_brake_l == controller.state.cmd_brake_r == 0.0
+    assert controller.state.cmd_rev_l == controller.state.cmd_rev_r == 0.0
+
+    bounce = Telemetry.from_ics(airborne_inputs(
+        radio_altitude_ft=1.0,
+        GroundSpeed=140.0,
+        FlightPhase=int(FlightPhase.LAND_FLARE_AND_TOUCHDOWN),
+    ))
+    controller.control_step(DT, bounce, send=False)
+    assert controller._rollout_contact_s == 0.0
+    assert controller.state.cmd_brake_l == controller.state.cmd_brake_r == 0.0
+    assert controller.state.cmd_rev_l == controller.state.cmd_rev_r == 0.0
+
+    for _ in range(11):
+        controller.control_step(DT, touchdown, send=False)
+    assert not controller._rollout_contact_guard_active
 
 
 def test_the_rollout_default_keeps_the_existing_ground_behaviour():

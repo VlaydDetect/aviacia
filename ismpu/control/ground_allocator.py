@@ -92,9 +92,11 @@ class GroundControlAllocator:
         previous: "ControlsState",
         telemetry: "Telemetry",
         dt: float,
+        *,
+        ground_contact_available: bool = True,
     ) -> AllocationDiagnostics:
         rollout = segment is FlightSegment.ROLLOUT
-        control_available = longitudinal.valid and telemetry.valid
+        control_available = longitudinal.valid and telemetry.valid and ground_contact_available
         guidance_available = lateral.valid
         reverse_available = rollout and longitudinal.reverse_allowed
         steering = lateral.steering_limited if lateral.valid else 0.0

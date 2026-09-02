@@ -87,6 +87,11 @@ def ground_control_to_dict(config: GroundControlConfig) -> dict[str, Any]:
             "steering_rev_gain": config.steering_rev_gain,
             "failure_yaw_compensation_gain": config.failure_yaw_compensation_gain,
         },
+        "taxi_throttle": {
+            "kp_per_kt": config.taxi_throttle_kp_per_kt,
+            "max_norm": config.taxi_throttle_max_norm,
+            "deadband_kts": config.taxi_throttle_deadband_kts,
+        },
         "trajectory": {
             "law": config.law.name,
             "target_speed_kts": config.target_speed_kts,
@@ -109,6 +114,7 @@ def ground_control_from_dict(data: Mapping[str, Any]) -> GroundControlConfig:
     mixing = dict(data.get("mixing", {}))
     trajectory = dict(data.get("trajectory", {}))
     rate_limits = dict(data.get("rate_limits", {}))
+    taxi_throttle = dict(data.get("taxi_throttle", {}))
     return GroundControlConfig(
         **{name: dict(pids[name]) for name in _PID_NAMES},
         lookahead_min=float(guidance.get("lookahead_min", 10.0)),
@@ -126,6 +132,9 @@ def ground_control_from_dict(data: Mapping[str, Any]) -> GroundControlConfig:
         steering_rate_per_s=float(rate_limits.get("steering_per_s", 1.0)),
         brake_rate_per_s=float(rate_limits.get("brake_per_s", 1.0)),
         reverse_rate_per_s=float(rate_limits.get("reverse_per_s", 1.0)),
+        taxi_throttle_kp_per_kt=float(taxi_throttle.get("kp_per_kt", 0.02)),
+        taxi_throttle_max_norm=float(taxi_throttle.get("max_norm", 0.18)),
+        taxi_throttle_deadband_kts=float(taxi_throttle.get("deadband_kts", 0.5)),
     )
 
 

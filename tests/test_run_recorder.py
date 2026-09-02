@@ -355,6 +355,36 @@ def test_recording_failure_never_escapes_into_control_and_invalidates_result(tmp
     assert report["sft_eligible"] is False
 
 
+def test_report_build_failure_still_finalizes_manifest_and_report(tmp_path, monkeypatch):
+    """Сбой тяжёлой агрегации не оставляет завершённый прогон со статусом running."""
+    controller = ControllingSystem()
+    scenario = Scenario.from_preset("default")
+    scenario.apply_control(controller, "mc21")
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21", scenario=scenario)
+    sample = telemetry(groundspeed_ms=50.0)
+    controller.control_step(0.05, sample, send=False)
+    recorder.record(sample, controller, elapsed_s=0.05)
+
+    def fail_report(*args, **kwargs):
+        raise RuntimeError("report aggregation failed")
+
+    monkeypatch.setattr("ismpu.runtime.run_report.build_run_report", fail_report)
+    recorder.finish({"stop_reason": "interrupted", "conditions_valid": True})
+
+    manifest = json.loads(
+        (recorder.directory / "manifest.json").read_text(encoding="utf-8"))
+    report = json.loads(
+        (recorder.directory / "report.json").read_text(encoding="utf-8"))
+    assert manifest["finished_at"] is not None
+    assert manifest["stop_reason"] == "interrupted"
+    assert manifest["samples"] == 1
+    assert manifest["recording_failed"] is True
+    assert report["status"] == "INVALID"
+    assert report["recording_failed"] is True
+    assert "report aggregation failed" in report["recording_error"]
+
+
 def test_raw_packet_files_keep_exact_udp_json_and_only_observed_tx(tmp_path):
     class Connector:
         observer = None

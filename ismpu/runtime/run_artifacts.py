@@ -815,17 +815,35 @@ class RunRecorder:
                 "samples": self._sequence, "raw_packets": dict(self._raw_counts),
                 "recording_failed": self.recording_failed, "recording_error": self.recording_error})
             try:
+                # Полный report перечитывает крупные CSV и может строиться несколько секунд.
+                # Сначала атомарно фиксируем завершённый manifest и убираем ложное `running`,
+                # чтобы Ctrl+C/завершение процесса во время агрегации не оставляло прогон
+                # выглядящим как всё ещё активный.
+                self._write_json("manifest.json", self.manifest)
+                self._write_json("report.json", {
+                    "status": "finalizing",
+                    "samples": self._sequence,
+                    "stop_reason": stop_reason,
+                })
                 from ismpu.runtime.run_report import build_run_report
                 payload = build_run_report(
                     self.directory, scenario=self._scenario, runtime_report=runtime_report,
                     recording_failed=self.recording_failed, recording_error=self.recording_error)
                 self._write_json("report.json", payload)
-                self._write_json("manifest.json", self.manifest)
             except Exception as exc:
                 self._fail(exc)
                 self.manifest.update(recording_failed=True, recording_error=self.recording_error)
                 try:
                     self._write_json("manifest.json", self.manifest)
+                    self._write_json("report.json", {
+                        "status": "INVALID",
+                        "samples": self._sequence,
+                        "stop_reason": stop_reason,
+                        "acceptance_valid": False,
+                        "sft_eligible": False,
+                        "recording_failed": True,
+                        "recording_error": self.recording_error,
+                    })
                 except Exception:
                     pass
             finally:

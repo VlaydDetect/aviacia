@@ -1,7 +1,7 @@
 """Управляющий цикл 20 Гц против стенда заказчика — **весь интервал полёта**.
 
 Порядок: подключение к стенду → рукопожатие под текущий участок → цикл `control_step` до
-скорости руления (или Ctrl-C) → передача управления в руление и снятие заявки каналов.
+скорости руления → передача управления в TAXI → продолжение руления до Ctrl-C.
 
 Участок выбирается по первому кадру стенда (`control/flight.py`):
 
@@ -163,24 +163,31 @@ def run(controller: ControllingSystem, sim: SimInterface, scenario: Scenario, *,
                     rule = controller.longitudinal_channel.trajectory.completion_rule
                     if rule is CompletionRule.HANDOVER_TAXI:
                         # Эксплуатационный полёт: ControlMode 3 → 4 на 7,5 узла.
-                        if controller.hand_over_to_taxi() and recorder is not None:
+                        handed_over = controller.hand_over_to_taxi()
+                        if handed_over and recorder is not None:
                             elapsed = current_time - run_started
                             recorder.record_event(
                                 "segment",
-                                data={"previous": "rollout", "value": "taxi",
-                                      "handover_only": True},
+                                data={"previous": "rollout", "value": "taxi"},
                                 time_s=elapsed,
                                 tick_id=controller.tick_id,
                                 segment="taxi",
                             )
                             recorder.record_event(
                                 "control_mode",
-                                data={"previous": 3, "value": 4,
-                                      "handover_only": True},
+                                data={"previous": 3, "value": 4},
                                 time_s=elapsed,
                                 tick_id=controller.tick_id,
                                 segment="taxi",
                             )
+                        if handed_over and controller.segment is FlightSegment.TAXI:
+                            # `hand_over_to_taxi` уже передал несколько кадров с фронтом 3→4.
+                            # Следующий принятый кадр должен пройти через закон TAXI, а не через
+                            # общий путь завершения, который раньше сразу снимал управление.
+                            last_time = current_time
+                            if not receive_driven:
+                                next_tick = current_time + DT
+                            continue
                     reason = RunStopReason.COMPLETED
                 elif controller.go_around_reason is not None:
                     print(f"[loop] уход на второй круг: {controller.go_around_reason}")

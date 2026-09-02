@@ -198,6 +198,21 @@ def test_step_converts_commands_to_icd_units():
     assert out.ReverseRightCmd == ReverseEngineType.Off
 
 
+def test_rollout_stows_each_reverser_when_its_requested_level_returns_to_zero():
+    """Створка не должна оставаться выпущенной после обнуления своего PID реверса."""
+    sim, conn = engaged_sim()
+    cmd = ControlsState()
+    cmd.cmd_rev_l = cmd.cmd_rev_r = -0.25
+    sim.step(cmd)
+    assert conn.sent_outputs[-1].ReverseLeftCmd is ReverseEngineType.Deploy
+    assert conn.sent_outputs[-1].ReverseRightCmd is ReverseEngineType.Deploy
+
+    cmd.cmd_rev_l = cmd.cmd_rev_r = 0.0
+    sim.step(cmd)
+    assert conn.sent_outputs[-1].ReverseLeftCmd is ReverseEngineType.Off
+    assert conn.sent_outputs[-1].ReverseRightCmd is ReverseEngineType.Off
+
+
 def test_taxi_steers_with_the_tiller_not_the_rudder():
     """Разделение органов из таблицы Заказчика: тиллер — на рулении, педальный пост — на пробеге.
 
@@ -215,6 +230,24 @@ def test_taxi_steers_with_the_tiller_not_the_rudder():
     assert out.ControlValidMask == int(TAXI_CONTROL_MASK)
     assert out.NoseWheelTillerCmd == pytest.approx(TILLER_MAX_MM)
     assert out.RudderCmd == 0.0 and out.RudderPedalCmd == 0.0
+
+
+def test_taxi_commands_forward_throttle_rate_and_keeps_reversers_stowed():
+    sim, conn = engaged_sim()
+    sim.request_taxi()
+    cmd = ControlsState()
+    cmd.cmd_throttle_norm = 0.18
+
+    sim.step(cmd)
+    out = conn.sent_outputs[-1]
+
+    assert out.ControlMode is ControlModeState.Taxi
+    assert out.ThrottleLeftRate > 0.0
+    assert out.ThrottleRightRate > 0.0
+    assert out.ThrottleLeft == pytest.approx(0.18)
+    assert out.ThrottleRight == pytest.approx(0.18)
+    assert out.ReverseLeftCmd is ReverseEngineType.Off
+    assert out.ReverseRightCmd is ReverseEngineType.Off
 
 
 def test_declared_mask_covers_only_channels_we_actually_drive():

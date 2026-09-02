@@ -145,7 +145,14 @@ class ApproachConfig:
     flare_max_pitch_target_deg: float = 6.5
     terminal_hold_radio_altitude_ft: float = 10.0
     terminal_guidance_cutoff_radio_altitude_ft: float = 5.0
-    terminal_hold_pitch_target_deg: float = 6.3
+    terminal_hold_pitch_target_deg: float = 3.0
+    """Целевой тангаж в последних десяти футах.
+
+    Выравнивание выше этого окна уже успевает погасить снижение, а у самой полосы нельзя
+    продолжать тянуть уставку к 6+ градусам: последний стендовый прогон пришёл к касанию с
+    5.86°, после чего стойки дважды разгрузились. Терминальный участок сводит самолёт к
+    требуемым примерно 3° без отдельной жёсткой команды ElevatorCmd.
+    """
 
     # --- выравнивание фюзеляжа по оси ВПП перед касанием --- #
     decrab_start_radio_altitude_ft: float = 50.0

@@ -96,6 +96,7 @@ class EngagementInputs:
     """
     all_gear_on_ground: bool
     groundspeed_kts: float
+    main_gear_on_ground: bool = False
     flight_phase: int | None = None
     agent_is_active: int = 0
     telemetry_valid: bool = True
@@ -221,7 +222,7 @@ class IcsEngagement:
         self._target_frame_sent = True
 
     def arm_taxi_start(self) -> None:
-        """Явный матричный старт TAXI: штатная выдержка Off → Taxi без порога скорости."""
+        """Явный старт TAXI: штатная выдержка Off → Taxi с общим порогом скорости."""
         self.state = EngagementState.IDLE
         self._forced_arm_target = ControlModeState.Taxi
         self._target_frame_sent = False
@@ -342,7 +343,22 @@ class IcsEngagement:
                 and inputs.radio_altitude_ft > self.min_radio_altitude_ft
                 and not phase_blocks_approach):
             return ControlModeState.Approach
-        if self._forced_arm_target is ControlModeState.Taxi and inputs.all_gear_on_ground:
+        # На живом стенде встречается устойчиво ошибочный NoseGearWOW=0 при неподвижном ВС:
+        # обе основные стойки обжаты, RA практически нулевая, шасси выпущено. Для ЯВНОГО
+        # ``--start taxi`` разрешаем сформировать стимул и отдать окончательное решение стенду.
+        # Автоматический переход этим не ослабляется: без явного arm по-прежнему нужны все
+        # три стойки. Ограничение RA не позволяет принять за землю раннее касание основных.
+        forced_taxi_grounded = (
+            self._forced_arm_target is ControlModeState.Taxi
+            and inputs.main_gear_on_ground
+            and inputs.radio_altitude_ft is not None
+            and inputs.radio_altitude_ft <= 1.0
+        )
+        if (
+            self._forced_arm_target is ControlModeState.Taxi
+            and (inputs.all_gear_on_ground or forced_taxi_grounded)
+            and inputs.groundspeed_kts < self.max_groundspeed_kts
+        ):
             return ControlModeState.Taxi
         if inputs.all_gear_on_ground and inputs.groundspeed_kts < self.max_groundspeed_kts:
             return ControlModeState.Taxi
@@ -463,6 +479,11 @@ class IcsEngagement:
             return (f"выдержка {self.dwell_elapsed_s():.2f} с из "
                     f"{self._required_dwell_s:.2f} требуемых")
         if not inputs.all_gear_on_ground:
+            if (
+                self._forced_arm_target is ControlModeState.Taxi
+                and not inputs.main_gear_on_ground
+            ):
+                return "явный запуск TAXI ждёт обжатия обеих основных стоек"
             ra = inputs.radio_altitude_ft
             if ra is None:
                 return ("обжаты не все стойки, а радиовысота стендом не объявлена — "

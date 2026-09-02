@@ -45,7 +45,7 @@
   "flare_max_pitch_target_deg": 6.5,
   "terminal_hold_radio_altitude_ft": 10.0,
   "terminal_guidance_cutoff_radio_altitude_ft": 5.0,
-  "terminal_hold_pitch_target_deg": 6.3,
+  "terminal_hold_pitch_target_deg": 3.0,
   "decrab_start_radio_altitude_ft": 50.0,
   "decrab_full_radio_altitude_ft": 10.0,
   "decrab_heading_gain": 0.70,

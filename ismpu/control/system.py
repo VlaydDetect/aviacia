@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from ismpu.control.pid import PIDController
 from ismpu.control.trajectory import CompletionRule, ReferenceTrajectory, VelocityLaw
 from ismpu.control.runway_tracker import RunwayTracker
-from ismpu.control.channels import ControlsState, LongitudinalChannel, LateralChannel
+from ismpu.control.channels import (
+    ControlsState, LongitudinalChannel, LongitudinalDiagnostics, LateralChannel,
+)
 from ismpu.control.ground_allocator import GroundControlAllocator
 from ismpu.control.approach import ApproachController
 from ismpu.control.approach_criteria import ApproachCriteriaMonitor
@@ -75,6 +77,14 @@ class ControllingSystem:
     наземных тестов: по кадру без пакета стенда нельзя достоверно объявить воздушный заход.
     """
 
+    ROLLOUT_CONTACT_CONFIRM_S: ClassVar[float] = 0.5
+    """Непрерывное обжатие основных стоек до включения тормозов и реверса.
+
+    Режим Rollout переключается в первом кадре касания, но удар стойки может дать короткий
+    отскок. Продольные наземные органы в этот момент должны оставаться убранными: торможение
+    свободно вращающихся колёс и выпуск реверса в воздухе только усиливают повторное касание.
+    """
+
     def __init__(
         self,
         sim: SimInterface | None = None,
@@ -119,6 +129,8 @@ class ControllingSystem:
         self.scenario: Scenario | None = None
         self.aircraft_profile_name: str | None = None
         self._configured_segment: FlightSegment | None = None
+        self._rollout_contact_guard_active: bool = False
+        self._rollout_contact_s: float = 0.0
 
     def bind_scenario(self, scenario: "Scenario", aircraft_profile: str) -> None:
         """Связать сценарий с контуром; PID активируются после определения участка."""
@@ -177,6 +189,9 @@ class ControllingSystem:
         brake_rate_per_s: float = 1.0,
         reverse_rate_per_s: float = 1.0,
         failure_yaw_compensation_gain: float = 1.0,
+        taxi_throttle_kp_per_kt: float = 0.02,
+        taxi_throttle_max_norm: float = 0.18,
+        taxi_throttle_deadband_kts: float = 0.5,
     ) -> None:
         self.pids = pids
 
@@ -189,8 +204,13 @@ class ControllingSystem:
         self.landing_committed = False
         self.tolerance_report = None
         self.ground_tolerance_report = None
+        self._rollout_contact_guard_active = False
+        self._rollout_contact_s = 0.0
         self.approach_criteria = ApproachCriteriaMonitor()
         self._violation_ticks = 0
+        self.taxi_throttle_kp_per_kt = max(0.0, taxi_throttle_kp_per_kt)
+        self.taxi_throttle_max_norm = max(0.0, min(1.0, taxi_throttle_max_norm))
+        self.taxi_throttle_deadband_kts = max(0.0, taxi_throttle_deadband_kts)
 
         tracker = RunwayTracker(lookahead_min, lookahead_gain, xte_gain)
         self.lateral_channel = LateralChannel(pids["runway_center_pid"], tracker)
@@ -546,6 +566,17 @@ class ControllingSystem:
     def _ground_step(self, dt: float) -> bool:
         """Три блока: speed controller → guidance → allocator."""
         telemetry = self.last_telemetry
+        if self._rollout_contact_guard_active:
+            if touched_down(telemetry):
+                self._rollout_contact_s += max(0.0, min(0.25, dt))
+            else:
+                self._rollout_contact_s = 0.0
+            if self._rollout_contact_s >= self.ROLLOUT_CONTACT_CONFIRM_S:
+                self._rollout_contact_guard_active = False
+            elif telemetry.valid and telemetry.groundspeed_ms is not None:
+                # Пока стойки не обжаты устойчиво, не накапливаем пройденную дистанцию и
+                # интегралы тормозов/реверса по траектории, начавшейся в ложном касании.
+                self.longitudinal_channel.begin(telemetry.groundspeed_ms)
         longitudinal = self.longitudinal_channel.compute(dt, telemetry)
         lateral = self.lateral_channel.compute(dt, telemetry)
         # Монитор читает ровно те XTE/heading/speed, по которым посчитана команда этого такта.
@@ -566,6 +597,7 @@ class ControllingSystem:
             self.state,
             telemetry,
             dt,
+            ground_contact_available=not self._rollout_contact_guard_active,
         )
         command = allocation.limited
         self.state.cmd_rudder = command.rudder
@@ -575,6 +607,10 @@ class ControllingSystem:
         self.state.cmd_brake_r = command.brake_right
         self.state.cmd_rev_l = command.reverse_left
         self.state.cmd_rev_r = command.reverse_right
+        self.state.cmd_throttle_norm = self._taxi_throttle_command(longitudinal)
+        if self.state.cmd_throttle_norm > 0.0:
+            # Прямая тяга и тормоза не должны бороться друг с другом около уставки.
+            self.state.cmd_brake_l = self.state.cmd_brake_r = 0.0
         self.state.quality_speed = (
             abs(longitudinal.error * Converts.MS_TO_KTS)
             if longitudinal.error is not None else 0.0)
@@ -585,6 +621,27 @@ class ControllingSystem:
 
         self._track_applied(dt)
         return longitudinal.stop_requested
+
+    def _taxi_throttle_command(self, longitudinal: LongitudinalDiagnostics) -> float:
+        """P-закон прямой тяги TAXI; на Rollout и без полного WOW всегда малый газ."""
+        telemetry = self.last_telemetry
+        if (
+            self.segment is not FlightSegment.TAXI
+            or telemetry is None
+            or not telemetry.valid
+            or not telemetry.weight_on_wheels
+            or not longitudinal.valid
+            or longitudinal.error is None
+        ):
+            return 0.0
+        deficit_kts = max(
+            0.0,
+            -longitudinal.error * Converts.MS_TO_KTS - self.taxi_throttle_deadband_kts,
+        )
+        return min(
+            self.taxi_throttle_max_norm,
+            self.taxi_throttle_kp_per_kt * deficit_kts,
+        )
 
     def hand_over_to_rollout(self) -> None:
         """Передать управление с посадки на пробег (`ControlMode 2 → 3`).
@@ -598,6 +655,8 @@ class ControllingSystem:
         self.segment = FlightSegment.ROLLOUT
         if self.scenario is not None:
             self.activate_segment(FlightSegment.ROLLOUT, self.last_telemetry)
+        self._rollout_contact_guard_active = True
+        self._rollout_contact_s = 0.0
         # Воздушные команды больше не выдаются — маска пробега их не заявляет, но оставлять в
         # структуре последнее отклонение элеронов значит хранить мусор в логах и в отчёте.
         self.state.neutralize_airborne()

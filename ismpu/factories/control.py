@@ -53,5 +53,8 @@ def apply_ground_control(
         brake_rate_per_s=config.brake_rate_per_s,
         reverse_rate_per_s=config.reverse_rate_per_s,
         failure_yaw_compensation_gain=config.failure_yaw_compensation_gain,
+        taxi_throttle_kp_per_kt=config.taxi_throttle_kp_per_kt,
+        taxi_throttle_max_norm=config.taxi_throttle_max_norm,
+        taxi_throttle_deadband_kts=config.taxi_throttle_deadband_kts,
     )
     return controller

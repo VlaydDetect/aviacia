@@ -250,6 +250,30 @@ def test_taxi_allocates_to_tiller_and_brakes_only():
     assert controller.state.cmd_rev_l == controller.state.cmd_rev_r == 0.0
 
 
+def test_taxi_accelerates_from_rest_with_forward_thrust_and_no_brakes():
+    controller = ControllingSystem()
+    SCENARIOS["b_1_2_taxi"].apply_control(controller, "mc21", FlightSegment.TAXI)
+    controller.segment = FlightSegment.TAXI
+    frame = _direct_ground_frame(speed_kts=0.0, xte_m=0.0)
+
+    controller.control_step(DT, frame, send=False)
+
+    assert controller.state.cmd_throttle_norm > 0.0
+    assert controller.state.cmd_throttle_norm <= controller.taxi_throttle_max_norm
+    assert controller.state.cmd_brake_l == controller.state.cmd_brake_r == 0.0
+    assert controller.state.cmd_rev_l == controller.state.cmd_rev_r == 0.0
+
+
+def test_rollout_never_requests_forward_thrust():
+    controller = ControllingSystem()
+    SCENARIOS["default"].apply_control(controller, "mc21", FlightSegment.ROLLOUT)
+    controller.segment = FlightSegment.ROLLOUT
+
+    controller.control_step(DT, _direct_ground_frame(speed_kts=0.0), send=False)
+
+    assert controller.state.cmd_throttle_norm == 0.0
+
+
 def test_bench_taxi_phase_starts_directly_in_taxi():
     frame = Telemetry.from_ics(engaged_inputs(
         FlightPhase=int(FlightPhase.TAXI_IN), GroundSpeed=15.0))
@@ -307,6 +331,35 @@ def test_runtime_requests_taxi_only_for_handover_completion(
 
     assert result.reason is RunStopReason.COMPLETED
     assert controller.hand_over_to_taxi.call_count == taxi_requests
+
+
+def test_runtime_keeps_controlling_after_rollout_to_taxi_handover(monkeypatch):
+    controller = MagicMock()
+    controller.segment = FlightSegment.ROLLOUT
+    controller.go_around_reason = None
+    controller.abort_reason = None
+    controller.tick_id = 1
+    controller.begin_flight.return_value = FlightSegment.ROLLOUT
+    controller.control_step.side_effect = (True, KeyboardInterrupt())
+    controller.longitudinal_channel.trajectory.completion_rule = CompletionRule.HANDOVER_TAXI
+
+    def hand_over():
+        controller.segment = FlightSegment.TAXI
+        controller.longitudinal_channel.trajectory.completion_rule = CompletionRule.OPERATOR
+        return True
+
+    controller.hand_over_to_taxi.side_effect = hand_over
+    sim = MagicMock()
+    sim.reset.return_value = _direct_ground_frame(speed_kts=7.5)
+    sim.read_telemetry.return_value = sim.reset.return_value
+    ticks = iter((0.0, 0.0, 0.0, DT, DT * 2))
+    monkeypatch.setattr("ismpu.runtime.loop.time.monotonic", lambda: next(ticks))
+
+    result = run(controller, sim, SCENARIOS["default"])
+
+    assert result.reason is RunStopReason.OPERATOR_COMPLETED
+    assert controller.control_step.call_count == 2
+    assert controller.segment is FlightSegment.TAXI
 
 
 def test_operator_ends_matrix_taxi_as_completed(monkeypatch):

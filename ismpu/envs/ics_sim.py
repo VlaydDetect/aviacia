@@ -29,7 +29,8 @@ from ismpu.io.ics_connector import (
 )
 from ismpu.io.ics_engagement import IcsEngagement, EngagementInputs
 from ismpu.config.ics import (
-    BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_RATE_MAX_DEG_S,
+    BRAKE_CMD_MAX_MM, THROTTLE_ANGLE_MIN_DEG, THROTTLE_FORWARD_MAX_DEG,
+    THROTTLE_RATE_MAX_DEG_S,
     REVERSE_THROTTLE_GAIN_PER_S, TILLER_MAX_MM, RUDDER_MAX_DEG, RUDDER_PEDAL_MAX_MM,
     AILERON_MAX_DEG, ROLLOUT_CONTROL_MASK, TAXI_CONTROL_MASK, AIRBORNE_CONTROL_MASK, FlightPhase,
     FLARE_MODE_RADIO_ALTITUDE_FT, FLARE_MODE_END_RADIO_ALTITUDE_FT,
@@ -71,6 +72,13 @@ def _throttle_rate(reverse_level: float, actual_angle_deg: float) -> float:
     уходит скорость, которой фактический угол к этой цели ведут.
     """
     target = -reverse_level * THROTTLE_ANGLE_MIN_DEG        # [-1,0] → [−26.5°, 0°]
+    rate = REVERSE_THROTTLE_GAIN_PER_S * (target - actual_angle_deg)
+    return _clamp(rate, -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
+
+
+def _forward_throttle_rate(throttle_norm: float, actual_angle_deg: float) -> float:
+    """Нормированная прямая тяга TAXI → скорость перекладки РУД к целевому углу."""
+    target = _clamp(throttle_norm, 0.0, 1.0) * THROTTLE_FORWARD_MAX_DEG
     rate = REVERSE_THROTTLE_GAIN_PER_S * (target - actual_angle_deg)
     return _clamp(rate, -THROTTLE_RATE_MAX_DEG_S, THROTTLE_RATE_MAX_DEG_S)
 
@@ -771,6 +779,7 @@ class ICSSim(SimInterface):
                                     telemetry_valid=False)
         return EngagementInputs(
             all_gear_on_ground=bool(telemetry.weight_on_wheels),
+            main_gear_on_ground=bool(telemetry.main_gear_contact),
             groundspeed_kts=(telemetry.groundspeed_ms or 0.0) * Converts.MS_TO_KTS,
             flight_phase=telemetry.flight_phase,
             agent_is_active=1 if telemetry.agent_is_active else 0,
@@ -910,19 +919,31 @@ class ICSSim(SimInterface):
             out.RudderCmd = command.cmd_rudder * RUDDER_MAX_DEG
             out.RudderPedalCmd = command.cmd_pedal * RUDDER_PEDAL_MAX_MM
 
+        angle_l = self._throttle_angle(left=True)
+        angle_r = self._throttle_angle(left=False)
+        if taxi:
+            # На рулении тот же документированный канал скорости РУД задаёт прямую тягу.
+            out.ThrottleLeftRate = _forward_throttle_rate(command.cmd_throttle_norm, angle_l)
+            out.ThrottleRightRate = _forward_throttle_rate(command.cmd_throttle_norm, angle_r)
+            # Маска абсолютное положение не заявляет; дублируем согласованную уставку для сборок,
+            # которые маску игнорируют, как это уже делается на воздушном участке.
+            out.ThrottleLeft = command.cmd_throttle_norm
+            out.ThrottleRight = command.cmd_throttle_norm
+            out.ReverseLeftCmd = out.ReverseRightCmd = ReverseEngineType.Off
+            return
+
         # Реверс: команда [-1, 0] — это желаемый уровень обратной тяги. Задаётся он **скоростью**
         # перемещения РУД (единственный документированный канал управления тягой), а не записью
         # абсолютного угла: позиционный контур ведёт фактический РУД к цели, `ReverseXCmd`
         # открывает створки.
-        angle_l = self._throttle_angle(left=True)
-        angle_r = self._throttle_angle(left=False)
         out.ThrottleLeftRate = _throttle_rate(command.cmd_rev_l, angle_l)
         out.ThrottleRightRate = _throttle_rate(command.cmd_rev_r, angle_r)
-        # out.ReverseLeftCmd = (ReverseEngineType.Deploy if command.cmd_rev_l < 0
-        #                       else ReverseEngineType.Off)
-        # out.ReverseRightCmd = (ReverseEngineType.Deploy if command.cmd_rev_r < 0
-        #                        else ReverseEngineType.Off)
-        out.ReverseLeftCmd = out.ReverseRightCmd = ReverseEngineType.Deploy
+        out.ReverseLeftCmd = (
+            ReverseEngineType.Deploy if command.cmd_rev_l < 0.0 else ReverseEngineType.Off
+        )
+        out.ReverseRightCmd = (
+            ReverseEngineType.Deploy if command.cmd_rev_r < 0.0 else ReverseEngineType.Off
+        )
 
     def _throttle_angle(self, *, left: bool) -> float:
         """Фактический угол РУД из последнего кадра стенда; 0 при отсутствии кадра.

@@ -123,6 +123,36 @@ def test_report_exposes_go_around_command_to_feedback_metrics(tmp_path):
     }
 
 
+def test_report_flags_a_brake_command_without_feedback_response(tmp_path):
+    scenario = Scenario.from_preset("default")
+    controller = ControllingSystem()
+    controller.bind_scenario(scenario, "mc21")
+    first = _frame(110.0)
+    controller.begin_flight(first)
+    recorder = RunRecorder(
+        root=tmp_path, backend="ics", aircraft_profile="mc21",
+        scenario=scenario, start="rollout",
+    )
+    for index in range(1, 4):
+        frame = _frame(110.0 - index)
+        controller.control_step(0.05, frame, send=False)
+        controller.state.cmd_brake_l = controller.state.cmd_brake_r = 0.2
+        recorder.record(frame, controller, elapsed_s=index * 0.05)
+    recorder.finish({"stop_reason": "completed", "conditions_valid": True})
+
+    response = json.loads(
+        (recorder.directory / "report.json").read_text(encoding="utf-8")
+    )["metrics"]["brake_feedback_response"]
+    assert response == {
+        "status": "UNRESPONSIVE",
+        "commanded_samples": 3,
+        "response_samples": 0,
+        "max_command_norm": pytest.approx(0.2),
+        "max_command_mm": pytest.approx(9.0),
+        "max_feedback_mm": pytest.approx(0.0),
+    }
+
+
 def test_legacy_adapter_does_not_invent_missing_pid_terms(tmp_path):
     path = tmp_path / "working.csv"
     path.write_text(

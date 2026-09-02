@@ -57,6 +57,9 @@ class GroundControlConfig:
     brake_rate_per_s: float = 1.0
     reverse_rate_per_s: float = 1.0
     failure_yaw_compensation_gain: float = 1.0
+    taxi_throttle_kp_per_kt: float = 0.02
+    taxi_throttle_max_norm: float = 0.18
+    taxi_throttle_deadband_kts: float = 0.5
 
     def build_pids(self) -> dict[str, "PIDController"]:
         """Создать новые stateful PID из immutable словарей конфигурации."""
@@ -94,6 +97,9 @@ class _GroundPresetSpec:
     brake_rate_per_s: float = 1.0
     reverse_rate_per_s: float = 1.0
     failure_yaw_compensation_gain: float = 1.0
+    taxi_throttle_kp_per_kt: float = 0.02
+    taxi_throttle_max_norm: float = 0.18
+    taxi_throttle_deadband_kts: float = 0.5
     matrix_code: str = ""
     """Шифр матрицы прогонов (`config.run_matrix`), если пресет заведён под неё."""
 
@@ -112,6 +118,9 @@ class _GroundPresetSpec:
             brake_rate_per_s=self.brake_rate_per_s,
             reverse_rate_per_s=self.reverse_rate_per_s,
             failure_yaw_compensation_gain=self.failure_yaw_compensation_gain,
+            taxi_throttle_kp_per_kt=self.taxi_throttle_kp_per_kt,
+            taxi_throttle_max_norm=self.taxi_throttle_max_norm,
+            taxi_throttle_deadband_kts=self.taxi_throttle_deadband_kts,
         )
 
 

@@ -181,7 +181,7 @@ def test_no_stimulus_above_the_speed_threshold():
     assert eng.state is EngagementState.IDLE
 
 
-def test_explicit_matrix_taxi_start_keeps_the_dwell_at_15_knots():
+def test_explicit_taxi_start_obeys_the_two_knot_ground_limit():
     clock = _Clock()
     eng = _engine(clock)
     inputs = _ready(groundspeed_kts=15.0)
@@ -189,8 +189,70 @@ def test_explicit_matrix_taxi_start_keeps_the_dwell_at_15_knots():
     eng.arm_taxi_start()
     _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
 
+    assert eng.state is EngagementState.IDLE
+
+    inputs = _ready(groundspeed_kts=0.0)
+    _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
+
     assert eng.state is EngagementState.COMMAND_TAXI
     assert eng.control_mode is ControlModeState.Taxi
+
+
+def test_explicit_taxi_start_tolerates_false_nose_wow_at_rest():
+    """Явный стендовый TAXI может начать handshake при ложном NoseGearWOW=0.
+
+    Обход узкий: нужны обе основные стойки, RA не выше 1 ft и скорость ниже 2 kt.
+    Фактическое принятие перехода 0→4 всё равно подтверждает сам стенд AgentIsActive.
+    """
+    clock = _Clock()
+    eng = _engine(clock)
+    eng.arm_taxi_start()
+    inputs = _ready(
+        all_gear_on_ground=False,
+        main_gear_on_ground=True,
+        radio_altitude_ft=0.1,
+        groundspeed_kts=0.01,
+    )
+
+    _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
+
+    assert eng.state is EngagementState.COMMAND_TAXI
+    assert eng.control_mode is ControlModeState.Taxi
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"main_gear_on_ground": False, "radio_altitude_ft": 0.1},
+        {"main_gear_on_ground": True, "radio_altitude_ft": 1.1},
+        {"main_gear_on_ground": True, "radio_altitude_ft": 0.1,
+         "groundspeed_kts": ENGAGE_MAX_GROUNDSPEED_KTS + 0.1},
+    ),
+)
+def test_explicit_taxi_nose_wow_fallback_keeps_ground_safety_guards(overrides):
+    clock = _Clock()
+    eng = _engine(clock)
+    eng.arm_taxi_start()
+    inputs = _ready(all_gear_on_ground=False, **overrides)
+
+    _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
+
+    assert eng.state is EngagementState.IDLE
+
+
+def test_automatic_taxi_start_still_requires_all_three_wow():
+    clock = _Clock()
+    eng = _engine(clock)
+    inputs = _ready(
+        all_gear_on_ground=False,
+        main_gear_on_ground=True,
+        radio_altitude_ft=0.1,
+        groundspeed_kts=0.01,
+    )
+
+    _pump(eng, clock, inputs, ticks=TICKS_FOR_DWELL + 5)
+
+    assert eng.state is EngagementState.IDLE
 
 
 def test_speed_threshold_is_interpreted_in_knots():
